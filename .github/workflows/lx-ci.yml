@@ -6,8 +6,9 @@ name: lx-ci
 #   * Doc-only commits (md/docs/SPECS/LICENSE) skip CI entirely (paths-ignore).
 #   * push / pull_request → only the cheap jobs:
 #       - `lint`        : go vet (lx packages) + gofmt on lx-owned files
-#       - `build-check` : one native build (with_xhttp,with_awg) + sing-box check,
-#                         plus a tagless baseline build for the negative check.
+#       - `build-check` : LX unit tests, one native build (with_xhttp,with_awg) +
+#                         sing-box check, plus a tagless baseline build for the
+#                         negative check.
 #   * `cross` (6 platforms) and `android` (gomobile AAR) are HEAVY → they run only
 #     on a manual `workflow_dispatch` (Actions → lx-ci → Run workflow, or
 #     `gh workflow run lx-ci.yml --ref lx`). They are NEVER on push.
@@ -81,7 +82,7 @@ jobs:
           echo "OK: lx files are gofmt-clean"
 
   build-check:
-    name: build-check (native build + check + negative)
+    name: build-check (test + native build + check + negative)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +91,14 @@ jobs:
           fetch-depth: 0            # tags for the -lx version (git describe)
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod, check-latest: true }
+
+      - name: Test LX packages (full tags)
+        run: |
+          go test -count=1 \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            -ldflags "-checklinkname=0" \
+            ./option/ ./common/tls/ ./transport/v2rayxhttp/ \
+            ./protocol/wireguard/ ./transport/wireguard/
 
       - name: Build (full lx — with_xhttp,with_awg,with_lx_command)
         run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS},with_xhttp,with_awg,with_lx_command"
@@ -102,6 +111,7 @@ jobs:
           ./sing-box check -c lx-test/config/xhttp_reality.json
           ./sing-box check -c lx-test/config/awg2_basic.json
           ./sing-box check -c lx-test/config/awg2_ranged.json
+          ./sing-box check -c lx-test/config/tarn_client_raw_dns.json
 
       - name: Build baseline (no lx features) for the negative check
         run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS}" LX_OUTPUT=sing-box-baseline

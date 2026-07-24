@@ -24,7 +24,44 @@ permissions:
 # for the release notes so nothing is duplicated here.
 
 jobs:
+  preflight:
+    name: release guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Reject tracked signing keystores
+        shell: bash
+        run: |
+          set -euo pipefail
+          disallowed=()
+          while IFS= read -r path; do
+            case "$path" in
+              # Upstream Termux fixture; its name and location make clear that it
+              # is an intentionally untrusted test key, not a release credential.
+              clients/android/third_party/termux-app/app/testkey_untrusted.jks)
+                echo "Ignoring known upstream test fixture: $path"
+                ;;
+              *)
+                disallowed+=("$path")
+                ;;
+            esac
+          done < <(git ls-files --recurse-submodules | grep -E -i '\.(jks|keystore|p12|pfx)$' || true)
+
+          if ((${#disallowed[@]})); then
+            echo "::error title=Tracked signing material::Refusing to build a release with tracked signing keystores."
+            printf 'Remove these files from version control and keep release credentials in GitHub Secrets instead:\n'
+            printf '  %s\n' "${disallowed[@]}"
+            exit 1
+          fi
+
+          echo "OK: no tracked signing keystores"
+
   build:
+    needs: preflight
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
@@ -158,6 +195,7 @@ jobs:
   # amd64 is a CGO cross-compile on the same arm64 runner (clang -arch), as
   # upstream does. See SPECS/004 §2.4.
   build_darwin:
+    needs: preflight
     name: build darwin/${{ matrix.arch }} (cgo naive)
     runs-on: macos-latest
     strategy:
@@ -235,6 +273,7 @@ jobs:
   # `with_musl` — libcronet.a is linked statically and naive is preserved.
   # See SPECS/006.
   build_linux_musl:
+    needs: preflight
     name: build linux-musl/${{ matrix.asset }}
     runs-on: ubuntu-latest
     strategy:
@@ -396,6 +435,7 @@ jobs:
           if-no-files-found: error
 
   build_android:
+    needs: preflight
     name: build android (libbox.aar)
     runs-on: ubuntu-latest
     steps:
@@ -450,7 +490,7 @@ jobs:
 
   release:
     name: publish release
-    needs: [build, build_darwin, build_linux_musl, build_android]
+    needs: [preflight, build, build_darwin, build_linux_musl, build_android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
