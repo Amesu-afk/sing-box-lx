@@ -42,9 +42,10 @@ func newHeaderSessionClient(path string) *Client {
 }
 
 // TestRequestURLPaths locks the default (path-placement) URL layout. The stream-one
-// fix is the empty-sessionId case: it must yield "<path>" with NO trailing slash and
-// NO sessionId, because Xray's splithttp server routes to the bidirectional
-// stream-one handler only on an empty sessionId. stream-up/packet-up keep the
+// case is the empty-sessionId case: it must yield "<path>/" (a trailing slash, no
+// sessionId), because Xray's splithttp server matches its trailing-slash-normalised
+// path as a prefix and routes the bidirectional stream-one handler on an empty first
+// segment — a bare "<path>" 404s (observed live). stream-up/packet-up keep the
 // sessionId (and seq) path segments, in that order.
 func TestRequestURLPaths(t *testing.T) {
 	c := newPathClient()
@@ -55,7 +56,7 @@ func TestRequestURLPaths(t *testing.T) {
 		seqStr    string
 		want      string
 	}{
-		{"stream-one bare path (no sessionId)", "", "", "/xhttp"},
+		{"stream-one trailing-slash path (no sessionId)", "", "", "/xhttp/"},
 		{"stream-up/packet-up download (sessionId)", "sid123", "", "/xhttp/sid123"},
 		{"packet-up upload (sessionId + seq)", "sid123", "7", "/xhttp/sid123/7"},
 	}
@@ -77,7 +78,8 @@ func TestRequestURLPaths(t *testing.T) {
 // path must reach the wire exactly as configured, trailing slash included. A bare
 // "/upload" makes an nginx `location /upload/ {}` reply 301, and our download
 // RoundTrip does not follow redirects, so the slash must survive. stream-one (empty
-// sessionId) is the sole exception: its bare path is trimmed regardless.
+// sessionId) also targets "<path>/": the bare form 404s against a trailing-slash
+// server (observed live), and the slash is accepted either way.
 func TestTrailingSlashPreservedOffPath(t *testing.T) {
 	c := newHeaderSessionClient("/upload/")
 
@@ -89,7 +91,7 @@ func TestTrailingSlashPreservedOffPath(t *testing.T) {
 	}{
 		{"download keeps trailing slash (session in header)", "sid123", "", "/upload/"},
 		{"upload keeps trailing slash (session in header, seq in query)", "sid123", "7", "/upload/"},
-		{"stream-one still trims to bare path", "", "", "/upload"},
+		{"stream-one keeps trailing slash", "", "", "/upload/"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

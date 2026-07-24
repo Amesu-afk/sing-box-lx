@@ -290,14 +290,18 @@ func (c *Client) applyMeta(request *http.Request, basePath, sessionID, seqStr st
 	m := &c.meta
 	path := basePath
 
-	// session id — an empty sessionID (stream-one) emits nothing and the request
-	// targets the BARE path: Xray's splithttp server keys the bidirectional
-	// stream-one branch on an exact bare path, so any trailing slash is trimmed
-	// here (and only here). Every other mode keeps the configured path verbatim,
-	// including a trailing slash, so proxy routing (e.g. nginx `location /x/ {}`)
-	// matches without a 301 (lx: SPEC 002).
+	// session id — an empty sessionID (stream-one) emits no session segment and the
+	// request targets "<path>/" (guaranteed trailing slash). Xray's splithttp server
+	// normalises its configured path WITH a trailing slash and matches it as a
+	// prefix, so a bare "<path>" fails that prefix check and the server returns 404
+	// (observed live: REALITY dials 404 on the bare form). "<path>/" passes and
+	// leaves an empty first segment after the prefix — which is how the server
+	// recognises the bidirectional stream-one branch — and it is also accepted by a
+	// server whose path has no trailing slash, so it is the robust form (lx: SPEC
+	// 011/002). Every other mode keeps the configured path verbatim (trailing slash
+	// included) so reverse-proxy routing (nginx `location /x/ {}`) matches without a 301.
 	if sessionID == "" {
-		path = trimBarePathSlash(path)
+		path = ensureStreamOneSlash(path)
 	} else {
 		switch m.sessionPlacement {
 		case placementPath:
@@ -374,16 +378,22 @@ func chunkEncoded(payload []byte, size intRange) []string {
 // timeNow is a small indirection over time.Now to keep the throttle logic testable.
 func timeNow() time.Time { return time.Now() }
 
-// trimBarePathSlash strips trailing slashes for the stream-one bare-path case,
-// while never collapsing the root path to "" (a root-only path stays "/"). Used
+// ensureStreamOneSlash guarantees exactly one trailing slash on the stream-one
+// (empty sessionId) path, so the request targets "<path>/". Xray's splithttp
+// server matches its trailing-slash-normalised path as a prefix, so a bare
+// "<path>" 404s while "<path>/" passes and leaves an empty first segment (empty
+// sessionId → stream-one). It is also accepted by a server whose configured path
+// carries no trailing slash, making it the robust form. Root "/" stays "/". Used
 // only when no sessionId is appended, so it cannot affect proxy routing for the
 // other modes, which keep the configured path verbatim.
-func trimBarePathSlash(path string) string {
-	trimmed := strings.TrimRight(path, "/")
-	if trimmed == "" {
+func ensureStreamOneSlash(path string) string {
+	if path == "" {
 		return "/"
 	}
-	return trimmed
+	if strings.HasSuffix(path, "/") {
+		return path
+	}
+	return path + "/"
 }
 
 // appendPathSegment joins a "/"-separated segment onto a path, inserting exactly one
