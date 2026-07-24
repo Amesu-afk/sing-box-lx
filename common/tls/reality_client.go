@@ -28,6 +28,7 @@ import (
 	"unsafe"
 
 	"github.com/sagernet/sing-box/adapter"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -132,6 +133,18 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+	// lx: REALITY builds its uTLS connection straight on the socket, so it never passed
+	// through UTLSClientConfig.Client() where the fragmenter is installed — which meant the
+	// TLS-fragmentation setting was silently inert on the one transport people actually use
+	// against DPI. Install it here on the same terms.
+	//
+	// Safe with respect to REALITY's own checks: tlsfragment.Conn overrides Write only (reads
+	// pass through the embedded conn, ReaderReplaceable reports true), and packet splitting
+	// does not alter a byte of the ClientHello — only how it is spread across segments — so
+	// the HMAC REALITY embeds in the session id still covers the same content.
+	if e.uClient.fragment || e.uClient.recordFragment {
+		conn = tf.NewConn(conn, ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
+	}
 	verifier := &realityVerifier{
 		serverName: e.uClient.ServerName(),
 	}
@@ -183,9 +196,23 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 	binary.BigEndian.PutUint64(hello.SessionId, uint64(nowTime.Unix()))
 
-	hello.SessionId[0] = 1
-	hello.SessionId[1] = 8
-	hello.SessionId[2] = 1
+	// lx:begin reality-client-version
+	// The REALITY server compares these three bytes against its configured
+	// minClientVer/maxClientVer and, when the client looks too old, silently
+	// forwards the connection to the decoy site instead of authenticating it —
+	// the client then only sees "reality verification failed" with no hint why.
+	//
+	// Upstream advertises 1.8.1, which is below the minClientVer that current
+	// Xray deployments set (3x-ui exposes the field and panels increasingly
+	// populate it), so those servers reject sing-box outright while Xray-based
+	// clients get through. Advertise a current version instead; the value is
+	// informational for the server and carries no protocol semantics.
+	// Verified against a live Xray 26.7.11 + 3x-ui server with minClientVer
+	// 26.3.27: 25.9.11 is rejected, 26.3.27 and later authenticate.
+	hello.SessionId[0] = 26
+	hello.SessionId[1] = 7
+	hello.SessionId[2] = 11
+	// lx:end reality-client-version
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
 	if debug.Enabled {
