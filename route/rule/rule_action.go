@@ -105,6 +105,8 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 		sniffAction := &RuleActionSniff{
 			SnifferNames: action.SniffOptions.Sniffer,
 			Timeout:      time.Duration(action.SniffOptions.Timeout),
+			// lx: see option.RouteActionSniff.OverrideDestination.
+			OverrideDestination: action.SniffOptions.OverrideDestination,
 		}
 		return sniffAction, sniffAction.build()
 	case C.RuleActionTypeResolve:
@@ -491,7 +493,8 @@ type RuleActionSniff struct {
 	StreamSniffers []sniff.StreamSniffer
 	PacketSniffers []sniff.PacketSniffer
 	Timeout        time.Duration
-	// Deprecated
+	// lx: no longer deprecated — reachable again as `override_destination` on the sniff
+	// action, see option.RouteActionSniff.
 	OverrideDestination bool
 }
 
