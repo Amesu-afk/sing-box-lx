@@ -324,6 +324,16 @@ func (r *RejectActionOptions) UnmarshalJSON(bytes []byte) error {
 type RouteActionSniff struct {
 	Sniffer badoption.Listable[string] `json:"sniffer,omitempty" enum:"tls,http,quic,dns,stun,bittorrent,dtls,ssh,rdp,ntp"`
 	Timeout badoption.Duration         `json:"timeout,omitempty"`
+	// OverrideDestination replaces the connection's destination with the sniffed domain, so an
+	// outbound sends the hostname upstream instead of the address the client had already
+	// resolved. Xray does this by default, which is why v2rayNG lets its server pick the
+	// endpoint while sing-box hands over whatever the phone resolved.
+	//
+	// lx: the behaviour already existed — route.go honours RuleActionSniff.OverrideDestination
+	// in all three sniff paths — but 1.14 left it reachable only through the removed
+	// `sniff_override_destination` inbound option, so no new-format config could ask for it.
+	// This exposes it on the action where the rest of the sniff options live.
+	OverrideDestination bool `json:"override_destination,omitempty"`
 }
 
 type RouteActionResolve struct {
