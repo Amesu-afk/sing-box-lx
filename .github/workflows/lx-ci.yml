@@ -100,6 +100,19 @@ jobs:
             ./option/ ./common/tls/ ./transport/v2rayxhttp/ \
             ./protocol/wireguard/ ./transport/wireguard/
 
+      # The XHTTP client is the one lx package built around concurrent state: the pool
+      # swaps members under atomic.Pointer while dials hold their own reference, the
+      # handshake guard races a timer against RoundTrip, and the stream conn hands the
+      # reader over between goroutines. A data race there is a heisenbug on someone's
+      # phone, so it is worth the extra minute here — this is also the only place it
+      # can run, since -race needs cgo and the usual dev box is Windows without gcc.
+      - name: Race-test XHTTP client
+        run: |
+          CGO_ENABLED=1 go test -count=1 -race \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            -ldflags "-checklinkname=0" \
+            ./transport/v2rayxhttp/
+
       - name: Build (full lx — with_xhttp,with_awg,with_lx_command)
         run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS},with_xhttp,with_awg,with_lx_command"
 
