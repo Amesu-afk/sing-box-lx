@@ -2,13 +2,21 @@
 
 # sing-box-lx
 
+> ⚠️ **This is not the original — it is a downstream copy of
+> [Leadaxe/sing-box-lx](https://github.com/Leadaxe/sing-box-lx), whose author wrote the `lx` layer
+> described below.** For the real project, its issues and its releases, go there.
+>
+> This copy exists for one reason: **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** ships a
+> `libbox.aar` built from it, with a small number of extra patches on top (`git log --author=vanek`
+> — XHTTP transport pool carried onto lx.15, TLS fragmentation over REALITY, `override_destination`
+> on the sniff action, the stream-one path fix), and GPLv3 requires the source of what is actually
+> distributed. The Android app itself lives in `clients/android` as a submodule.
+
 > **A thin downstream fork of [SagerNet/sing-box](https://github.com/SagerNet/sing-box).**
 > A small set of client-side features on top of upstream — **XHTTP**, **AmneziaWG 2.0**, **MASQUE** (CONNECT-IP / Cloudflare WARP), plus an **observability layer** (CommandClient extensions) and **round_robin load balancing** — each behind its own build tag.
 > The set may grow; the philosophy doesn't: live by rebasing onto every upstream tag, not by drifting into a separate life.
 
 > 📄 The upstream sing-box README — **[on GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md)** (always current).
-
-> 📱 **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** — the Android client built on this fork; the `libbox.aar` inside its releases is produced from here, so this repository is the corresponding source GPLv3 requires for it. The Android app lives in `clients/android` as a submodule.
 
 This is not a separate project and not an "improved sing-box". It is upstream sing-box **plus a few features**, implemented so they can be carried onto new sing-box versions for years with almost no conflicts. More features may land over time — other protocols, new capabilities — but every one of them must live by the same thin-fork rules ([CONSTITUTION](SPECS/CONSTITUTION.md)).
 
