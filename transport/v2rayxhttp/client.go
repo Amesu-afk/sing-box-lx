@@ -139,11 +139,34 @@ func (t *poolTransport) CloseIdleConnections() {
 // transportSlot holds one pool member behind an atomically swappable pointer, so
 // a member whose connection has gone stale can be replaced without disturbing an
 // in-flight dial that already captured the old transport.
+//
+// inflight counts the proxied connections currently leased to this slot — not the
+// dials it has served. That distinction is the whole point: dials are short, the
+// streams they open are not, and it is the live stream count that decides how much
+// a member's single TCP connection has to carry (see [Client.acquireSlot]).
 type transportSlot struct {
-	ptr atomic.Pointer[poolTransport]
+	ptr      atomic.Pointer[poolTransport]
+	inflight atomic.Int64
 }
 
 func (s *transportSlot) get() *poolTransport { return s.ptr.Load() }
+
+// slotLease is one dial's claim on a pool member: the transport every request of
+// that dial must use, plus the release that hands the capacity back when the
+// proxied connection ends. Every conn type owns its lease and releases it exactly
+// once from Close.
+type slotLease struct {
+	slot *transportSlot
+	rt   *poolTransport
+	once sync.Once
+}
+
+func (l *slotLease) release() {
+	if l == nil {
+		return
+	}
+	l.once.Do(func() { l.slot.inflight.Add(-1) })
+}
 
 type Client struct {
 	ctx        context.Context
@@ -330,15 +353,41 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// pickSlot hands out pool members round-robin. All requests belonging to one dial
-// must share the member they were opened with: the upload and download halves of
-// stream-up/packet-up are paired by session id, and keeping them on a single
-// connection preserves their ordering. Callers capture the *transport* the dial
-// landed on (slot.get()) and reuse that, not the slot, so a concurrent refresh
-// never splits a dial's halves across two connections.
-func (c *Client) pickSlot() *transportSlot {
-	n := c.slotIdx.Add(1) - 1
-	return c.slots[n%uint64(len(c.slots))]
+// acquireSlot leases the least-loaded pool member to one dial, counting the lease
+// against that member until the proxied connection closes.
+//
+// Round-robin — what this replaces — balances *dials*, which is not the quantity
+// that hurts. A dial is over in one round trip; the stream it opens can live for
+// the whole session, and it is streams that a member's single TCP connection has
+// to carry (a probe took 0.4s with 10 held streams, 2.6s with 50). A short-video
+// feed opens and drops connections constantly with a handful outliving the rest,
+// so an even split of dials drifts into a very uneven split of live streams: the
+// member that happened to collect the long ones keeps being handed more, and its
+// connection is where every new dial then queues, stalls behind TCP head-of-line
+// blocking, and eventually trips the handshake budget.
+//
+// The scan is over 8 slots and stops at the first empty one, so it costs less
+// than the atomic increment it replaces. Ties break at a rotating offset, which
+// keeps the all-equal case (an idle pool) exactly round-robin.
+//
+// All requests belonging to one dial must share the member they were opened with:
+// the upload and download halves of stream-up/packet-up are paired by session id,
+// and keeping them on a single connection preserves their ordering. That is why
+// the lease captures the *transport*, not the slot — a concurrent refresh must
+// never split a dial's halves across two connections.
+func (c *Client) acquireSlot() *slotLease {
+	start := c.slotIdx.Add(1) - 1
+	size := uint64(len(c.slots))
+	best := c.slots[start%size]
+	bestLoad := best.inflight.Load()
+	for i := uint64(1); i < size && bestLoad > 0; i++ {
+		candidate := c.slots[(start+i)%size]
+		if load := candidate.inflight.Load(); load < bestLoad {
+			best, bestLoad = candidate, load
+		}
+	}
+	best.inflight.Add(1)
+	return &slotLease{slot: best, rt: best.get()}
 }
 
 // refreshAllSlots swaps every pool member for a fresh transport, dropping the
