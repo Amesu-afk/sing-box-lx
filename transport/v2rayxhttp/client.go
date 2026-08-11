@@ -28,7 +28,9 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
@@ -61,6 +63,11 @@ var _ adapter.V2RayClientTransport = (*Client)(nil)
 // Spreading dials round-robin keeps each connection's stream count low.
 const transportPoolSize = 8
 
+// slotRefreshDebounce collapses a burst of handshake timeouts (every initial
+// dial of a page hits the same stale pool at once, right after the radio wakes)
+// into a single pool refresh.
+const slotRefreshDebounce = 3 * time.Second
+
 // No per-connection health check (http2.Transport ReadIdleTimeout/PingTimeout)
 // is configured here, on purpose. That probe is whole-ClientConn: when a PONG
 // misses its window the transport tears the connection down and aborts EVERY
@@ -69,17 +76,38 @@ const transportPoolSize = 8
 // timeout — trivially caused on mobile by a PONG queued behind another member
 // saturating the shared radio — kills a whole batch of live, merely-idle
 // streams (messenger push sockets, keep-alives) at once, which the user sees as
-// apps freezing and reconnecting. Reaping a genuinely dead idle download stream
-// belongs at per-stream granularity (a relay idle read deadline), not at
-// connection granularity; until that exists we prefer no reaping over
-// collateral teardowns of healthy connections.
+// apps freezing and reconnecting.
+//
+// Instead, staleness is reaped at DIAL granularity: a new dial bounds the time
+// until its first response header (handshakeRoundTrip). A miss means the pooled
+// connection is dead — the classic post-idle zombie, where the phone slept, NAT
+// dropped the silent TCP connections, and nothing tore them down. On a miss the
+// whole pool is swapped for fresh transports (refreshAllSlots). Crucially the
+// swap only redirects NEW dials; goroutines already relaying over a member keep
+// their own reference, so a false positive costs a few extra connections, never
+// a healthy-stream teardown. That is the property the per-conn ping lacked.
+
+// transportSlot holds one pool member behind an atomically swappable pointer, so
+// a member whose connection has gone stale can be replaced without disturbing an
+// in-flight dial that already captured the old transport.
+type transportSlot struct {
+	ptr atomic.Pointer[http2.Transport]
+}
+
+func (s *transportSlot) get() *http2.Transport { return s.ptr.Load() }
 
 type Client struct {
-	ctx          context.Context
-	dialer       N.Dialer
-	serverAddr   M.Socksaddr
-	transports   []http.RoundTripper
-	transportIdx atomic.Uint64
+	ctx        context.Context
+	dialer     N.Dialer
+	serverAddr M.Socksaddr
+	// newTransport builds a fresh HTTP/2 transport (and therefore a fresh
+	// underlying TLS/REALITY connection on first use). Held so a stale slot can
+	// be swapped for a live one.
+	newTransport func() *http2.Transport
+	slots        []*transportSlot
+	slotIdx      atomic.Uint64
+	refreshMu    sync.Mutex
+	lastRefresh  time.Time
 	scheme       string
 	host         string
 	path         string
@@ -140,22 +168,23 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 
 	// Build a pool of independent transports. They are identical in behaviour;
 	// keeping them separate is what forces separate TLS connections, since a
-	// single http2.Transport happily multiplexes every stream onto one.
+	// single http2.Transport happily multiplexes every stream onto one. The
+	// factory is retained so a stale member can be rebuilt in place.
 	var (
-		transports = make([]http.RoundTripper, 0, transportPoolSize)
-		scheme     string
+		scheme       string
+		newTransport func() *http2.Transport
 	)
 	if tlsConfig == nil {
 		scheme = "http"
 		// Plaintext h2c: speak HTTP/2 over a cleartext TCP conn so the same
 		// streaming request/response body machinery works without TLS.
-		for i := 0; i < transportPoolSize; i++ {
-			transports = append(transports, &http2.Transport{
+		newTransport = func() *http2.Transport {
+			return &http2.Transport{
 				AllowHTTP: true,
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
 					return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
 				},
-			})
+			}
 		}
 	} else {
 		scheme = "https"
@@ -163,13 +192,19 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
 		}
 		tlsDialer := tls.NewDialer(dialer, tlsConfig)
-		for i := 0; i < transportPoolSize; i++ {
-			transports = append(transports, &http2.Transport{
+		newTransport = func() *http2.Transport {
+			return &http2.Transport{
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
 					return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
 				},
-			})
+			}
 		}
+	}
+	slots := make([]*transportSlot, transportPoolSize)
+	for i := range slots {
+		s := &transportSlot{}
+		s.ptr.Store(newTransport())
+		slots[i] = s
 	}
 
 	var host string
@@ -202,7 +237,8 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		ctx:            ctx,
 		dialer:         dialer,
 		serverAddr:     serverAddr,
-		transports:     transports,
+		newTransport:   newTransport,
+		slots:          slots,
 		scheme:         scheme,
 		host:           host,
 		path:           path,
@@ -239,21 +275,48 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *Client) Close() error {
-	for _, rt := range c.transports {
-		if transport, ok := rt.(*http2.Transport); ok {
-			transport.CloseIdleConnections()
+	for _, s := range c.slots {
+		if tr := s.get(); tr != nil {
+			tr.CloseIdleConnections()
 		}
 	}
 	return nil
 }
 
-// pickTransport hands out pool members round-robin. All requests belonging to
-// one dial must share the member they were opened with: the upload and download
-// halves of stream-up/packet-up are paired by session id, and keeping them on a
-// single connection preserves their ordering.
-func (c *Client) pickTransport() http.RoundTripper {
-	n := c.transportIdx.Add(1) - 1
-	return c.transports[n%uint64(len(c.transports))]
+// pickSlot hands out pool members round-robin. All requests belonging to one dial
+// must share the member they were opened with: the upload and download halves of
+// stream-up/packet-up are paired by session id, and keeping them on a single
+// connection preserves their ordering. Callers capture the *transport* the dial
+// landed on (slot.get()) and reuse that, not the slot, so a concurrent refresh
+// never splits a dial's halves across two connections.
+func (c *Client) pickSlot() *transportSlot {
+	n := c.slotIdx.Add(1) - 1
+	return c.slots[n%uint64(len(c.slots))]
+}
+
+// refreshAllSlots swaps every pool member for a fresh transport, dropping the
+// stale connections. It is triggered when a dial's handshake times out — the
+// tell-tale of a pool gone stale after the radio slept and NAT dropped the idle
+// TCP connections (see the package comment). Swapping the pointer does NOT tear
+// down a member's in-flight streams: goroutines already relaying over it keep
+// their own reference; only new dials get the fresh connection. So a false
+// positive (a merely-slow handshake) costs at most a few extra connections,
+// never a healthy-stream teardown. Debounced so the storm of stalled initial
+// dials right after wake refreshes the pool exactly once.
+func (c *Client) refreshAllSlots() {
+	now := timeNow()
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if !c.lastRefresh.IsZero() && now.Sub(c.lastRefresh) < slotRefreshDebounce {
+		return
+	}
+	c.lastRefresh = now
+	for _, s := range c.slots {
+		old := s.ptr.Swap(c.newTransport())
+		if old != nil {
+			old.CloseIdleConnections()
+		}
+	}
 }
 
 // baseURL builds a fresh request URL targeting the normalized base path. The

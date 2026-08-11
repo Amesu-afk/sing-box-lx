@@ -29,6 +29,98 @@ func (c *Client) applyGRPCHeader(request *http.Request) {
 	request.Header.Set("Content-Type", "application/grpc")
 }
 
+// handshakeTimeout bounds how long a fresh dial waits for its first response
+// header before treating the pooled connection as dead. A healthy XHTTP inbound
+// answers a new stream immediately (measured ~330ms even with 100 streams held
+// on the pool), so 5s clears both that and a fresh transport's own TLS/REALITY
+// dial on a slow mobile link with a wide margin, while capping the post-idle
+// zombie stall that otherwise runs to tens of seconds. A var (not const) so tests
+// can shrink it, mirroring timeNow.
+var handshakeTimeout = 5 * time.Second
+
+// errHandshakeTimeout signals that a pooled connection produced no response
+// header in time — the caller refreshes the pool and, for an idempotent GET
+// dial, retries once on a fresh connection.
+var errHandshakeTimeout = E.New("v2ray-xhttp: handshake timed out (stale pooled connection)")
+
+// handshakeRoundTrip runs rt.RoundTrip(req) but bounds only the time until the
+// response headers arrive; once they do, the stream may live indefinitely. On a
+// timeout it cancels just this request — an RST_STREAM on this one stream, never
+// a whole-connection teardown, so sibling streams multiplexed on the same
+// connection are untouched — and returns errHandshakeTimeout. On success the
+// response body takes ownership of the cancel func (fired on Close), so the
+// bounded context is released without a leak and without cutting the stream.
+func handshakeRoundTrip(rt http.RoundTripper, req *http.Request) (*http.Response, error) {
+	reqCtx, cancel := context.WithCancel(req.Context())
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(handshakeTimeout, func() {
+		timedOut.Store(true)
+		cancel()
+	})
+	resp, err := rt.RoundTrip(req.WithContext(reqCtx))
+	if err != nil {
+		timer.Stop()
+		cancel()
+		if timedOut.Load() {
+			return nil, errHandshakeTimeout
+		}
+		return nil, err
+	}
+	if !timer.Stop() {
+		// The timer fired in the narrow window between headers arriving and this
+		// Stop, so the context is already cancelled and the stream is unusable.
+		resp.Body.Close()
+		cancel()
+		return nil, errHandshakeTimeout
+	}
+	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// cancelBody defers a context cancel to body Close, so the handshake-timeout
+// context outlives the header phase and is released exactly when the stream ends.
+type cancelBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *cancelBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.cancel)
+	return err
+}
+
+// dialDownloadStream opens the download side (a GET whose response body is the
+// downlink) with a stale-connection guard. If the pooled member is a post-idle
+// zombie its handshake times out; the pool is refreshed and the GET — idempotent
+// and bodyless, so safe to replay — is retried once on a fresh connection. It
+// returns the transport the download landed on so the matching uploads ride the
+// same connection.
+func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (http.RoundTripper, *http.Response, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		var rt http.RoundTripper = c.pickSlot().get()
+		resp, err := handshakeRoundTrip(rt, req)
+		if err == errHandshakeTimeout {
+			c.refreshAllSlots()
+			continue
+		}
+		if err != nil {
+			return nil, nil, E.Cause(err, "open download")
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, nil, E.New("v2ray-xhttp: unexpected download status: ", resp.Status)
+		}
+		return rt, resp, nil
+	}
+	return nil, nil, E.Cause(errHandshakeTimeout, "open download")
+}
+
 // dialStreamOne opens a single bidirectional HTTP/2 stream: the request body is
 // the upload direction, the response body is the download direction. With Reality
 // it is also what "auto" resolves to (matching Xray).
@@ -49,7 +141,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	}
 	c.applyGRPCHeader(request)
 
-	rt := c.pickTransport()
+	var rt http.RoundTripper = c.pickSlot().get()
 	conn := newStreamConn(pipeReader, pipeWriter, c.serverAddr)
 	// lx: 050 — the conn is handed up before RoundTrip has raised the stream, so
 	// anything written meanwhile (the VLESS/encryption handshake) blocks on an
@@ -63,8 +155,14 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	})
 	go func() {
 		defer stopGuard()
-		response, err := rt.RoundTrip(request)
+		response, err := handshakeRoundTrip(rt, request)
 		if err != nil {
+			// stream-one carries its upload body on the same stream, so it can't
+			// be replayed on a fresh connection here; refresh the pool so the
+			// app's immediate reopen lands on a live member, and fail this dial.
+			if err == errHandshakeTimeout {
+				c.refreshAllSlots()
+			}
 			conn.setupReader(nil, err)
 			return
 		}
@@ -101,19 +199,10 @@ func watchDialContext(ctx context.Context, done <-chan struct{}, onCancel func(e
 // dialStreamUp opens a streamed POST for the upload direction and a separate GET
 // whose response body is the download direction.
 func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, error) {
-	// Download: GET response body (no seq — stream mode).
-	downReq, err := c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
+	// Download: GET response body (no seq — stream mode), stale-conn guarded.
+	rt, downResp, err := c.dialDownloadStream(ctx, sessionID)
 	if err != nil {
 		return nil, err
-	}
-	rt := c.pickTransport()
-	downResp, err := rt.RoundTrip(downReq)
-	if err != nil {
-		return nil, E.Cause(err, "open download")
-	}
-	if downResp.StatusCode != http.StatusOK {
-		downResp.Body.Close()
-		return nil, E.New("v2ray-xhttp: unexpected download status: ", downResp.Status)
 	}
 
 	// Upload: streamed body request using the configured upload method.
@@ -139,19 +228,10 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, 
 // dialPacketUp opens a GET download stream and sends uploads as sequential POST
 // packets, one HTTP request per Write.
 func (c *Client) dialPacketUp(ctx context.Context, sessionID string) (net.Conn, error) {
-	// Download stream: GET with the session id but no seq (downlink).
-	downReq, err := c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
+	// Download stream: GET with the session id but no seq (downlink), guarded.
+	rt, downResp, err := c.dialDownloadStream(ctx, sessionID)
 	if err != nil {
 		return nil, err
-	}
-	rt := c.pickTransport()
-	downResp, err := rt.RoundTrip(downReq)
-	if err != nil {
-		return nil, E.Cause(err, "open download")
-	}
-	if downResp.StatusCode != http.StatusOK {
-		downResp.Body.Close()
-		return nil, E.New("v2ray-xhttp: unexpected download status: ", downResp.Status)
 	}
 	return &packetConn{
 		ctx:        ctx,
