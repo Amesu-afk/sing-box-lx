@@ -277,16 +277,22 @@ func TestSurvivalSuccessRestoresService(t *testing.T) {
 	_, err := group.Exchange(context.Background(), testQuery())
 	require.Error(t, err) // full outage
 
+	// Make the survival order deterministic. Windows can assign the same
+	// timestamp to several rapid time.Now calls; a complete tie is specified
+	// to be random, so relying on two naturally distinct ticks made this test
+	// flaky even though the production selection contract was satisfied.
+	base := time.Now()
+	group.access.Lock()
+	group.records["a"].errors = []time.Time{base.Add(-time.Second)}
+	group.records["b"].errors = []time.Time{base}
+	group.access.Unlock()
+
 	recovered.Store(true)
-	// Survival attempts rotate; within two queries one lands on a,
-	// SUCCEEDS, and a's errors are erased — service restored.
-	var response *mDNS.Msg
-	for i := 0; i < 2 && response == nil; i++ {
-		if resp, err := group.Exchange(context.Background(), testQuery()); err == nil {
-			response = resp
-		}
-	}
-	require.NotNil(t, response, "survival must find the recovered server within the rotation")
+	// The oldest dirty member is a; its success erases its errors and restores
+	// service without a fan.
+	response, err := group.Exchange(context.Background(), testQuery())
+	require.NoError(t, err)
+	require.NotNil(t, response)
 
 	// a is clean now: the next queries are NORMAL single exchanges to it.
 	state := group.GroupState()
