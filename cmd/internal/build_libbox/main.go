@@ -216,14 +216,20 @@ func buildAndroid() {
 
 	bindTarget := getAndroidBindTarget()
 
-	// Build main variant (SDK 24)
+	// lx:begin tarnvpn-android-api
+	// TarnVPN's main flavor supports Android 6 (API 23). Upstream raised its
+	// primary AAR floor to API 24 as an app policy, while the legacy AAR still
+	// builds the same XHTTP/AWG/OpenConnect feature set for API 21. Keep the
+	// library floor aligned with the consuming app and verify it in lx-ci.
+	// Build main variant (SDK 23)
+	// lx:end tarnvpn-android-api
 	mainTags := append([]string{}, sharedTags...)
 	// mainTags = append(mainTags, memcTags...)
 	if debugEnabled {
 		mainTags = append(mainTags, debugTags...)
 	}
 	buildAndroidVariant(AndroidBuildConfig{
-		AndroidAPI: 24,
+		AndroidAPI: 23,
 		OutputName: "libbox.aar",
 		Tags:       mainTags,
 	}, bindTarget)

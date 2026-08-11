@@ -267,6 +267,11 @@ jobs:
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Verify TarnVPN AAR API floors
+        run: |
+          unzip -p libbox.aar AndroidManifest.xml | grep -q 'android:minSdkVersion="23"'
+          unzip -p libbox-legacy.aar AndroidManifest.xml | grep -q 'android:minSdkVersion="21"'
+          echo "OK: main AAR supports Android 6 and legacy AAR supports Android 5"
       - uses: actions/upload-artifact@v6
         with:
           name: libbox-aar
