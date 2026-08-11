@@ -8,8 +8,8 @@
 >
 > Копия существует по одной причине: **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** вшивает
 > собранный из неё `libbox.aar`, с небольшим числом своих патчей сверху (`git log --author=vanek` —
-> пул транспортов XHTTP, перенесённый на lx.15, фрагментация TLS поверх REALITY,
-> `override_destination` у действия sniff, путь для stream-one), а GPLv3 требует исходники именно
+> пул XHTTP и защита от залипших соединений/upload, перенесённые на lx.24, фрагментация TLS поверх
+> REALITY и `override_destination` у действия sniff), а GPLv3 требует исходники именно
 > того, что распространяется. Само приложение лежит в `clients/android` как сабмодуль.
 
 > **Тонкий downstream-форк [SagerNet/sing-box](https://github.com/SagerNet/sing-box).**
