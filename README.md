@@ -8,6 +8,8 @@
 
 > 📄 The upstream sing-box README — **[on GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md)** (always current).
 
+> 📱 **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** — the Android client built on this fork; the `libbox.aar` inside its releases is produced from here, so this repository is the corresponding source GPLv3 requires for it. The Android app lives in `clients/android` as a submodule.
+
 This is not a separate project and not an "improved sing-box". It is upstream sing-box **plus a few features**, implemented so they can be carried onto new sing-box versions for years with almost no conflicts. More features may land over time — other protocols, new capabilities — but every one of them must live by the same thin-fork rules ([CONSTITUTION](SPECS/CONSTITUTION.md)).
 
 ---
