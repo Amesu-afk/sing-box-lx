@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	E "github.com/sagernet/sing/common/exceptions"
@@ -47,6 +49,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	}
 	c.applyGRPCHeader(request)
 
+	rt := c.pickTransport()
 	conn := newStreamConn(pipeReader, pipeWriter, c.serverAddr)
 	// lx: 050 — the conn is handed up before RoundTrip has raised the stream, so
 	// anything written meanwhile (the VLESS/encryption handshake) blocks on an
@@ -60,7 +63,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	})
 	go func() {
 		defer stopGuard()
-		response, err := c.transport.RoundTrip(request)
+		response, err := rt.RoundTrip(request)
 		if err != nil {
 			conn.setupReader(nil, err)
 			return
@@ -103,7 +106,8 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, 
 	if err != nil {
 		return nil, err
 	}
-	downResp, err := c.transport.RoundTrip(downReq)
+	rt := c.pickTransport()
+	downResp, err := rt.RoundTrip(downReq)
 	if err != nil {
 		return nil, E.Cause(err, "open download")
 	}
@@ -122,7 +126,7 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, 
 	c.applyGRPCHeader(upReq)
 	conn := newSplitConn(downResp.Body, pipeReader, pipeWriter, c.serverAddr)
 	go func() {
-		upResp, err := c.transport.RoundTrip(upReq)
+		upResp, err := rt.RoundTrip(upReq)
 		if err != nil {
 			conn.uploadFailed(err)
 			return
@@ -140,7 +144,8 @@ func (c *Client) dialPacketUp(ctx context.Context, sessionID string) (net.Conn, 
 	if err != nil {
 		return nil, err
 	}
-	downResp, err := c.transport.RoundTrip(downReq)
+	rt := c.pickTransport()
+	downResp, err := rt.RoundTrip(downReq)
 	if err != nil {
 		return nil, E.Cause(err, "open download")
 	}
@@ -151,6 +156,7 @@ func (c *Client) dialPacketUp(ctx context.Context, sessionID string) (net.Conn, 
 	return &packetConn{
 		ctx:        ctx,
 		client:     c,
+		transport:  rt,
 		sessionID:  sessionID,
 		reader:     downResp.Body,
 		serverAddr: c.serverAddr,
@@ -287,6 +293,9 @@ type streamConn struct {
 	// lx: 050 — deadlines; without them a blocked Write/Read is unkillable.
 	writeDeadline writeDeadline
 	readDeadline  *readDeadline
+	// closed records that Close() ran. It lets a RoundTrip that lands afterwards
+	// dispose of its response body itself — see Close for why that matters.
+	closed atomic.Bool
 }
 
 func newStreamConn(reader *io.PipeReader, writer *io.PipeWriter, serverAddr M.Socksaddr) *streamConn {
@@ -314,6 +323,11 @@ func (c *streamConn) setupReader(reader io.ReadCloser, err error) {
 	c.reader = reader
 	c.readerErr = err
 	close(c.created)
+	// Close() may have already run and skipped the body because RoundTrip had
+	// not produced one yet; in that case it is ours to release.
+	if reader != nil && c.closed.Load() {
+		reader.Close()
+	}
 }
 
 func (c *streamConn) Read(b []byte) (int, error) {
@@ -333,7 +347,29 @@ func (c *streamConn) Read(b []byte) (int, error) {
 	if c.readerErr != nil {
 		return 0, c.readerErr
 	}
-	return c.reader.Read(b)
+	n, err := c.reader.Read(b)
+	return n, normalizeReadErr(err)
+}
+
+// normalizeReadErr folds x/net/http2's connection- and body-close sentinels into
+// io.EOF. They are unexported errors.New values that wrap nothing, so the relay's
+// E.IsClosedOrCanceled doesn't recognise them and route/conn.go logs every
+// ordinary downlink close at ERROR. Matching by message (there is no exported
+// sentinel to errors.Is against) and returning io.EOF makes the relay treat them
+// as the normal stream end they are — a closed body or a lost pooled connection
+// just means this proxied conn is done; the app reopens on its own.
+func normalizeReadErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch msg := err.Error(); {
+	case strings.Contains(msg, "response body closed"),
+		strings.Contains(msg, "client connection lost"),
+		strings.Contains(msg, "client conn is closed"):
+		return io.EOF
+	default:
+		return err
+	}
 }
 
 func (c *streamConn) Write(b []byte) (int, error) {
@@ -345,6 +381,13 @@ func (c *streamConn) Close() error {
 		// lx: 050 — drop armed timers first so neither can fire on a closed conn.
 		c.writeDeadline.stop()
 		c.readDeadline.stop()
+		// Publish the intent before probing created, so a RoundTrip finishing
+		// concurrently is guaranteed to observe it and close the body itself.
+		// Without this handoff the default branch below silently dropped bodies
+		// belonging to still-in-flight requests, leaking one HTTP/2 stream each
+		// time — they accumulate on the pooled connection until it hits the
+		// peer's max-concurrent-streams and every new dial stalls.
+		c.closed.Store(true)
 		c.writer.Close()
 		select {
 		case <-c.created:
@@ -412,7 +455,10 @@ func (c *splitConn) uploadFailed(err error) {
 	c.writer.CloseWithError(err)
 }
 
-func (c *splitConn) Read(b []byte) (int, error)  { return c.reader.Read(b) }
+func (c *splitConn) Read(b []byte) (int, error) {
+	n, err := c.reader.Read(b)
+	return n, normalizeReadErr(err)
+}
 func (c *splitConn) Write(b []byte) (int, error) { return c.writer.Write(b) }
 
 func (c *splitConn) Close() error {
@@ -446,8 +492,11 @@ func (c *splitConn) NeedAdditionalReadDeadline() bool { return true }
 // packetConn implements packet-up: download is a GET response body, each Write
 // is delivered as a sequential POST to "<path>/<sessionId>/<seq>".
 type packetConn struct {
-	ctx        context.Context
-	client     *Client
+	ctx    context.Context
+	client *Client
+	// transport is the pool member this session was opened on; upload packets
+	// must ride the same connection as the download stream they belong to.
+	transport  http.RoundTripper
 	sessionID  string
 	reader     io.ReadCloser
 	serverAddr M.Socksaddr
@@ -458,7 +507,8 @@ type packetConn struct {
 }
 
 func (c *packetConn) Read(b []byte) (int, error) {
-	return c.reader.Read(b)
+	n, err := c.reader.Read(b)
+	return n, normalizeReadErr(err)
 }
 
 // Write delivers a write as one or more sequential upload POSTs. A write larger
@@ -515,7 +565,7 @@ func (c *packetConn) sendPacket(b []byte) error {
 	}
 	c.client.applyUplinkData(request, payload)
 
-	response, err := c.client.transport.RoundTrip(request)
+	response, err := c.transport.RoundTrip(request)
 	if err != nil {
 		return err
 	}

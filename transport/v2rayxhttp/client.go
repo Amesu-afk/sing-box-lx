@@ -28,6 +28,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
@@ -50,11 +51,35 @@ const (
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
 
+// transportPoolSize is how many independent HTTP/2 transports (and therefore
+// underlying TLS connections) a client spreads its streams over.
+//
+// Every proxied connection is one HTTP/2 stream, and a single transport puts
+// them all on one TCP connection. That collapses under the long-lived streams a
+// video session holds open: measured against a live Xray XHTTP inbound, a probe
+// request took 0.4s with 10 held streams, 2.6s with 50, and timed out past 100.
+// Spreading dials round-robin keeps each connection's stream count low.
+const transportPoolSize = 8
+
+// No per-connection health check (http2.Transport ReadIdleTimeout/PingTimeout)
+// is configured here, on purpose. That probe is whole-ClientConn: when a PONG
+// misses its window the transport tears the connection down and aborts EVERY
+// multiplexed stream with "http2: client connection lost". Because the pool
+// multiplexes many independent proxied connections onto each member, one probe
+// timeout — trivially caused on mobile by a PONG queued behind another member
+// saturating the shared radio — kills a whole batch of live, merely-idle
+// streams (messenger push sockets, keep-alives) at once, which the user sees as
+// apps freezing and reconnecting. Reaping a genuinely dead idle download stream
+// belongs at per-stream granularity (a relay idle read deadline), not at
+// connection granularity; until that exists we prefer no reaping over
+// collateral teardowns of healthy connections.
+
 type Client struct {
 	ctx          context.Context
 	dialer       N.Dialer
 	serverAddr   M.Socksaddr
-	transport    http.RoundTripper
+	transports   []http.RoundTripper
+	transportIdx atomic.Uint64
 	scheme       string
 	host         string
 	path         string
@@ -113,19 +138,24 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		return nil, err
 	}
 
+	// Build a pool of independent transports. They are identical in behaviour;
+	// keeping them separate is what forces separate TLS connections, since a
+	// single http2.Transport happily multiplexes every stream onto one.
 	var (
-		transport http.RoundTripper
-		scheme    string
+		transports = make([]http.RoundTripper, 0, transportPoolSize)
+		scheme     string
 	)
 	if tlsConfig == nil {
 		scheme = "http"
 		// Plaintext h2c: speak HTTP/2 over a cleartext TCP conn so the same
 		// streaming request/response body machinery works without TLS.
-		transport = &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
-				return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
-			},
+		for i := 0; i < transportPoolSize; i++ {
+			transports = append(transports, &http2.Transport{
+				AllowHTTP: true,
+				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
+					return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
+				},
+			})
 		}
 	} else {
 		scheme = "https"
@@ -133,10 +163,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
 		}
 		tlsDialer := tls.NewDialer(dialer, tlsConfig)
-		transport = &http2.Transport{
-			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
-				return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
-			},
+		for i := 0; i < transportPoolSize; i++ {
+			transports = append(transports, &http2.Transport{
+				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
+					return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
+				},
+			})
 		}
 	}
 
@@ -170,7 +202,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		ctx:            ctx,
 		dialer:         dialer,
 		serverAddr:     serverAddr,
-		transport:      transport,
+		transports:     transports,
 		scheme:         scheme,
 		host:           host,
 		path:           path,
@@ -207,10 +239,21 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *Client) Close() error {
-	if transport, ok := c.transport.(*http2.Transport); ok {
-		transport.CloseIdleConnections()
+	for _, rt := range c.transports {
+		if transport, ok := rt.(*http2.Transport); ok {
+			transport.CloseIdleConnections()
+		}
 	}
 	return nil
+}
+
+// pickTransport hands out pool members round-robin. All requests belonging to
+// one dial must share the member they were opened with: the upload and download
+// halves of stream-up/packet-up are paired by session id, and keeping them on a
+// single connection preserves their ordering.
+func (c *Client) pickTransport() http.RoundTripper {
+	n := c.transportIdx.Add(1) - 1
+	return c.transports[n%uint64(len(c.transports))]
 }
 
 // baseURL builds a fresh request URL targeting the normalized base path. The
