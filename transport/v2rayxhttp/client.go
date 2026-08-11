@@ -68,6 +68,23 @@ const transportPoolSize = 8
 // into a single pool refresh.
 const slotRefreshDebounce = 3 * time.Second
 
+// freshHandshakeTimeout is the budget for a dial over a pool member that has
+// never answered yet, and so must still pay TCP connect + TLS/REALITY + the
+// HTTP/2 preface before the request even goes out.
+//
+// It is deliberately much larger than [handshakeTimeout]. That one is calibrated
+// for a warm connection (~330ms measured, even with 100 streams on the pool),
+// where anything past a few seconds means the socket is dead. Applying the same
+// number to a cold dial gets it wrong in the expensive direction: four-ish round
+// trips at a 1.5s RTT is already past 5s, so a slow-but-working link would fail
+// instead of merely lagging — and on the commonest TarnVPN setup (XHTTP over
+// REALITY, which resolves to stream-one) there is no retry to absorb it, because
+// a stream-one dial carries its upload body on the same stream and cannot be
+// replayed. Being generous here costs a longer wait in the genuinely-dead case,
+// which the pool refresh then fixes for every subsequent dial.
+// A var (not const) so tests can shrink it, mirroring handshakeTimeout.
+var freshHandshakeTimeout = 15 * time.Second
+
 // No per-connection health check (http2.Transport ReadIdleTimeout/PingTimeout)
 // is configured here, on purpose. That probe is whole-ClientConn: when a PONG
 // misses its window the transport tears the connection down and aborts EVERY
@@ -87,14 +104,46 @@ const slotRefreshDebounce = 3 * time.Second
 // their own reference, so a false positive costs a few extra connections, never
 // a healthy-stream teardown. That is the property the per-conn ping lacked.
 
+// poolTransport is a pool member plus the one bit of state the dial budget needs:
+// whether this transport has ever produced a response header.
+//
+// A member that has answered before owns a live TCP+TLS session, so the next dial
+// over it is a single round trip and anything slower means the connection died.
+// A member that has never answered still has to do everything: TCP connect, the
+// TLS/REALITY handshake, the HTTP/2 preface, then the request — four-ish round
+// trips, which on a bad mobile link is seconds, not milliseconds. Holding both to
+// the same deadline is what would turn a slow-but-working link into a failing one
+// (see [freshHandshakeTimeout]).
+//
+// It holds the member behind an http.RoundTripper rather than embedding
+// *http2.Transport: the concrete type cannot be substituted, and the cold/warm
+// budget is exactly the kind of timing behaviour that needs a stand-in to be
+// testable at all.
+type poolTransport struct {
+	rt   http.RoundTripper
+	warm atomic.Bool
+}
+
+func (t *poolTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return t.rt.RoundTrip(req)
+}
+
+// CloseIdleConnections forwards to the underlying transport when it has one, so a
+// pool member stays reapable through the same call the bare transport offered.
+func (t *poolTransport) CloseIdleConnections() {
+	if closer, ok := t.rt.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
 // transportSlot holds one pool member behind an atomically swappable pointer, so
 // a member whose connection has gone stale can be replaced without disturbing an
 // in-flight dial that already captured the old transport.
 type transportSlot struct {
-	ptr atomic.Pointer[http2.Transport]
+	ptr atomic.Pointer[poolTransport]
 }
 
-func (s *transportSlot) get() *http2.Transport { return s.ptr.Load() }
+func (s *transportSlot) get() *poolTransport { return s.ptr.Load() }
 
 type Client struct {
 	ctx        context.Context
@@ -203,7 +252,9 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	slots := make([]*transportSlot, transportPoolSize)
 	for i := range slots {
 		s := &transportSlot{}
-		s.ptr.Store(newTransport())
+		// Cold by construction: none of these has dialed yet, so the first dial over
+		// each gets freshHandshakeTimeout.
+		s.ptr.Store(&poolTransport{rt: newTransport()})
 		slots[i] = s
 	}
 
@@ -312,10 +363,59 @@ func (c *Client) refreshAllSlots() {
 	}
 	c.lastRefresh = now
 	for _, s := range c.slots {
-		old := s.ptr.Swap(c.newTransport())
+		old := s.ptr.Swap(c.newPoolTransport())
 		if old != nil {
 			old.CloseIdleConnections()
 		}
+	}
+}
+
+// newPoolTransport wraps a freshly built transport as a cold pool member, so its
+// first dial is measured against freshHandshakeTimeout rather than the warm one.
+func (c *Client) newPoolTransport() *poolTransport {
+	return &poolTransport{rt: c.newTransport()}
+}
+
+// handshakeVia runs one handshake-bounded round trip over a pool member, giving a
+// never-yet-used transport the cold budget, and promoting it to the warm one the
+// moment it proves it can answer.
+func (c *Client) handshakeVia(pt *poolTransport, req *http.Request) (*http.Response, error) {
+	timeout := handshakeTimeout
+	if !pt.warm.Load() {
+		timeout = freshHandshakeTimeout
+	}
+	response, err := handshakeRoundTrip(pt, req, timeout)
+	if err == nil {
+		pt.warm.Store(true)
+	}
+	return response, err
+}
+
+// retireTransport is the whole reaction to a handshake timeout observed on rt:
+// refresh the pool, then close rt's own idle connections.
+//
+// The second half is not redundant. refreshAllSlots can only close what it swaps,
+// and at the instant it runs rt still owns the stream that is in the middle of
+// timing out — so the connection is not idle and CloseIdleConnections skips it.
+// Moments later the cancelled stream is removed and rt becomes idle, but by then
+// rt is unreachable from the slots, so no future refresh will ever revisit it:
+// the swap only ever closes the pointer it just replaced. The zombie TCP
+// connection and its http2 readLoop goroutine would then stay for as long as the
+// peer keeps them (on a NAT-dropped link: forever). The debounce widens the same
+// hole — a sibling dial timing out inside the window skips the refresh entirely.
+//
+// Calling it after refreshAllSlots is what makes the ordering work: by then rt is
+// out of rotation, and its cancelled stream has been reaped by RoundTrip's own
+// cleanup, so the connection is genuinely idle and actually closes. Closing idle
+// connections never touches a live stream, so even a false positive (a merely
+// slow handshake) costs at most a reconnect, which is the same trade the pool
+// refresh already makes.
+func (c *Client) retireTransport(rt http.RoundTripper) {
+	c.refreshAllSlots()
+	// Matched by capability, not by concrete type: *http2.Transport and *http.Transport
+	// both qualify, and a test can hand in a recorder.
+	if closer, ok := rt.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
 	}
 }
 

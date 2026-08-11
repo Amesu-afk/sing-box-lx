@@ -29,13 +29,14 @@ func (c *Client) applyGRPCHeader(request *http.Request) {
 	request.Header.Set("Content-Type", "application/grpc")
 }
 
-// handshakeTimeout bounds how long a fresh dial waits for its first response
-// header before treating the pooled connection as dead. A healthy XHTTP inbound
-// answers a new stream immediately (measured ~330ms even with 100 streams held
-// on the pool), so 5s clears both that and a fresh transport's own TLS/REALITY
-// dial on a slow mobile link with a wide margin, while capping the post-idle
-// zombie stall that otherwise runs to tens of seconds. A var (not const) so tests
-// can shrink it, mirroring timeNow.
+// handshakeTimeout bounds how long a dial over an already-warm pool member waits
+// for its first response header before treating the connection as dead. A healthy
+// XHTTP inbound answers a new stream immediately (measured ~330ms even with 100
+// streams held on the pool), so 5s is a wide margin over a single round trip
+// while still capping the post-idle zombie stall that otherwise runs to tens of
+// seconds. A cold member is measured against [freshHandshakeTimeout] instead — it
+// has a TLS/REALITY handshake to pay for first. A var (not const) so tests can
+// shrink it, mirroring timeNow.
 var handshakeTimeout = 5 * time.Second
 
 // errHandshakeTimeout signals that a pooled connection produced no response
@@ -50,10 +51,10 @@ var errHandshakeTimeout = E.New("v2ray-xhttp: handshake timed out (stale pooled 
 // connection are untouched — and returns errHandshakeTimeout. On success the
 // response body takes ownership of the cancel func (fired on Close), so the
 // bounded context is released without a leak and without cutting the stream.
-func handshakeRoundTrip(rt http.RoundTripper, req *http.Request) (*http.Response, error) {
+func handshakeRoundTrip(rt http.RoundTripper, req *http.Request, timeout time.Duration) (*http.Response, error) {
 	reqCtx, cancel := context.WithCancel(req.Context())
 	var timedOut atomic.Bool
-	timer := time.AfterFunc(handshakeTimeout, func() {
+	timer := time.AfterFunc(timeout, func() {
 		timedOut.Store(true)
 		cancel()
 	})
@@ -103,10 +104,10 @@ func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (http
 		if err != nil {
 			return nil, nil, err
 		}
-		var rt http.RoundTripper = c.pickSlot().get()
-		resp, err := handshakeRoundTrip(rt, req)
+		rt := c.pickSlot().get()
+		resp, err := c.handshakeVia(rt, req)
 		if err == errHandshakeTimeout {
-			c.refreshAllSlots()
+			c.retireTransport(rt)
 			continue
 		}
 		if err != nil {
@@ -141,7 +142,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	}
 	c.applyGRPCHeader(request)
 
-	var rt http.RoundTripper = c.pickSlot().get()
+	rt := c.pickSlot().get()
 	conn := newStreamConn(pipeReader, pipeWriter, c.serverAddr)
 	// lx: 050 — the conn is handed up before RoundTrip has raised the stream, so
 	// anything written meanwhile (the VLESS/encryption handshake) blocks on an
@@ -155,13 +156,13 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	})
 	go func() {
 		defer stopGuard()
-		response, err := handshakeRoundTrip(rt, request)
+		response, err := c.handshakeVia(rt, request)
 		if err != nil {
 			// stream-one carries its upload body on the same stream, so it can't
 			// be replayed on a fresh connection here; refresh the pool so the
 			// app's immediate reopen lands on a live member, and fail this dial.
 			if err == errHandshakeTimeout {
-				c.refreshAllSlots()
+				c.retireTransport(rt)
 			}
 			conn.setupReader(nil, err)
 			return
