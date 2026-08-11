@@ -35,6 +35,7 @@
 - [x] 17. `gofmt -l` по всем затронутым файлам — пусто
 - [x] 18. **Red/green проверен откатом**: со снятым `g.cancel()` тесты падают с «run survived Close() — this is the zombie that outlives box shutdown»; фикс возвращён
 - [x] 19. R4 закрыт тестом `TestStreamOneCancelAfterStreamUpKeepsConnAlive`: отмена ctx после подъёма потока живое соединение не рвёт
+- [x] 19a. Интеграция на `v1.14.0-lx.24`: pooled `handshakeRoundTrip` наблюдает dial-ctx только до заголовков и отвязывает живой body после handoff; тот же R4-тест поймал регрессию при ребейзе и зелёный после исправления
 - [x] 20. **Критерий №3 закрыт локально** — `lx-test/zombie`: полный `box.New` → `Start` → `Close` с реальным узлом `vless + xhttp(stream-one) + encryption` на молчащий listener, два цикла Stop → Start. Red/green на живом ядре: без фикса «cycle 1: 2 test goroutine(s) survived box.Close», с фиксом 0 сразу
 - [ ] 21. Device-верификация на полевой подписке (эмулятор для этого не нужен — механизм воспроизведён в ядре; остаётся подтверждение на конфиге инцидента)
 

@@ -67,8 +67,13 @@ var errHandshakeTimeout = E.New("v2ray-xhttp: handshake timed out (stale pooled 
 // connection are untouched — and returns errHandshakeTimeout. On success the
 // response body takes ownership of the cancel func (fired on Close), so the
 // bounded context is released without a leak and without cutting the stream.
+// The caller's dial context is observed only until headers arrive: dial contexts
+// are routinely cancelled once DialContext returns, while the XHTTP stream must
+// remain alive until the proxied connection itself closes (SPEC 050).
 func handshakeRoundTrip(rt http.RoundTripper, req *http.Request, timeout time.Duration) (*http.Response, error) {
-	reqCtx, cancel := context.WithCancel(req.Context())
+	parentCtx := req.Context()
+	reqCtx, cancel := context.WithCancel(context.WithoutCancel(parentCtx))
+	stopParent := context.AfterFunc(parentCtx, cancel)
 	var timedOut atomic.Bool
 	timer := time.AfterFunc(timeout, func() {
 		timedOut.Store(true)
@@ -76,12 +81,22 @@ func handshakeRoundTrip(rt http.RoundTripper, req *http.Request, timeout time.Du
 	})
 	resp, err := rt.RoundTrip(req.WithContext(reqCtx))
 	if err != nil {
+		stopParent()
 		timer.Stop()
 		cancel()
 		if timedOut.Load() {
 			return nil, errHandshakeTimeout
 		}
 		return nil, err
+	}
+	if !stopParent() {
+		// Parent cancellation won the race before the response was published.
+		// Treat this as a cancelled dial; only cancellation after this handoff is
+		// detached from the long-lived stream.
+		timer.Stop()
+		resp.Body.Close()
+		cancel()
+		return nil, parentCtx.Err()
 	}
 	if !timer.Stop() {
 		// The timer fired in the narrow window between headers arriving and this

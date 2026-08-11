@@ -64,9 +64,15 @@ func hangingClient(t *testing.T) (*Client, *hangingTransport) {
 		path:       "/xhttp",
 		mode:       modeStreamOne,
 		meta:       meta,
-		transport:  transport,
+		slots:      singleTransportSlots(transport),
 	}
 	return client, transport
+}
+
+func singleTransportSlots(rt http.RoundTripper) []*transportSlot {
+	slot := &transportSlot{}
+	slot.ptr.Store(&poolTransport{rt: rt})
+	return []*transportSlot{slot}
 }
 
 // writeResult carries the outcome of a Write issued from a helper goroutine.
@@ -184,7 +190,7 @@ func TestStreamOneCancelAfterStreamUpKeepsConnAlive(t *testing.T) {
 		path:       "/xhttp",
 		mode:       modeStreamOne,
 		meta:       meta,
-		transport:  &liveTransport{body: bodyReader},
+		slots:      singleTransportSlots(&liveTransport{body: bodyReader}),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
