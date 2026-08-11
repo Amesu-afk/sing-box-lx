@@ -28,6 +28,7 @@ import (
 	"unsafe"
 
 	"github.com/sagernet/sing-box/adapter"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -132,6 +133,18 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+	// lx: REALITY builds its uTLS connection straight on the socket, so it never passed
+	// through UTLSClientConfig.Client() where the fragmenter is installed — which meant the
+	// TLS-fragmentation setting was silently inert on the one transport people actually use
+	// against DPI. Install it here on the same terms.
+	//
+	// Safe with respect to REALITY's own checks: tlsfragment.Conn overrides Write only (reads
+	// pass through the embedded conn, ReaderReplaceable reports true), and packet splitting
+	// does not alter a byte of the ClientHello — only how it is spread across segments — so
+	// the HMAC REALITY embeds in the session id still covers the same content.
+	if e.uClient.fragment || e.uClient.recordFragment {
+		conn = tf.NewConn(conn, ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
+	}
 	verifier := &realityVerifier{
 		serverName: e.uClient.ServerName(),
 	}
