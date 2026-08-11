@@ -2,13 +2,21 @@
 
 # sing-box-lx
 
+> ⚠️ **Это не оригинал, а downstream-копия
+> [Leadaxe/sing-box-lx](https://github.com/Leadaxe/sing-box-lx); слой `lx`, описанный ниже, написал
+> его автор.** За настоящим проектом, его issues и релизами — туда.
+>
+> Копия существует по одной причине: **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** вшивает
+> собранный из неё `libbox.aar`, с небольшим числом своих патчей сверху (`git log --author=vanek` —
+> пул транспортов XHTTP, перенесённый на lx.15, фрагментация TLS поверх REALITY,
+> `override_destination` у действия sniff, путь для stream-one), а GPLv3 требует исходники именно
+> того, что распространяется. Само приложение лежит в `clients/android` как сабмодуль.
+
 > **Тонкий downstream-форк [SagerNet/sing-box](https://github.com/SagerNet/sing-box).**
 > Небольшой набор клиентских фич поверх upstream — транспорт **XHTTP**, **AmneziaWG**, **MASQUE** (CONNECT-IP / Cloudflare WARP), пост-квантовый слой **VLESS `encryption`**, **DNS-группа серверов**, расширения **наблюдаемости** (CommandClient), балансировка нагрузки **round_robin** и **энергосбережение idle-suspend** — изолированы в lx-файлах, большинство за своим build-tag.
 > Набор может расти, философия — нет: жить ребейзом на каждый upstream-тег, а не отдельной жизнью.
 
 > 📄 README самого upstream sing-box — **[на GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md)** (всегда актуальный).
-
-> 📱 **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** — Android-клиент, собранный на этом форке; `libbox.aar` внутри его релизов делается отсюда, поэтому этот репозиторий и есть соответствующий исходный код, которого требует для него GPLv3. Само приложение лежит в `clients/android` как сабмодуль.
 
 Это не отдельный проект и не «улучшенный sing-box». Это upstream sing-box **плюс несколько фич**, реализованных так, чтобы их можно было переносить на новые версии sing-box годами, почти без конфликтов. Со временем фич может становиться больше — другие протоколы, новые возможности, — но каждая обязана жить по тем же правилам тонкого форка ([CONSTITUTION](SPECS/CONSTITUTION.md)).
 
