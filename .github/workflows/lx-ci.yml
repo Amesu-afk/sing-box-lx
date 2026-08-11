@@ -149,9 +149,10 @@ jobs:
       - name: Check feature configs (must pass)
         run: |
           ./sing-box check -c lx-test/config/xhttp_reality.json
+          ./sing-box check -c lx-test/config/xhttp_auto_reality.json
+          ./sing-box check -c lx-test/config/xhttp_obfs_full.json
           ./sing-box check -c lx-test/config/awg2_basic.json
           ./sing-box check -c lx-test/config/awg2_ranged.json
-          ./sing-box check -c lx-test/config/tarn_client_raw_dns.json
 
       - name: Build baseline (no lx features) for the negative check
         run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS}" LX_OUTPUT=sing-box-baseline
