@@ -214,7 +214,7 @@ func TestStreamOneCancelAfterStreamUpKeepsConnAlive(t *testing.T) {
 // dial context is done, and that must not disturb a working connection.
 func TestStreamOneDeadlineDoesNotBreakLiveConn(t *testing.T) {
 	pipeReader, pipeWriter := io.Pipe()
-	conn := newStreamConn(pipeReader, pipeWriter, M.ParseSocksaddr("example.com:443"))
+	conn := newStreamConn(pipeReader, pipeWriter, M.ParseSocksaddr("example.com:443"), nil)
 	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 		t.Fatalf("clearing the write deadline must be accepted: %v", err)
 	}

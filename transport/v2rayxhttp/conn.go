@@ -39,6 +39,22 @@ func (c *Client) applyGRPCHeader(request *http.Request) {
 // shrink it, mirroring timeNow.
 var handshakeTimeout = 5 * time.Second
 
+// uploadTimeout bounds one packet-up upload POST: a finite body posted to
+// "<path>/<sessionId>/<seq>", answered by a short ack. Until it existed this was
+// the one request in the transport with no bound at all, so an upload landing on
+// a connection the network had silently dropped blocked until the OS gave up on
+// its TCP retransmits — minutes during which the proxied connection is simply
+// frozen, the app has no error to react to, and the stream stays on the member.
+// The download half was already guarded; this closes the other half.
+//
+// Much larger than [handshakeTimeout] because the budget has to cover *sending*
+// the packet, not just a round trip: sc_max_each_post_bytes defaults to 1MB, and
+// a phone on a weak uplink can legitimately spend tens of seconds on that. The
+// number is chosen to be unreachable by a working link rather than tight — the
+// win is turning an unbounded stall into a bounded one that ends with the pool
+// being refreshed. A var so tests can shrink it, mirroring handshakeTimeout.
+var uploadTimeout = 60 * time.Second
+
 // errHandshakeTimeout signals that a pooled connection produced no response
 // header in time — the caller refreshes the pool and, for an idempotent GET
 // dial, retries once on a fresh connection.
@@ -96,28 +112,34 @@ func (b *cancelBody) Close() error {
 // downlink) with a stale-connection guard. If the pooled member is a post-idle
 // zombie its handshake times out; the pool is refreshed and the GET — idempotent
 // and bodyless, so safe to replay — is retried once on a fresh connection. It
-// returns the transport the download landed on so the matching uploads ride the
-// same connection.
-func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (http.RoundTripper, *http.Response, error) {
+// returns the lease the download landed on so the matching uploads ride the same
+// connection and the slot's capacity is returned when the conn closes.
+func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (*slotLease, *http.Response, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		req, err := c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
 		if err != nil {
 			return nil, nil, err
 		}
-		rt := c.pickSlot().get()
-		resp, err := c.handshakeVia(rt, req)
+		lease := c.acquireSlot()
+		resp, err := c.handshakeVia(lease.rt, req)
 		if err == errHandshakeTimeout {
-			c.retireTransport(rt)
+			// Give the capacity back before retrying, or a pool that has gone stale
+			// would leave every failed attempt counted against a slot forever and
+			// permanently skew the load view.
+			lease.release()
+			c.retireTransport(lease.rt)
 			continue
 		}
 		if err != nil {
+			lease.release()
 			return nil, nil, E.Cause(err, "open download")
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
+			lease.release()
 			return nil, nil, E.New("v2ray-xhttp: unexpected download status: ", resp.Status)
 		}
-		return rt, resp, nil
+		return lease, resp, nil
 	}
 	return nil, nil, E.Cause(errHandshakeTimeout, "open download")
 }
@@ -142,8 +164,8 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	}
 	c.applyGRPCHeader(request)
 
-	rt := c.pickSlot().get()
-	conn := newStreamConn(pipeReader, pipeWriter, c.serverAddr)
+	lease := c.acquireSlot()
+	conn := newStreamConn(pipeReader, pipeWriter, c.serverAddr, lease)
 	// lx: 050 — the conn is handed up before RoundTrip has raised the stream, so
 	// anything written meanwhile (the VLESS/encryption handshake) blocks on an
 	// unread pipe. Until the stream is up, cancelling the dial context must free
@@ -156,19 +178,25 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	})
 	go func() {
 		defer stopGuard()
-		response, err := c.handshakeVia(rt, request)
+		response, err := c.handshakeVia(lease.rt, request)
 		if err != nil {
 			// stream-one carries its upload body on the same stream, so it can't
 			// be replayed on a fresh connection here; refresh the pool so the
 			// app's immediate reopen lands on a live member, and fail this dial.
 			if err == errHandshakeTimeout {
-				c.retireTransport(rt)
+				c.retireTransport(lease.rt)
 			}
+			// Hand the capacity back here rather than waiting for Close: no stream was
+			// ever opened, and a caller that drops a failed conn without closing it
+			// would otherwise leave the slot counted as busy for the process's life.
+			// Releasing twice is a no-op, so Close staying the normal path is fine.
+			lease.release()
 			conn.setupReader(nil, err)
 			return
 		}
 		if response.StatusCode != http.StatusOK {
 			response.Body.Close()
+			lease.release()
 			conn.setupReader(nil, E.New("v2ray-xhttp: unexpected status: ", response.Status))
 			return
 		}
@@ -201,7 +229,7 @@ func watchDialContext(ctx context.Context, done <-chan struct{}, onCancel func(e
 // whose response body is the download direction.
 func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, error) {
 	// Download: GET response body (no seq — stream mode), stale-conn guarded.
-	rt, downResp, err := c.dialDownloadStream(ctx, sessionID)
+	lease, downResp, err := c.dialDownloadStream(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,12 +239,17 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, 
 	upReq, err := c.newRequest(ctx, c.meta.uplinkHTTPMethod, sessionID, "", pipeReader)
 	if err != nil {
 		downResp.Body.Close()
+		lease.release()
 		return nil, err
 	}
 	c.applyGRPCHeader(upReq)
-	conn := newSplitConn(downResp.Body, pipeReader, pipeWriter, c.serverAddr)
+	conn := newSplitConn(downResp.Body, pipeReader, pipeWriter, c.serverAddr, lease)
 	go func() {
-		upResp, err := rt.RoundTrip(upReq)
+		// Deliberately not handshake-bounded, unlike the packet-up uploads: this
+		// request body stays open for the life of the connection, so there is no
+		// guarantee about when its response headers arrive and any budget here
+		// would be a guess that cuts live sessions.
+		upResp, err := lease.rt.RoundTrip(upReq)
 		if err != nil {
 			conn.uploadFailed(err)
 			return
@@ -230,17 +263,23 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, 
 // packets, one HTTP request per Write.
 func (c *Client) dialPacketUp(ctx context.Context, sessionID string) (net.Conn, error) {
 	// Download stream: GET with the session id but no seq (downlink), guarded.
-	rt, downResp, err := c.dialDownloadStream(ctx, sessionID)
+	lease, downResp, err := c.dialDownloadStream(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
+	// Uploads are scoped to a context of their own so Close can abort one that is
+	// in flight. Without it a POST left blocked on a dead pooled connection keeps
+	// its goroutine and its HTTP/2 stream after the proxied connection is long
+	// gone, and the stream is only reclaimed when the peer or the OS gives up.
+	uploadCtx, cancelUploads := context.WithCancel(ctx)
 	return &packetConn{
-		ctx:        ctx,
-		client:     c,
-		transport:  rt,
-		sessionID:  sessionID,
-		reader:     downResp.Body,
-		serverAddr: c.serverAddr,
+		ctx:           uploadCtx,
+		cancelUploads: cancelUploads,
+		client:        c,
+		lease:         lease,
+		sessionID:     sessionID,
+		reader:        downResp.Body,
+		serverAddr:    c.serverAddr,
 	}, nil
 }
 
@@ -370,6 +409,7 @@ type streamConn struct {
 	created    chan struct{}
 	readerErr  error
 	serverAddr M.Socksaddr
+	lease      *slotLease
 	closeOnce  sync.Once
 	// lx: 050 — deadlines; without them a blocked Write/Read is unkillable.
 	writeDeadline writeDeadline
@@ -379,11 +419,12 @@ type streamConn struct {
 	closed atomic.Bool
 }
 
-func newStreamConn(reader *io.PipeReader, writer *io.PipeWriter, serverAddr M.Socksaddr) *streamConn {
+func newStreamConn(reader *io.PipeReader, writer *io.PipeWriter, serverAddr M.Socksaddr, lease *slotLease) *streamConn {
 	conn := &streamConn{
 		writer:     writer,
 		created:    make(chan struct{}),
 		serverAddr: serverAddr,
+		lease:      lease,
 	}
 	conn.writeDeadline.reader = reader
 	// lx: 050 — an expired read deadline must also close an already-bound reader,
@@ -477,6 +518,7 @@ func (c *streamConn) Close() error {
 			}
 		default:
 		}
+		c.lease.release()
 	})
 	return nil
 }
@@ -510,6 +552,7 @@ type splitConn struct {
 	reader     io.ReadCloser
 	writer     *io.PipeWriter
 	serverAddr M.Socksaddr
+	lease      *slotLease
 	closeOnce  sync.Once
 	// lx: 050 — same unkillable-Write exposure as streamConn; the reader here is
 	// bound up front, so an expired read deadline just closes it.
@@ -517,11 +560,12 @@ type splitConn struct {
 	readDeadline  *readDeadline
 }
 
-func newSplitConn(reader io.ReadCloser, uploadReader *io.PipeReader, writer *io.PipeWriter, serverAddr M.Socksaddr) *splitConn {
+func newSplitConn(reader io.ReadCloser, uploadReader *io.PipeReader, writer *io.PipeWriter, serverAddr M.Socksaddr, lease *slotLease) *splitConn {
 	conn := &splitConn{
 		reader:     reader,
 		writer:     writer,
 		serverAddr: serverAddr,
+		lease:      lease,
 	}
 	conn.writeDeadline.reader = uploadReader
 	conn.readDeadline = newReadDeadline(func() {
@@ -549,6 +593,7 @@ func (c *splitConn) Close() error {
 		c.readDeadline.stop()
 		c.writer.Close()
 		c.reader.Close()
+		c.lease.release()
 	})
 	return nil
 }
@@ -573,17 +618,19 @@ func (c *splitConn) NeedAdditionalReadDeadline() bool { return true }
 // packetConn implements packet-up: download is a GET response body, each Write
 // is delivered as a sequential POST to "<path>/<sessionId>/<seq>".
 type packetConn struct {
-	ctx    context.Context
-	client *Client
-	// transport is the pool member this session was opened on; upload packets
-	// must ride the same connection as the download stream they belong to.
-	transport  http.RoundTripper
+	ctx           context.Context
+	cancelUploads context.CancelFunc
+	client        *Client
+	// lease is the pool member this session was opened on; upload packets must
+	// ride the same connection as the download stream they belong to.
+	lease      *slotLease
 	sessionID  string
 	reader     io.ReadCloser
 	serverAddr M.Socksaddr
 	access     sync.Mutex
 	seq        uint64
 	lastPost   time.Time
+	closeOnce  sync.Once
 	closed     bool
 }
 
@@ -646,8 +693,15 @@ func (c *packetConn) sendPacket(b []byte) error {
 	}
 	c.client.applyUplinkData(request, payload)
 
-	response, err := c.transport.RoundTrip(request)
+	response, err := handshakeRoundTrip(c.lease.rt, request, uploadTimeout)
 	if err != nil {
+		if err == errHandshakeTimeout {
+			// The session is pinned to this member (uploads must stay paired with
+			// their download stream), so there is nothing to retry on: report the
+			// failure so the proxied connection ends and the app reopens, and get
+			// the dead member out of the pool before that reopen picks it again.
+			c.client.retireTransport(c.lease.rt)
+		}
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
@@ -681,7 +735,15 @@ func (c *packetConn) Close() error {
 	c.access.Lock()
 	c.closed = true
 	c.access.Unlock()
-	return c.reader.Close()
+	var err error
+	c.closeOnce.Do(func() {
+		// Unblocks an upload POST still in flight — otherwise it holds its stream
+		// (and this member's capacity) well past the end of the proxied connection.
+		c.cancelUploads()
+		err = c.reader.Close()
+		c.lease.release()
+	})
+	return err
 }
 
 func (c *packetConn) LocalAddr() net.Addr                { return M.Socksaddr{} }
