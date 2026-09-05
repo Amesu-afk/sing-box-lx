@@ -740,10 +740,10 @@ jobs:
         include:
           - variant: other
             task: :app:assembleOtherRelease
-            output: app/build/outputs/apk/other/release/*.apk
+            output: app/build/outputs/tarn-apk/otherRelease/*.apk
           - variant: other-legacy
             task: :app:assembleOtherLegacyRelease
-            output: app/build/outputs/apk/otherLegacy/release/*.apk
+            output: app/build/outputs/tarn-apk/otherLegacyRelease/*.apk
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
@@ -833,13 +833,13 @@ jobs:
           cp clients/android/${{ matrix.output }} dist
           VERSION_CODE=$(grep VERSION_CODE clients/android/version.properties | cut -d= -f2)
           VERSION_NAME=$(grep VERSION_NAME clients/android/version.properties | cut -d= -f2)
-          cat > dist/SFA-version-metadata.json << EOF
+          cat > dist/tarn-version-metadata.json << EOF
           {
             "version_code": ${VERSION_CODE},
             "version_name": "${VERSION_NAME}"
           }
           EOF
-          cat dist/SFA-version-metadata.json
+          cat dist/tarn-version-metadata.json
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
