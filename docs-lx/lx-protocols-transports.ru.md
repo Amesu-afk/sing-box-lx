@@ -994,5 +994,5 @@ network_list=tcp+udp — всё по умолчанию. Не забудь бл�
   `encryption`, `lxd`, наблюдаемость).
 - **[lx-energy.ru.md](lx-energy.ru.md)** — энергомодель, тайминги idle-suspend и
   рекомендованная мобильная конфигурация (актуально для suspend AWG- и MASQUE-endpoint).
-- Feature-спеки: [XHTTP](../SPECS/FEATURES/002-XHTTP/), [AWG2](../SPECS/FEATURES/003-AWG2/),
+- Feature-спеки: [XHTTP](../SPECS/FEATURES/002-XHTTP/), [AWG](../SPECS/FEATURES/003-AWG/),
   [MASQUE/WARP](../SPECS/FEATURES/009-MASQUE_WARP/).

@@ -28,6 +28,24 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.35
+
+Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.35.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.35.md).
+
+**Что вошло:**
+
+- 🔥 **Issue #14, корень: утечка типа `http2.StreamError` из транспортных conn'ов →
+  спин readLoop у потребителя** ([SPEC 082](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/082-H2_STREAM_ERROR_TYPE_LEAK/SPEC.md)).
+  Профиль с lx.30: тел кадров 0.1 с из 36, `readRecordOrCCS` без детей, две readLoop в
+  `runnable` на `x/net transport.go:1886` — кадров от CDN нет, крутится залипшая в
+  `crypto/tls` ошибка, которую `run()` принимает за ошибку своего стрима. SPEC 076/077 к
+  этому циклу не относились. Фикс: `common/badh2.HideStreamError` (тот же текст, без
+  `Unwrap`) в шести точках XHTTP, в `v2rayhttp.HTTP2Conn` и `v2raygrpclite.GunConn`
+  (поверх `baderror.WrapH2`, который пропускал `INTERNAL_ERROR`). Регрессия воспроизводит
+  спин на Mac. Полевая проверка репортёром — по критерию §5 спеки.
+- База апстрима без изменений: `upstream/stable` a25ad8ce5 (`v1.14.0` + 16), дрейф 0.
+
 #### v1.14.0-lx.34
 
 Стабильный релиз. Пользовательские ноты (EN+RU):

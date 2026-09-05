@@ -347,7 +347,7 @@ the **MTU budget** (why `s4` forces a lower MTU, the `sendmsg: message too long`
 the auto-`1280` default, `udp_fragment` for nested tunnels), and the **`awg.conf` 1:1
 mapping** are all documented in the full reference — see the 📖 link above.
 
-The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG obfuscation, wired via the `submodules/wireguard-go` submodule) — see the [AWG2 feature](../SPECS/FEATURES/003-AWG2/FEATURE.md).
+The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG obfuscation, wired via the `submodules/wireguard-go` submodule) — see the [AWG feature](../SPECS/FEATURES/003-AWG/FEATURE.md).
 
 ---
 

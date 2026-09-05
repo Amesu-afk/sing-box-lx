@@ -353,7 +353,7 @@ WireGuard, потому что `s4` паддит каждый data-пакет �
 авто-дефолт `1280`, `udp_fragment` для вложенных туннелей) и **маппинг `awg.conf` 1:1** —
 всё в полном справочнике; см. 📖-ссылку выше.
 
-Рантайм обеспечивается `Leadaxe/wireguard-go` (sagernet/wireguard-go + обфускация AmneziaWG, подключён через submodule `submodules/wireguard-go`) — см. [фичу AWG2](../SPECS/FEATURES/003-AWG2/FEATURE.md).
+Рантайм обеспечивается `Leadaxe/wireguard-go` (sagernet/wireguard-go + обфускация AmneziaWG, подключён через submodule `submodules/wireguard-go`) — см. [фичу AWG](../SPECS/FEATURES/003-AWG/FEATURE.md).
 
 ---
 

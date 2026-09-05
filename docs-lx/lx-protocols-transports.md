@@ -1001,5 +1001,5 @@ on-device.
   `encryption`, `lxd`, observability).
 - **[lx-energy.md](lx-energy.md)** — the energy model, idle-suspend timelines and the
   recommended mobile configuration (relevant to AWG and MASQUE endpoint suspend).
-- Feature specs: [XHTTP](../SPECS/FEATURES/002-XHTTP/), [AWG2](../SPECS/FEATURES/003-AWG2/),
+- Feature specs: [XHTTP](../SPECS/FEATURES/002-XHTTP/), [AWG](../SPECS/FEATURES/003-AWG/),
   [MASQUE/WARP](../SPECS/FEATURES/009-MASQUE_WARP/).
