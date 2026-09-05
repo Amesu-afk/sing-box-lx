@@ -218,6 +218,31 @@ func TestStreamOneCancelAfterStreamUpKeepsConnAlive(t *testing.T) {
 
 // TestStreamOneDeadlineDoesNotBreakLiveConn guards R4: once the stream is up the
 // dial context is done, and that must not disturb a working connection.
+// TestWatchDialContextStopBeforeHandoffKeepsLaterCancellationOut proves the
+// ordering used by dialStreamOne: once the guard is stopped before setupReader
+// publishes the response body, a later cancellation cannot close the upload
+// pipe of that live stream.
+func TestWatchDialContextStopBeforeHandoffKeepsLaterCancellationOut(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	cancelled := make(chan error, 1)
+	stop := watchDialContext(ctx, done, func(err error) {
+		cancelled <- err
+	})
+
+	stop()
+	close(done)
+	cancel()
+
+	select {
+	case err := <-cancelled:
+		t.Fatalf("guard invoked cancellation after the live handoff: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestStreamOneDeadlineDoesNotBreakLiveConn(t *testing.T) {
 	pipeReader, pipeWriter := io.Pipe()
 	conn := newStreamConn(pipeReader, pipeWriter, M.ParseSocksaddr("example.com:443"), nil)

@@ -3,6 +3,7 @@ package v2rayxhttp
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -17,6 +18,28 @@ import (
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestRetireTransportPreservesReceivingSibling(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close()
+	member := &poolTransport{rt: &http2.Transport{}}
+	tracked := member.trackConnection(local)
+	defer tracked.Close()
+	if err := tracked.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = peer.Write([]byte("a")) }()
+	if _, err := tracked.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if closed := member.forceCloseConnections(); closed != 0 {
+		t.Fatalf("closed %d receiving connections", closed)
+	}
+	go func() { _, _ = peer.Write([]byte("b")) }()
+	if _, err := tracked.Read(make([]byte, 1)); err != nil {
+		t.Fatalf("sibling stream interrupted: %v", err)
+	}
+}
 
 // A pooled connection gone stale never produces response headers. handshakeRoundTrip
 // must give up after its budget, cancel just this request (so the blocked RoundTrip
@@ -219,9 +242,30 @@ func TestRetireTransportClosesTimedOutMemberDespiteDebounce(t *testing.T) {
 	}
 }
 
+// A timed-out member may still have a long-lived proxied stream holding its
+// socket open. Merely swapping the slot and closing idle connections leaves that
+// app connection pinned forever; retirement must close the active socket too.
+func TestRetireTransportClosesActiveMemberConnection(t *testing.T) {
+	c := newTestClient(1)
+	local, peer := net.Pipe()
+	defer peer.Close()
+
+	member := &poolTransport{rt: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.EOF
+	})}
+	tracked := member.trackConnection(local)
+	c.retireTransport(member)
+
+	if _, err := tracked.Write([]byte("still-open")); err == nil {
+		t.Fatal("active socket remained writable after member retirement")
+	}
+}
+
 // newTestClient builds a Client with size pool slots and no server behind them.
 func newTestClient(size int) *Client {
-	c := &Client{newTransport: func() *http2.Transport { return &http2.Transport{} }}
+	c := &Client{newTransport: func() *poolTransport {
+		return &poolTransport{rt: &http2.Transport{}}
+	}}
 	c.slots = make([]*transportSlot, size)
 	for i := range c.slots {
 		s := &transportSlot{}

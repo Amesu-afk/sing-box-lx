@@ -34,12 +34,14 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	sHTTP "github.com/sagernet/sing/protocol/http"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/net/http2"
 )
@@ -54,7 +56,9 @@ const (
 var _ adapter.V2RayClientTransport = (*Client)(nil)
 
 // transportPoolSize is how many independent HTTP/2 transports (and therefore
-// underlying TLS connections) a client spreads its streams over.
+// underlying TLS connections) a client spreads its streams over. Keep the
+// pool bounded at eight: reducing it can concentrate long-lived video streams
+// on too few TCP congestion controllers and worsen head-of-line blocking.
 //
 // Every proxied connection is one HTTP/2 stream, and a single transport puts
 // them all on one TCP connection. That collapses under the long-lived streams a
@@ -84,6 +88,13 @@ const slotRefreshDebounce = 3 * time.Second
 // which the pool refresh then fixes for every subsequent dial.
 // A var (not const) so tests can shrink it, mirroring handshakeTimeout.
 var freshHandshakeTimeout = 15 * time.Second
+
+// slowWarmThreshold is the old, tighter warm budget. A warm handshake that now
+// succeeds but took longer than this would have been declared dead and churned the
+// whole pool before handshakeTimeout was raised. It is logged (never acted on) so a
+// device test can measure how often the old value was tripping under load, apart
+// from the ones that still time out outright. A var so a test can move it.
+var slowWarmThreshold = 5 * time.Second
 
 // No per-connection health check (http2.Transport ReadIdleTimeout/PingTimeout)
 // is configured here, on purpose. That probe is whole-ClientConn: when a PONG
@@ -120,8 +131,10 @@ var freshHandshakeTimeout = 15 * time.Second
 // budget is exactly the kind of timing behaviour that needs a stand-in to be
 // testable at all.
 type poolTransport struct {
-	rt   http.RoundTripper
-	warm atomic.Bool
+	rt                http.RoundTripper
+	warm              atomic.Bool
+	connectionsMu     sync.Mutex
+	activeConnections map[*trackedPoolConn]struct{}
 }
 
 func (t *poolTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -134,6 +147,73 @@ func (t *poolTransport) CloseIdleConnections() {
 	if closer, ok := t.rt.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
+}
+
+// trackConnection makes the TCP/TLS socket owned by this one pool member
+// explicitly closeable. http2.Transport only exposes CloseIdleConnections;
+// that is insufficient after a member has timed out while another long-lived
+// stream (for example YouTube's reused media connection) still keeps the socket
+// non-idle. Without tracking, the pool can route new dials elsewhere but cannot
+// wake the app-side connection that remains pinned to the dead member.
+func (t *poolTransport) trackConnection(conn net.Conn) net.Conn {
+	tracked := &trackedPoolConn{Conn: conn, owner: t}
+	t.connectionsMu.Lock()
+	if t.activeConnections == nil {
+		t.activeConnections = make(map[*trackedPoolConn]struct{})
+	}
+	t.activeConnections[tracked] = struct{}{}
+	t.connectionsMu.Unlock()
+	return tracked
+}
+
+func (t *poolTransport) forgetConnection(conn *trackedPoolConn) {
+	t.connectionsMu.Lock()
+	delete(t.activeConnections, conn)
+	t.connectionsMu.Unlock()
+}
+
+// forceCloseConnections is reserved for a member that has already failed its
+// handshake budget. Recent inbound traffic keeps a shared socket alive: a single
+// request timeout is not proof that its sibling streams have failed.
+func (t *poolTransport) forceCloseConnections() int {
+	t.connectionsMu.Lock()
+	connections := make([]*trackedPoolConn, 0, len(t.activeConnections))
+	for conn := range t.activeConnections {
+		connections = append(connections, conn)
+	}
+	t.connectionsMu.Unlock()
+	closed := 0
+	for _, conn := range connections {
+		// A timed-out request does not prove the shared HTTP/2 connection is dead.
+		// Preserve sockets that are still receiving bytes for sibling streams.
+		if lastRead := conn.lastRead.Load(); lastRead != 0 && time.Since(time.Unix(0, lastRead)) < handshakeTimeout {
+			continue
+		}
+		_ = conn.Close()
+		closed++
+	}
+	return closed
+}
+
+type trackedPoolConn struct {
+	net.Conn
+	owner    *poolTransport
+	once     sync.Once
+	lastRead atomic.Int64
+}
+
+func (c *trackedPoolConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.lastRead.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (c *trackedPoolConn) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { c.owner.forgetConnection(c) })
+	return err
 }
 
 // transportSlot holds one pool member behind an atomically swappable pointer, so
@@ -175,7 +255,7 @@ type Client struct {
 	// newTransport builds a fresh HTTP/2 transport (and therefore a fresh
 	// underlying TLS/REALITY connection on first use). Held so a stale slot can
 	// be swapped for a live one.
-	newTransport func() *http2.Transport
+	newTransport func() *poolTransport
 	slots        []*transportSlot
 	slotIdx      atomic.Uint64
 	refreshMu    sync.Mutex
@@ -195,6 +275,15 @@ type Client struct {
 	// noGRPCHeader suppresses the default "Content-Type: application/grpc" on
 	// streamed-body requests (stream-one, stream-up). See option.NoGRPCHeader.
 	noGRPCHeader bool
+	// plog is the pool's diagnostic logger (nil in unit tests). The counters below
+	// ride the connect path but are plain atomics touched only on the rare
+	// pool-health events under investigation (stutter / speed drops), so they cost
+	// nothing on the hot path. Temporary instrumentation for the on-device test.
+	plog          log.ContextLogger
+	warmTimeouts  atomic.Int64
+	coldTimeouts  atomic.Int64
+	slowWarm      atomic.Int64
+	poolRefreshes atomic.Int64
 }
 
 // NewClient builds an XHTTP client transport. The tlsConfig (possibly Reality)
@@ -244,19 +333,25 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	// factory is retained so a stale member can be rebuilt in place.
 	var (
 		scheme       string
-		newTransport func() *http2.Transport
+		newTransport func() *poolTransport
 	)
 	if tlsConfig == nil {
 		scheme = "http"
 		// Plaintext h2c: speak HTTP/2 over a cleartext TCP conn so the same
 		// streaming request/response body machinery works without TLS.
-		newTransport = func() *http2.Transport {
-			return &http2.Transport{
+		newTransport = func() *poolTransport {
+			member := &poolTransport{}
+			member.rt = &http2.Transport{
 				AllowHTTP: true,
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
-					return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
+					conn, err := dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
+					if err != nil {
+						return nil, err
+					}
+					return member.trackConnection(conn), nil
 				},
 			}
+			return member
 		}
 	} else {
 		scheme = "https"
@@ -264,12 +359,18 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
 		}
 		tlsDialer := tls.NewDialer(dialer, tlsConfig)
-		newTransport = func() *http2.Transport {
-			return &http2.Transport{
+		newTransport = func() *poolTransport {
+			member := &poolTransport{}
+			member.rt = &http2.Transport{
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
-					return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
+					conn, err := tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
+					if err != nil {
+						return nil, err
+					}
+					return member.trackConnection(conn), nil
 				},
 			}
+			return member
 		}
 	}
 	slots := make([]*transportSlot, transportPoolSize)
@@ -277,7 +378,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		s := &transportSlot{}
 		// Cold by construction: none of these has dialed yet, so the first dial over
 		// each gets freshHandshakeTimeout.
-		s.ptr.Store(&poolTransport{rt: newTransport()})
+		s.ptr.Store(newTransport())
 		slots[i] = s
 	}
 
@@ -307,6 +408,14 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		headers[key] = value
 	}
 
+	// Best-effort: the v2ray transport registry hands us only a context, so pull the
+	// log factory out of it. Absent (unit tests, a bare context) leaves plog nil and
+	// every diagnostic call is guarded.
+	var plog log.ContextLogger
+	if factory := service.FromContext[log.Factory](ctx); factory != nil {
+		plog = factory.NewLogger("xhttp-pool")
+	}
+
 	return &Client{
 		ctx:            ctx,
 		dialer:         dialer,
@@ -322,6 +431,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		meta:           meta,
 		realityEnabled: tlsConfigIsReality(tlsConfig),
 		noGRPCHeader:   options.NoGRPCHeader,
+		plog:           plog,
 	}, nil
 }
 
@@ -370,7 +480,7 @@ func (c *Client) Close() error {
 // connection is where every new dial then queues, stalls behind TCP head-of-line
 // blocking, and eventually trips the handshake budget.
 //
-// The scan is over 8 slots and stops at the first empty one, so it costs less
+// The scan is over the small pool and stops at the first empty one, so it costs less
 // than the atomic increment it replaces. Ties break at a rotating offset, which
 // keeps the all-equal case (an idle pool) exactly round-robin.
 //
@@ -411,6 +521,11 @@ func (c *Client) refreshAllSlots() {
 		return
 	}
 	c.lastRefresh = now
+	if n := c.poolRefreshes.Add(1); c.plog != nil {
+		c.plog.Warn("xhttp-pool: swapping all ", len(c.slots),
+			" transports after a handshake timeout (pool-refreshes=", n,
+			") — a burst then quiet is a post-idle wake; a steady drip under load is churn")
+	}
 	for _, s := range c.slots {
 		old := s.ptr.Swap(c.newPoolTransport())
 		if old != nil {
@@ -422,26 +537,56 @@ func (c *Client) refreshAllSlots() {
 // newPoolTransport wraps a freshly built transport as a cold pool member, so its
 // first dial is measured against freshHandshakeTimeout rather than the warm one.
 func (c *Client) newPoolTransport() *poolTransport {
-	return &poolTransport{rt: c.newTransport()}
+	return c.newTransport()
 }
 
 // handshakeVia runs one handshake-bounded round trip over a pool member, giving a
 // never-yet-used transport the cold budget, and promoting it to the warm one the
 // moment it proves it can answer.
 func (c *Client) handshakeVia(pt *poolTransport, req *http.Request) (*http.Response, error) {
-	timeout := handshakeTimeout
-	if !pt.warm.Load() {
-		timeout = freshHandshakeTimeout
+	warm := pt.warm.Load()
+	timeout := freshHandshakeTimeout
+	if warm {
+		timeout = handshakeTimeout
 	}
+	start := timeNow()
 	response, err := handshakeRoundTrip(pt, req, timeout)
+	elapsed := timeNow().Sub(start)
 	if err == nil {
 		pt.warm.Store(true)
+		// A warm dial that answered only just inside the (now larger) budget is the
+		// tell-tale of the churn under investigation: on the old 5s budget it would
+		// have been declared dead and refreshed the whole pool. Logged, not acted on.
+		if warm && elapsed >= slowWarmThreshold {
+			n := c.slowWarm.Add(1)
+			if c.plog != nil {
+				c.plog.Warn("xhttp-pool: slow warm handshake ", elapsed.Round(time.Millisecond),
+					" within budget ", timeout, " — would have tripped the old 5s budget (slow-warm=", n, ")")
+			}
+		}
+		return response, nil
+	}
+	if err == errHandshakeTimeout {
+		if warm {
+			n := c.warmTimeouts.Add(1)
+			if c.plog != nil {
+				c.plog.Warn("xhttp-pool: WARM member handshake timed out after ", timeout,
+					" — pool refresh incoming (warm-timeouts=", n,
+					"); inspect recent traffic to distinguish congestion from a dead link")
+			}
+		} else {
+			n := c.coldTimeouts.Add(1)
+			if c.plog != nil {
+				c.plog.Warn("xhttp-pool: cold member handshake timed out after ", timeout,
+					" (cold-timeouts=", n, ")")
+			}
+		}
 	}
 	return response, err
 }
 
 // retireTransport is the whole reaction to a handshake timeout observed on rt:
-// refresh the pool, then close rt's own idle connections.
+// refresh the pool, then close rt's underlying sockets.
 //
 // The second half is not redundant. refreshAllSlots can only close what it swaps,
 // and at the instant it runs rt still owns the stream that is in the middle of
@@ -454,13 +599,21 @@ func (c *Client) handshakeVia(pt *poolTransport, req *http.Request) (*http.Respo
 // hole — a sibling dial timing out inside the window skips the refresh entirely.
 //
 // Calling it after refreshAllSlots is what makes the ordering work: by then rt is
-// out of rotation, and its cancelled stream has been reaped by RoundTrip's own
-// cleanup, so the connection is genuinely idle and actually closes. Closing idle
-// connections never touches a live stream, so even a false positive (a merely
-// slow handshake) costs at most a reconnect, which is the same trade the pool
-// refresh already makes.
+// out of rotation. A production poolTransport reaps silent sockets but preserves
+// sockets with recent inbound traffic, where congestion may explain the timeout.
+// Other members' live streams are also preserved. The generic fallback keeps
+// tests and alternate round-trippers reapable through CloseIdleConnections.
 func (c *Client) retireTransport(rt http.RoundTripper) {
 	c.refreshAllSlots()
+	if member, ok := rt.(*poolTransport); ok {
+		closed := member.forceCloseConnections()
+		if closed > 0 && c.plog != nil {
+			c.plog.Warn("xhttp-pool: force-closed ", closed,
+				" active socket(s) on the timed-out member so pinned app connections can reopen")
+		}
+		member.CloseIdleConnections()
+		return
+	}
 	// Matched by capability, not by concrete type: *http2.Transport and *http.Transport
 	// both qualify, and a test can hand in a recorder.
 	if closer, ok := rt.(interface{ CloseIdleConnections() }); ok {

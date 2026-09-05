@@ -32,12 +32,20 @@ func (c *Client) applyGRPCHeader(request *http.Request) {
 // handshakeTimeout bounds how long a dial over an already-warm pool member waits
 // for its first response header before treating the connection as dead. A healthy
 // XHTTP inbound answers a new stream immediately (measured ~330ms even with 100
-// streams held on the pool), so 5s is a wide margin over a single round trip
-// while still capping the post-idle zombie stall that otherwise runs to tens of
-// seconds. A cold member is measured against [freshHandshakeTimeout] instead — it
-// has a TLS/REALITY handshake to pay for first. A var (not const) so tests can
-// shrink it, mirroring timeNow.
-var handshakeTimeout = 5 * time.Second
+// streams held on the pool).
+//
+// Raised 5s→10s (28.08.2026): the old 5s was calibrated on a clean link, but on a
+// congested mobile uplink the HEADERS of a new stream queue behind a bufferbloated
+// send buffer for seconds, so a merely-slow warm member tripped the budget, was
+// declared dead, and refreshed the WHOLE pool — a mass reconnect of all REALITY
+// handshakes that the user feels as a stutter, and one latency spike could cascade.
+// 10s still caps the post-idle zombie stall well under the tens-of-seconds a dead
+// socket runs to, and stays below the cold [freshHandshakeTimeout]. A warm handshake
+// that comes back slower than the old budget is logged (slowWarmThreshold) so a
+// device test can show how much churn the old value was causing. A cold member is
+// measured against [freshHandshakeTimeout] instead — it has a TLS/REALITY handshake
+// to pay for first. A var (not const) so tests can shrink it, mirroring timeNow.
+var handshakeTimeout = 10 * time.Second
 
 // uploadTimeout bounds one packet-up upload POST: a finite body posted to
 // "<path>/<sessionId>/<seq>", answered by a short ack. Until it existed this was
@@ -184,17 +192,18 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	// lx: 050 — the conn is handed up before RoundTrip has raised the stream, so
 	// anything written meanwhile (the VLESS/encryption handshake) blocks on an
 	// unread pipe. Until the stream is up, cancelling the dial context must free
-	// that write; the guard stops at `created` so it can never tear down a live
-	// connection once the stream exists.
+	// that write. The guard is stopped immediately before `setupReader`: waiting
+	// for it there makes the handoff and cancellation mutually exclusive, so a
+	// cancellation that races with the response cannot tear down a live stream.
 	stopGuard := watchDialContext(ctx, conn.created, func(err error) {
 		// Break the pipe from the read half so the blocked Write sees this error
 		// rather than a bare ErrClosedPipe (see writeDeadline).
 		pipeReader.CloseWithError(err)
 	})
 	go func() {
-		defer stopGuard()
 		response, err := c.handshakeVia(lease.rt, request)
 		if err != nil {
+			stopGuard()
 			// stream-one carries its upload body on the same stream, so it can't
 			// be replayed on a fresh connection here; refresh the pool so the
 			// app's immediate reopen lands on a live member, and fail this dial.
@@ -209,6 +218,10 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 			conn.setupReader(nil, err)
 			return
 		}
+		// Complete the cancellation guard before publishing the response body.
+		// `defer stopGuard()` used to run after setupReader, leaving a small gap
+		// where ctx.Done could close the upload pipe after the stream was live.
+		stopGuard()
 		if response.StatusCode != http.StatusOK {
 			response.Body.Close()
 			lease.release()
@@ -229,15 +242,28 @@ func watchDialContext(ctx context.Context, done <-chan struct{}, onCancel func(e
 		return func() {}
 	}
 	stop := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		select {
 		case <-ctx.Done():
+			// Both channels can be ready at the same time. Prefer a completed
+			// handoff: a plain three-way select is allowed to choose ctx.Done()
+			// randomly and close a stream that is already live.
+			select {
+			case <-done:
+				return
+			default:
+			}
 			onCancel(ctx.Err())
 		case <-done:
 		case <-stop:
 		}
 	}()
-	return func() { close(stop) }
+	return func() {
+		close(stop)
+		<-finished
+	}
 }
 
 // dialStreamUp opens a streamed POST for the upload direction and a separate GET
