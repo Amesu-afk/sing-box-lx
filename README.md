@@ -19,9 +19,9 @@ In the sing-box ecosystem, forks that add XHTTP / AmneziaWG fall into two camps 
 | Fork | Features | Approach | Upstream sync |
 |------|----------|----------|---------------|
 | **SagerNet/sing-box** (upstream) | baseline | — | — |
-| **shtorm-7/sing-box-extended** | dozens (WARP, MASQUE, MTProxy, XHTTP, AWG2, …) | "kitchen sink", edits everywhere | separate branch, no rebasing onto tags |
+| **shtorm-7/sing-box-extended** | dozens (WARP, MASQUE, MTProxy, XHTTP, AWG, …) | "kitchen sink", edits everywhere | separate branch, no rebasing onto tags |
 | **amnezia-vpn/amnezia-box**, **hoaxisr/amnezia-box** | AWG only | heavy fork, in-place edits | branch sync (`dev-next`/`stable-next`) |
-| **➡ sing-box-lx** (this repo) | **small set (XHTTP, AWG2, MASQUE, VLESS PQ encryption, DNS group, observability, balancing, energy, `chain`)** | **thin: new files behind build tags, minimal upstream touch** | **rebase of atomic `// lx` commits onto upstream tags** |
+| **➡ sing-box-lx** (this repo) | **small set (XHTTP, AWG, MASQUE, VLESS PQ encryption, DNS group, observability, balancing, energy, `chain`)** | **thin: new files behind build tags, minimal upstream touch** | **rebase of atomic `// lx` commits onto upstream tags** |
 
 **How we differ:**
 
@@ -152,7 +152,7 @@ This is the **only profile device-proven against a real LTE/WARP DPI** (~330 ms)
 `sip` are implemented as correct client-initiated requests but are blocked as a protocol class
 toward the Cloudflare WARP edge (raw DNS/STUN/SIP to a datacenter IP is itself anomalous) —
 they are kept for other providers whose DPI only checks packet well-formedness. See
-[docs-lx/lx-protocols-transports.md §2](docs-lx/lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3) and [AWG2 feature](SPECS/FEATURES/003-AWG2/FEATURE.md) · [examples](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
+[docs-lx/lx-protocols-transports.md §2](docs-lx/lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3) and [AWG feature](SPECS/FEATURES/003-AWG/FEATURE.md) · [examples](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
 
 ### MASQUE (outbound — Cloudflare WARP)
 
@@ -284,7 +284,7 @@ upstream tag (vX.Y.Z)
         └─►  branch lx = upstream + N atomic // lx commits
                  ├─ FORK_BOOTSTRAP (Makefile.lx, CI, version)
                  ├─ XHTTP client transport
-                 ├─ AWG2 client endpoint
+                 ├─ AWG client endpoint
                  └─ … (future features — same atomic // lx commits)
 ```
 

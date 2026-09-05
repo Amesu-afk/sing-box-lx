@@ -1,6 +1,6 @@
 # SPEC: 080 — AWG3_HEADER_PROTECTION_TIMINGS
 
-**Фича:** [AWG2](../../FEATURES/003-AWG2/FEATURE.md)
+**Фича:** [AWG](../../FEATURES/003-AWG/FEATURE.md)
 
 | Поле | Значение |
 |------|----------|

@@ -1,6 +1,6 @@
 # SPEC: 007 — AWG_OVER_WIREGUARD_DETOUR_GUARD
 
-**Фича:** [AWG2](../../FEATURES/003-AWG2/FEATURE.md)
+**Фича:** [AWG](../../FEATURES/003-AWG/FEATURE.md)
 
 | Поле | Значение |
 |------|----------|

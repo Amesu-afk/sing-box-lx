@@ -19,9 +19,9 @@
 | Форк | Фичи | Подход | Синк с upstream |
 |------|------|--------|-----------------|
 | **SagerNet/sing-box** (upstream) | базовый | — | — |
-| **shtorm-7/sing-box-extended** | десятки (WARP, MASQUE, MTProxy, XHTTP, AWG2, …) | «комбайн», правки повсюду | отдельная ветка, без ребейза на теги |
+| **shtorm-7/sing-box-extended** | десятки (WARP, MASQUE, MTProxy, XHTTP, AWG, …) | «комбайн», правки повсюду | отдельная ветка, без ребейза на теги |
 | **amnezia-vpn/amnezia-box**, **hoaxisr/amnezia-box** | только AWG | толстый форк, правки in-place | синк по веткам (`dev-next`/`stable-next`) |
-| **➡ sing-box-lx** (этот репозиторий) | **малый набор (XHTTP, AWG2, MASQUE, VLESS PQ-шифрование, DNS-группа, наблюдаемость, балансировка, энергосбережение, `chain`)** | **тонкий: новые файлы за build-tag, минимум касаний upstream** | **ребейз атомарных `// lx`-коммитов на upstream-теги** |
+| **➡ sing-box-lx** (этот репозиторий) | **малый набор (XHTTP, AWG, MASQUE, VLESS PQ-шифрование, DNS-группа, наблюдаемость, балансировка, энергосбережение, `chain`)** | **тонкий: новые файлы за build-tag, минимум касаний upstream** | **ребейз атомарных `// lx`-коммитов на upstream-теги** |
 
 **Чем мы отличаемся:**
 
@@ -152,7 +152,7 @@ QUIC-сессия. Это **единственный профиль, device-пр
 `dns`/`stun`/`sip` реализованы как корректные клиент-инициированные запросы, но режутся как класс
 протокола к WARP-edge (raw DNS/STUN/SIP к дата-центровому IP сам по себе аномален) — сохранены
 для других провайдеров, чей DPI проверяет лишь корректность пакета. См.
-[docs-lx/lx-protocols-transports.ru.md §2](docs-lx/lx-protocols-transports.ru.md#2-amneziawg-20-awg2) и [фича AWG2](SPECS/FEATURES/003-AWG2/FEATURE.md) · [примеры](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
+[docs-lx/lx-protocols-transports.ru.md §2](docs-lx/lx-protocols-transports.ru.md#2-amneziawg-20-awg2) и [фича AWG](SPECS/FEATURES/003-AWG/FEATURE.md) · [примеры](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
 
 ### MASQUE (outbound — Cloudflare WARP)
 
@@ -285,7 +285,7 @@ upstream tag (vX.Y.Z)
         └─►  ветка lx = upstream + N атомарных // lx-коммитов
                  ├─ FORK_BOOTSTRAP (Makefile.lx, CI, версия)
                  ├─ XHTTP client transport
-                 ├─ AWG2 client endpoint
+                 ├─ AWG client endpoint
                  └─ … (новые фичи — такими же атомарными // lx-коммитами)
 ```
 

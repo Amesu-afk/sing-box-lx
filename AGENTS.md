@@ -1,6 +1,6 @@
 # Руководство для AI-агентов — sing-box-lx
 
-`sing-box-lx` — **тонкий downstream** апстрима [SagerNet/sing-box](https://github.com/SagerNet/sing-box): upstream **плюс небольшой набор клиентских фич** (XHTTP, AWG2, MASQUE, VLESS-шифрование, DNS-группа, наблюдаемость, балансировка, энергосбережение — актуальный индекс в [SPECS/FEATURES/](SPECS/FEATURES/README.md)) и ничего больше.
+`sing-box-lx` — **тонкий downstream** апстрима [SagerNet/sing-box](https://github.com/SagerNet/sing-box): upstream **плюс небольшой набор клиентских фич** (XHTTP, AWG, MASQUE, VLESS-шифрование, DNS-группа, наблюдаемость, балансировка, энергосбережение — актуальный индекс в [SPECS/FEATURES/](SPECS/FEATURES/README.md)) и ничего больше.
 
 Главная ценность проекта — **согласованность с upstream**. Любое изменение оценивается по тому, насколько дёшево оно переживёт следующий мерж `upstream/testing` (ритуал — [docs-lx/lx-release-runbook.md](docs-lx/lx-release-runbook.md)).
 

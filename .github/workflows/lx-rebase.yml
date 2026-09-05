@@ -127,7 +127,7 @@ jobs:
 
           - clean rebase (no conflicts)
           - \`make -f Makefile.lx lx-build\` succeeds
-          - \`sing-box check\` passes for XHTTP + AWG2 sample configs
+          - \`sing-box check\` passes for XHTTP + AWG sample configs
 
           Review the \`// lx\` seams (\`grep -rn "// lx"\`), then update \`lx\` (rebase / fast-forward) **manually** — this workflow never force-pushes \`lx\`.
           EOF

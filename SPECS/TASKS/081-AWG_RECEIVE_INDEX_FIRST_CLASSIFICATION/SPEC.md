@@ -1,6 +1,6 @@
 # SPEC: 081 — AWG_RECEIVE_INDEX_FIRST_CLASSIFICATION
 
-**Фича:** [AWG2](../../FEATURES/003-AWG2/FEATURE.md)
+**Фича:** [AWG](../../FEATURES/003-AWG/FEATURE.md)
 
 | Поле | Значение |
 |------|----------|

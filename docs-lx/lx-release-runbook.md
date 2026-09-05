@@ -111,7 +111,7 @@ nil panic in `udpNat.Start()` on the device when a WireGuard endpoint started �
 other time.
 
 ⚠️ **A fast-forward of the fork is IMPOSSIBLE** — upstream branches contain zero of our lx commits,
-and updating would wipe the AWG2 obfuscation and SPEC 041. The correct path is to carry OUR patches
+and updating would wipe the AWG obfuscation and SPEC 041. The correct path is to carry OUR patches
 on top of the full upstream line (re-graft), not to pull upstream fragments onto our old base.
 
 ⚠️ **After a re-graft, bump `upstream.version`** (at the root, next to `go.version`) — it is the

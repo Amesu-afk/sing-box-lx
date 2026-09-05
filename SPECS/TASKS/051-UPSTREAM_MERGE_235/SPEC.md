@@ -107,11 +107,11 @@ boxdd 7, release 6, daemon 4, wg/wireguard 3, windivert 2.
   на `NewCapsuleParser().Next()`. `CapsuleReader` реализует `quicvarint.Reader`,
   поэтому наши `parse*Capsule` не тронуты.
 - **`allowedIPs.LookupFromPacket`** — апстрим зовёт метод, которого нет в базе
-  нашего AWG2-форка `wireguard-go`. С nil-хуком (`peerByIPPacketFunc`) и nil-пакетом
+  нашего AWG-форка `wireguard-go`. С nil-хуком (`peerByIPPacketFunc`) и nil-пакетом
   функция сводится к lookup по dst-адресу, что и делает наш `Lookup(ip []byte)`.
   Помечено `lx:begin awg-lookup`; **пересмотреть при перепрививке сабмодуля**.
   ⚠️ Fast-forward форка на `sagernet/dev` **невозможен**: там ноль наших
-  lx-коммитов, обновление уничтожило бы всю AWG2-обфускацию и SPEC 041. Нужен
+  lx-коммитов, обновление уничтожило бы всю AWG-обфускацию и SPEC 041. Нужен
   re-graft по существующей схеме (см. [[wg-1.14-migration-is-submodule-rebase]]).
 
 ### Проверки R1–R3
@@ -126,7 +126,7 @@ boxdd 7, release 6, daemon 4, wg/wireguard 3, windivert 2.
   сдвинуты.
 - **R4** ⏳ device-прогон — остаток до релизного тега.
 
-## ✅ Блокер снят (`577fe8789`): tailscale 1.102 требовал API, которого не было в базе AWG2-форка
+## ✅ Блокер снят (`577fe8789`): tailscale 1.102 требовал API, которого не было в базе AWG-форка
 
 CI после мержа красный (`lx-ci` run 30998205737, шаги lint и build-check):
 
@@ -158,11 +158,11 @@ tailscale@v1.102.1/wgengine/wgcfg/device.go:29: undefined: device.NewPeerConfig
 (5 файлов, ~220 строк: `allowedips.go`, `device.go`, `peer.go`, `receive.go`,
 `send.go`). Пробный `cherry-pick -n` дал конфликты в трёх файлах
 (`allowedips.go`, `device.go`, `peer.go`) — это горячий путь WireGuard, поверх
-которого лежит наша AWG2-обфускация, поэтому разрешать его без AWG-стенда
+которого лежит наша AWG-обфускация, поэтому разрешать его без AWG-стенда
 нельзя. Пробный прогон откачен, сабмодуль чист.
 
 ⚠️ Fast-forward форка на `sagernet/dev` **невозможен**: там ноль наших
-lx-коммитов, обновление снесло бы всю AWG2-обфускацию и SPEC 041.
+lx-коммитов, обновление снесло бы всю AWG-обфускацию и SPEC 041.
 
 **Статус мержа:** ядро (`go build ./...`, `go test ./...`, `lx-check`) собиралось
 и проходило — блокер бил только по пути `libbox` → `tailssh`, то есть по
