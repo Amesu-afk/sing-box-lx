@@ -28,6 +28,33 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.36
+
+Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.36.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.36.md).
+
+**Что вошло:**
+
+- 🔐 **REALITY против Xray ≥ v26.9.8: узлы молча уходили на камуфляжный сайт
+  (`reality verification failed`)** ([SPEC 083](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md)).
+  `XTLS/REALITY@8cdf7bf` (в Xray-core v26.9.8/v26.9.9) требует key_share `X25519MLKEM768`
+  перед необязательным X25519 и без него проксирует соединение на `dest`. У нас гибрида не
+  было, потому что апстримный `ClientHandshake` сам вырезал его из `SupportedCurves`/`KeyShare`
+  (костыль `dbdcce20a` «Update utls to v1.7.2»); апстрим sing-box сломан так же
+  (SagerNet#4520). Фикс в `common/tls/reality_client.go`: фильтр и второй
+  `BuildHandshakeState` сняты — спека `HelloChrome_133` шлёт `GREASE, X25519MLKEM768, X25519`;
+  `AuthKey` считается по `keyShareKeys.Ecdhe`, при nil — по `MlkemEcdhe` (порядок выбора
+  сервера, как у Xray-клиента и mihomo). Стенд на Mac (loopback, Xray darwin/arm64): до патча
+  против v26.9.9 все отпечатки — `verification failed`; после — `chrome` 204×3; против v26.7.28
+  и v26.7.11 все отпечатки 204 до и после (регрессии нет). Не-Chrome отпечатки гибрида не несут
+  и против нового Xray мертвы by design (паритет с Xray) — подмена на уровне LxBox (§281).
+- ✅ **SPEC 053 (minClientVer 26.3.27) закрыта полевым прогоном** тем же стендом: Xray v26.7.11
+  с незаданным `minClientVer` — 204; контрольная сборка с апстримными `1.8.1` —
+  `hs.c.conn == conn: false`, `reality verification failed`.
+- База апстрима без изменений: `upstream/stable` a25ad8ce5 (`v1.14.0` + 16). Дрейф 17
+  коммитов (`b7eb49bb8`, `common/tls` не трогает) отложен сознательно: хотфикс, мерж — отдельной
+  задачей.
+
 #### v1.14.0-lx.35
 
 Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
