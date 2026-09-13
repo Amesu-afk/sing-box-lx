@@ -46,17 +46,26 @@ func (g *Group) NewSingPacketConn(conn N.PacketConn, isExternal bool) N.PacketCo
 	return &SingPacketConn{PacketConn: conn, group: g, element: item}
 }
 
+// lx: SPEC 084 — the underlying Close must run OUTSIDE g.access. A registered
+// conn may itself be another group's wrapper (nested selectors wrap the inbound
+// side outer→inner and the dial side inner→outer), so closing under the mutex
+// takes two group locks in opposite orders → ABBA deadlock (issue #20). The
+// sweep therefore detaches the entries under the lock and closes them after
+// releasing it; a concurrent wrapper Close on the same entry is harmless (list
+// Remove is a no-op for a detached element, double Close is tolerated by conns).
 func (g *Group) Interrupt(interruptExternalConnections bool) {
 	g.access.Lock()
-	defer g.access.Unlock()
-	var toDelete []*list.Element[*groupConnItem]
-	for element := g.connections.Front(); element != nil; element = element.Next() {
+	var toClose []io.Closer
+	for element := g.connections.Front(); element != nil; {
+		next := element.Next()
 		if !element.Value.isExternal || interruptExternalConnections {
-			element.Value.conn.Close()
-			toDelete = append(toDelete, element)
+			toClose = append(toClose, element.Value.conn)
+			g.connections.Remove(element)
 		}
+		element = next
 	}
-	for _, element := range toDelete {
-		g.connections.Remove(element)
+	g.access.Unlock()
+	for _, conn := range toClose {
+		conn.Close()
 	}
 }

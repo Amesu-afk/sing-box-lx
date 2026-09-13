@@ -28,10 +28,11 @@ type Conn struct {
 	c.element.Value.internal = true
 }*/
 
+// lx: SPEC 084 — detach under the lock, close after it (see Group.Interrupt).
 func (c *Conn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
+	c.group.access.Unlock()
 	return c.Conn.Close()
 }
 
@@ -57,10 +58,11 @@ type PacketConn struct {
 	c.element.Value.internal = true
 }*/
 
+// lx: SPEC 084 — detach under the lock, close after it (see Group.Interrupt).
 func (c *PacketConn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
+	c.group.access.Unlock()
 	return c.PacketConn.Close()
 }
 
@@ -83,10 +85,11 @@ type SingPacketConn struct {
 	element *list.Element[*groupConnItem]
 }
 
+// lx: SPEC 084 — detach under the lock, close after it (see Group.Interrupt).
 func (c *SingPacketConn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
+	c.group.access.Unlock()
 	return c.PacketConn.Close()
 }
 
