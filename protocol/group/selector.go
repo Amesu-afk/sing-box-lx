@@ -177,16 +177,17 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 
 func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	// lx: SPEC 064 — register the inbound conn, since the outbound socket never
-	// passes through Selector.DialContext on this path (the dialer handed to
-	// ConnectionManager is `selected`, not `s`). Wrapping before the branch also
-	// covers nested groups and handler outbounds. Approach from upstream PR #4285.
+	// lx: SPEC 064 — register the inbound conn. Upstream 515a73e4e now hands `s`
+	// (not `selected`) to ConnectionManager, so the plain-outbound branch below
+	// registers its outbound socket via Selector.DialContext on its own; the
+	// handler branch (nested groups, handler outbounds) still bypasses it, and
+	// wrapping before the branch keeps both covered. Approach from upstream PR #4285.
 	conn = s.interruptGroup.NewConn(conn, true)
 	selected := s.selected.Load()
 	if outboundHandler, isHandler := selected.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
-		s.connection.NewConnection(ctx, selected, conn, metadata, onClose)
+		s.connection.NewConnection(ctx, s, conn, metadata, onClose)
 	}
 }
 
@@ -198,7 +199,7 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	if outboundHandler, isHandler := selected.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
-		s.connection.NewPacketConnection(ctx, selected, conn, metadata, onClose)
+		s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
 	}
 }
 

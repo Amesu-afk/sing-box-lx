@@ -596,9 +596,9 @@ func (e *Endpoint) applyPauseEvent(event int) {
 		return
 	}
 	switch event {
-	case pause.EventDevicePaused, pause.EventNetworkPause:
+	case pause.EventNetworkPause:
 		e.device.Down()
-	case pause.EventDeviceWake, pause.EventNetworkWake:
+	case pause.EventNetworkWake:
 		// lx: SPEC 020/007 — a suspended device (idle-suspend or AWG guard) stays
 		// down through pause/wake cycles; the owning state machine wakes it
 		// (resumeOnDial) or keeps it down (guard) on its own terms.
