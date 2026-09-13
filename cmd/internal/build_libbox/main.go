@@ -118,13 +118,17 @@ func init() {
 	// lx:end openvpn
 	darwinTags = append(darwinTags, "with_dhcp", "grpcnotrace")
 	// memcTags = append(memcTags, "with_tailscale")
-	// lx:begin no-tailscale
-	// Drop Tailscale from the libbox AAR: the client fork has no tailscale endpoints,
-	// and tailscale is the single largest dependency by size in the APK. Keeps the AAR
-	// aligned with the desktop LX_TAGS set (Makefile.lx). The ts_omit_* tags only trim
-	// with_tailscale, so they go with it. Restore the upstream append below to re-enable.
-	// sharedTags = append(sharedTags, "with_tailscale", "ts_omit_logtail", "ts_omit_ssh", "ts_omit_drive", "ts_omit_taildrop", "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube", "ts_omit_aws", "ts_omit_synology", "ts_omit_bird")
-	// lx:end no-tailscale
+	// lx:begin tailscale
+	// Tailscale ships in the libbox AAR (owner decision, 2026-09-14, LxBox contract
+	// ## 13 / D-103): LxBox receives tailscale nodes from the launcher, so the endpoint,
+	// DNS transport and DERP service have to be present at runtime. This is upstream's
+	// mobile tag set unchanged: with_tailscale plus the ts_omit_* trims (logtail, ssh,
+	// drive, taildrop, webclient, doctor, capture, kube, aws, synology, bird), which
+	// strip client features a VPN app never calls. Tailscale is the single largest
+	// dependency in the APK; the size cost is accepted. The AAR now matches the desktop
+	// LX_TAGS set (Makefile.lx), which carries with_tailscale since 2026-09-04.
+	sharedTags = append(sharedTags, "with_tailscale", "ts_omit_logtail", "ts_omit_ssh", "ts_omit_drive", "ts_omit_taildrop", "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube", "ts_omit_aws", "ts_omit_synology", "ts_omit_bird")
+	// lx:end tailscale
 	notMemcTags = append(notMemcTags, "with_low_memory")
 	debugTags = append(debugTags, "debug")
 }

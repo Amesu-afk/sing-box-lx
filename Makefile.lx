@@ -12,9 +12,11 @@
 # with_tailscale is IN for desktop AND router binaries (owner decision, 2026-09-04): the
 # tailscale endpoint + DNS transport + DERP service, pure Go, builds CGO_ENABLED=0 on every
 # release target incl. mips/mipsle softfloat against our wireguard-go/sing-tun/gvisor
-# submodules. Cost is size only (~+13 MB darwin, ~+16 MB mips). It stays OUT of the
-# Android AAR (cmd/internal/build_libbox/main.go, lx:no-tailscale) — LxBox has no
-# tailscale UI and it is the single largest dependency in the APK.
+# submodules. Cost is size only (~+13 MB darwin, ~+16 MB mips). Since 2026-09-14 the
+# Android AAR carries it as well (cmd/internal/build_libbox/main.go, lx:tailscale —
+# owner decision, LxBox contract ## 13 / D-103): LxBox receives tailscale nodes from
+# the launcher. The AAR adds upstream's ts_omit_* trims on top; this desktop set does
+# not. Size cost in the APK accepted.
 #
 # with_clash_api IS kept here: the desktop/CLI binary is driven through the Clash REST
 # API by external dashboards (yacd / MetaCubeXD / clash-dashboard); there is no native
