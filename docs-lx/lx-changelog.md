@@ -30,7 +30,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
 
 #### v1.14.0-lx.38
 
-Стабильный релиз. Пользовательские ноты (EN+RU):
+Стабильный релиз: Tailscale в Android AAR и хотфикс вложенных selector'ов. Пользовательские ноты (EN+RU):
 [`docs-lx/releases/v1.14.0-lx.38.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.38.md).
 
 **Что вошло:**
@@ -50,6 +50,29 @@ required for stable tags); this changelog section is the fallback used for pre-r
   Устаревшие упоминания `lx:no-tailscale` поправлены: `lx-ci.yml`, шаблон нот в
   `lx-release.yml`, SPEC 004 (SPEC/PLAN/IMPLEMENTATION_REPORT); исторические записи
   changelog (lx.31, мерж 235) оставлены как есть с пометкой.
+- 🔒 **Вложенные selector'ы: переключение внутреннего глушило весь трафик до рестарта —
+  ABBA-дедлок `interrupt.Group`** ([SPEC 084](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/084-INTERRUPT_GROUP_ABBA_DEADLOCK/SPEC.md),
+  [issue #20](https://github.com/Leadaxe/sing-box-lx/issues/20)). Репортёр (OpenWrt, `lx.35`,
+  `global-auto-out → eu-auto-out → urltest → нода`, DoH с `detour: global-auto-out`) принёс
+  goroutine-дампы с верным диагнозом: 609→981 goroutine, 67 в `sync.Mutex.Lock` внутри
+  `common/interrupt` (47 `NewConn`, 11 `NewSingPacketConn`, 6 `Conn.Close`, 2 `Interrupt`).
+  Корень: `Group.Interrupt` и три Close-обёртки закрывали нижележащее соединение **под**
+  `g.access`; обёртка входящего SPEC 064 v2 (e3ebbbaf9, lx.25) дала вложенным selector'ам
+  второй порядок вложенности — входящее `B(A(raw))`, dial через `detour` `A(B(raw))` —
+  и `Interrupt(B)` (держит B, закрывает `A(raw)`) встречается с `Close` DoH (держит A,
+  ждёт B). Наш регресс: у апстрима inbound-обёртки нет, порядок один, «Close под замком»
+  ему безопасен. Фикс в примитиве (`common/interrupt/group.go`, `conn.go`, маркер
+  `// lx: SPEC 084`): под замком только снятие записи из списка, нижележащий `Close` после
+  `Unlock`; двойной `Close` допустим, как и раньше (`list.Remove` у sing — no-op для снятого
+  элемента). Семантика `isExternal` и состав списка не менялись. Red/green:
+  `common/interrupt/group_lx_test.go` (три обёртки, детерминирующий «затвор» — на старом коде
+  все три подтеста падают по таймауту) и `protocol/group/interrupt_nested_deadlock_lx_test.go`
+  (настоящие `Selector`'ы + `route.ConnectionManager`, сценарий репортёра — на старом коде
+  виснет `SelectOutbound`); `go test -race` по `common/interrupt`, `protocol/group`,
+  `protocol/chain`, компиляция под полным `LX_TAGS`. Обход для старых сборок:
+  `interrupt_exist_connections: false` у внутреннего selector'а (закрывает путь через
+  `Interrupt`, узкое окно «Close против Close» остаётся). Реестр 004-HOTFIXES дополнен,
+  в SPEC 064 — пометка о побочном эффекте v2. Остаток: полевой прогон на конфиге репортёра.
 - База апстрима без изменений: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33), дрейф 0.
   Desktop/router-бинарники и их набор тегов не меняются.
 
