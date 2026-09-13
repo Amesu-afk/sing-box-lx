@@ -28,6 +28,52 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.37
+
+Стабильный релиз, синхронизация с апстримом. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.37.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.37.md).
+
+**Что вошло:**
+
+- ⬆️ **База апстрима: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33, «Fix cronet-go»,
+  2026-09-12)** — мерж de3ac74ff, merge-base a25ad8ce5 (предыдущий мерж 03e309113), 17 коммитов
+  честной истории, 35 файлов. Прямой `git merge` дал 2 конфликта: `transport/wireguard/endpoint.go`
+  (case-метки `onPauseUpdated`) и `go.sum`. Автослияния `protocol/group/selector.go`,
+  `route/route.go`, `daemon/instance.go` сверены построчно — только lx-швы; snap-проверка
+  файлов без lx-авторства чистая; маркеры SPEC 053/083 в `common/tls/reality_client.go` на месте.
+  Тега у апстрима нет → `upstream.version` остаётся 1.14.0.
+- 🔧 **Сабмодули синхронизированы ДО ядра** (раннбук §1):
+  `submodules/wireguard-go` — cherry-pick abd9348 «conn: Reopen the bind when a connected
+  socket stops working on darwin» (= v0.0.6) → 6383749 на `lx-awg2-v005`; конфликт один —
+  апстрим удалил `receiveSingle` в `conn/msgx_darwin.go` вместе с нашей строкой `hasReserved`,
+  гейт живёт в `makeReceiveMsgX`, `git diff v0.0.6` по файлу = одна lx-строка; тесты conn/device
+  (AWG 3.x, SPEC 026/041/069/080/081) зелёные. `submodules/sing-tun` — merge `up/main` be4ce8d
+  (= v0.9.3: netlink overrun в `monitor_linux`, auto-redirect pre-match/L3, bypass verdicts) →
+  6f13ebc без конфликтов и без force-push, норма `git diff up/main HEAD` = `stack_system.go` +
+  selfheal-тест (SPEC 040) держится. `submodules/gvisor` — пин апстрима не менялся.
+- 😴 **WG-эндпоинт: `onPauseUpdated` только на `EventNetworkPause`/`EventNetworkWake`**
+  (апстрим 6364d9a5f «Fix WireGuard endpoint stopping on device sleep»); наш guard `suspended`
+  (SPEC 020/007) и детачед-диспетчер SPEC 071 сохранены. Тесты `endpoint_pause_dispatch_lx_test`
+  шлют device-события как маркеры диспетчера — семантически не задеты.
+- 🔁 **Selector: апстрим 515a73e4e пришёл к форме v1 SPEC 064** (в ветке ConnectionManager
+  передаётся `s`, не `selected`). Обёртка входящего v2 остаётся ради handler-ветки; на ветке B
+  соединение регистрируется дважды (входящее + исходящее), один `Interrupt` закрывает оба
+  узла. Заметка в [SPEC 064 §2.1](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/064-SELECTOR_INTERRUPT_DEAD_ON_INBOUND/SPEC.md);
+  тесты `interrupt_selector_lx_test` зелёные.
+- deps: `sing` v0.9.3, `sing-tun` v0.9.3, `wireguard-go` v0.0.6, `cronet-go` 0d28acc4
+  (`.github/CRONET_GO_VERSION`; musl-зеркало `lx-musl-toolchain-mirror` запущено вручную под
+  новый ключ).
+
+**Проверено:** `go build ./...` (дефолт), `make -f Makefile.lx lx-build` + `lx-check`,
+`go test ./...` без тегов и под полным `LX_TAGS` (`-checklinkname=0`), race-набор lx-ci
+(`./lxd/ ./cmd/sing-box/`), кросс-сборка linux/amd64, linux/arm64, windows/amd64, android/arm64
+(AAR-набор тегов), сборка и тесты обоих сабмодулей под darwin/linux/windows/android.
+Единственный красный — стенд `lx-test/zombie` `TestURLTestZombieDoesNotSurviveRestart`, он
+красный и на cbcc7935f (lx.36) с прежними сабмодулями (воспроизведено в worktree) — не
+регрессия мержа, lx-ci его не гоняет; бисект lx.30…lx.36 — отдельная задача.
+Не гонялось: AAR на реальном устройстве, живой AWG/WG-прогон после смены сабмодулей
+(раннбук §1.4) — остаток на владельце.
+
 #### v1.14.0-lx.36
 
 Стабильный релиз, хотфикс. Пользовательские ноты (EN+RU):
