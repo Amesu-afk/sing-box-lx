@@ -17,7 +17,7 @@
 
 **Наборы тегов (два разных, по типу сборки):**
 - Desktop (cross, `CGO_ENABLED=0`): `release/DEFAULT_BUILD_TAGS` **минус `tailscale`/`ccm`/`ocm`/`acme`** + `with_purego` + `with_xhttp,with_awg` → `Makefile.lx` `LX_TAGS`.
-- AAR (gomobile, NDK/CGO): upstream `build_libbox` mobile-set **минус `with_tailscale`** (`// lx:no-tailscale`, как desktop) + `with_xhttp,with_awg`. `with_purego`/`with_acme` не добавляем — это desktop/server-теги.
+- AAR (gomobile, NDK/CGO): upstream `build_libbox` mobile-set **с `with_tailscale` + `ts_omit_*`** (`// lx:tailscale`, с lx.38; до того — минус, `lx:no-tailscale`) + `with_xhttp,with_awg`. `with_purego`/`with_acme` не добавляем — это desktop/server-теги.
 
 ## 3. Авто-ребейз (lx-rebase.yml) — логика
 

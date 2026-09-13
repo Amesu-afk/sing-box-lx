@@ -44,7 +44,7 @@ env:
   # with_openvpn/with_openconnect: client protocols enabled 2026-08-05 (owner decision).
   # Each gates one package carrying client AND server behind the same tag upstream.
   # with_tailscale: desktop + router binaries since 2026-09-04 (owner decision); the
-  # Android AAR still drops it (build_libbox, lx:no-tailscale).
+  # Android AAR carries it too since 2026-09-14 (build_libbox, lx:tailscale, + ts_omit_*).
   BASE_TAGS: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_openvpn,with_openconnect,with_tailscale
 
 jobs:

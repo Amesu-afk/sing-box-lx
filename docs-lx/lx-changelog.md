@@ -28,6 +28,31 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.38
+
+Стабильный релиз. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.38.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.38.md).
+
+**Что вошло:**
+
+- 🤖 **Android AAR несёт `with_tailscale` + 11 `ts_omit_*`** (коммит 682ae0426; решение
+  владельца 2026-09-14 по контракту LxBox `## 13`, D-103: LxBox получает tailscale-узлы от
+  лаунчера, поэтому endpoint `tailscale`, DNS-транспорт и сервис `derp` должны быть в
+  рантайме). Правка — только `cmd/internal/build_libbox/main.go`: блок `lx:begin no-tailscale`
+  заменён на `lx:begin tailscale` с апстримным mobile-набором как есть (`with_tailscale` +
+  `ts_omit_logtail/ssh/drive/taildrop/webclient/doctor/capture/kube/aws/synology/bird`);
+  комментарий в `Makefile.lx`. AAR теперь совпадает с desktop `LX_TAGS` по tailscale
+  (там с 2026-09-04, lx.32). Замер на M1 Pro, go1.26.6, NDK r28c: `make lib_android` 11:58
+  с тегом против 12:15 без — разницы нет, tailscale-код и так компилировался через `tailssh`
+  под `with_gvisor`; `libbox.aar` 119 351 122 Б против 116 771 335 (+2,58 МБ, +2,2 %),
+  arm64 `libbox.so` +1,96 МБ, символов `tsnet` 0 → 157, предупреждений сборки нет.
+  LxBox гейтит tailscale-узел по версии ядра ≥ `1.14.0-lx.38` (`kTailscaleMinCoreVersion`).
+  Устаревшие упоминания `lx:no-tailscale` поправлены: `lx-ci.yml`, шаблон нот в
+  `lx-release.yml`, SPEC 004 (SPEC/PLAN/IMPLEMENTATION_REPORT); исторические записи
+  changelog (lx.31, мерж 235) оставлены как есть с пометкой.
+- База апстрима без изменений: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33), дрейф 0.
+  Desktop/router-бинарники и их набор тегов не меняются.
+
 #### v1.14.0-lx.37
 
 Стабильный релиз, синхронизация с апстримом. Пользовательские ноты (EN+RU):
@@ -284,7 +309,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   endpoint'а на darwin (tsnet поднимается, уходит на control-plane в login). Цена — только
   размер: ~+13 МБ darwin/arm64 (49.8 → 63.2), ~+16 МБ mips softfloat (56.2 → 72.2).
   Android-AAR тег по-прежнему **не** несёт (`lx:no-tailscale` в `build_libbox`): у LxBox нет
-  UI под tailscale, а это самая тяжёлая зависимость APK. Тег добавлен в `LX_TAGS`
+  UI под tailscale, а это самая тяжёлая зависимость APK *(снято в lx.38 — D-103)*. Тег добавлен в `LX_TAGS`
   (`Makefile.lx`) и `BASE_TAGS` (`lx-ci.yml`); README/SPEC 004 обновлены.
 - 📌 **Дрейф апстрима отложен сознательно:** `upstream/stable` ушёл на 308 коммитов от
   merge-base (замер 2026-09-04; 301 на момент lx.30). Мерж — отдельная задача класса

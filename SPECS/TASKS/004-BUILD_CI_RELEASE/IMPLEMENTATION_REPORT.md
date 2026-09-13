@@ -12,7 +12,7 @@
 `with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg`
 = upstream-клиент **− acme/tailscale/ccm/ocm** **+ `with_purego`** (CGO-free кросс-сборка `with_naive_outbound`/cronet при CGO=0) **+ `with_xhttp,with_awg`**. `LX_LDFLAGS` += **`-checklinkname=0`** (badtls `go:linkname` в `crypto/tls`, Go 1.24).
 
-**Android AAR** — `cmd/internal/build_libbox/main.go` (`// lx`-блок): `with_xhttp+with_awg` зашиты в `sharedTags`, `with_tailscale` снят (`// lx:no-tailscale`) → `libbox.aar` (SDK23) + `libbox-legacy.aar` (SDK21) через `make lib_install && make lib_android` (NDK r28 + OpenJDK 17 + gomobile). `Libbox.version()` → `-lx.N`.
+**Android AAR** — `cmd/internal/build_libbox/main.go` (`// lx`-блок): `with_xhttp+with_awg` зашиты в `sharedTags`, `with_tailscale` + `ts_omit_*` — апстримный набор (`// lx:tailscale`, с lx.38; до того снят как `lx:no-tailscale`) → `libbox.aar` (SDK23) + `libbox-legacy.aar` (SDK21) через `make lib_install && make lib_android` (NDK r28 + OpenJDK 17 + gomobile). `Libbox.version()` → `-lx.N`.
 
 ## CI — `lx-ci.yml` (политика «дёшево на коммит»)
 
