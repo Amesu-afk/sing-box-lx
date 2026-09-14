@@ -98,13 +98,12 @@ type Endpoint struct {
 	onReconfigHook    wgengine.ReconfigListener
 	sshReconfigHook   wgengine.ReconfigListener
 
-	cfg                *wgcfg.Config
-	routerCfg          *router.Config
-	dnsCfg             *tsDNS.Config
-	routeDomains       common.TypedValue[map[string]bool]
-	routeSuffixes      common.TypedValue[[]string]
-	searchDomains      atomic.Bool
-	magicHostsUnrouted atomic.Bool // lx
+	cfg           *wgcfg.Config
+	routerCfg     *router.Config
+	dnsCfg        *tsDNS.Config
+	routeDomains  common.TypedValue[map[string]bool]
+	routeSuffixes common.TypedValue[[]string]
+	searchDomains atomic.Bool
 
 	acceptRoutes               bool
 	exitNode                   string
@@ -960,11 +959,6 @@ func (t *Endpoint) PreferredDomain(metadata *adapter.InboundContext, domain stri
 	}
 	for _, suffix := range t.routeSuffixes.Load() {
 		if matchDomainSuffix(domain, suffix) {
-			return true
-		}
-	}
-	for _, suffix := range t.routeSuffixes.Load() {
-		if mDNS.IsSubDomain(suffix, domain) {
 			return true
 		}
 	}

@@ -78,10 +78,6 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	startConf.ExtraArgs = options.ExtraArgs
 	if options.ExecutablePath != "" {
-		err := adapter.CheckSecurityFeature(ctx, "Tor `executable_path`")
-		if err != nil {
-			return nil, err
-		}
 		startConf.ExePath = options.ExecutablePath
 		startConf.ProcessCreator = nil
 		startConf.UseEmbeddedControlConn = false
