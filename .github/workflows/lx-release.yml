@@ -3,6 +3,12 @@ name: lx-release
 # Cross-builds the drop-in `sing-box` binary for all platforms and publishes a
 # GitHub Release with archives + checksums. Triggered by pushing a tag like
 # v1.13.13-lx.1, or manually via workflow_dispatch. See SPECS/TASKS/004.
+#
+# lx: dry_run (workflow_dispatch only) runs the whole release matrix — windows incl.
+# Win7, linux mips, darwin, linux-musl, both AARs — and skips `publish release`:
+# no GitHub Release, no tag on origin, the artifacts stay on the run. The full
+# release build to run after a toolchain or dependency bump without cutting a tag
+# (docs-lx/lx-release-runbook.md §2b).
 
 on:
   push:
@@ -10,8 +16,12 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag, e.g. v1.13.13-lx.1 (created at the current ref if missing)'
+        description: 'Release tag, e.g. v1.13.13-lx.1 (created at the current ref if missing; with dry_run it only stamps the version, use a -dryrun suffix)'
         required: true
+      dry_run:
+        description: 'Build every release artifact but do not publish (no release, no tag)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -483,6 +493,9 @@ jobs:
   release:
     name: publish release
     needs: [build, build_darwin, build_linux_musl, build_android]
+    # lx: a tag push carries no inputs — always publish there; a manual run publishes
+    # unless dry_run. The implicit success() on `needs` still applies.
+    if: ${{ github.event_name == 'push' || inputs.dry_run != true }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
