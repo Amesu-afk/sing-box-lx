@@ -9,9 +9,13 @@
 
 - `upstream` = `https://github.com/SagerNet/sing-box.git`; отслеживаем ветку **`upstream/stable`**.
   **Дрейф меряем ТОЛЬКО против `upstream/stable`.** `upstream/testing` — линия разработки
-  апстрима, она постоянно уходит вперёд на сотни коммитов (Go-бампы, незрелые рефакторинги);
+  апстрима (следующая минорная версия в alpha), она всегда впереди — на десятки или сотни коммитов
+  (Go-бампы, незрелые рефакторинги) — и перестраивается поверх stable force-push'ем;
   мерить дрейф по ней бессмысленно — она НИКОГДА не покажет ноль, и красный гейт по testing
   заблокирует релиз навсегда. Ноль по `upstream/stable` = дрейфа нет, тег резать можно.
+  Плашка на странице форка «N commits behind SagerNet/sing-box:testing» считает именно от
+  testing (ветка апстрима по умолчанию) — это не дрейф. Кнопку **Sync fork** не нажимать: она
+  вмерживает testing в `lx`, а при конфликтах предлагает «Discard commits» — сброс `lx` к апстриму.
 - Наша рабочая ветка — **`lx`** (она же default на GitHub); интеграция upstream идёт **ручным
   `git merge upstream/stable`** (НЕ rebase; см. `wg-1.14-migration` в памяти и
   [BUILD_CI_CD](../SPECS/FEATURES/001-BUILD_CI_CD/FEATURE.md)).
@@ -42,14 +46,20 @@
 ```
 [ ] 1. дрейф в форк-САБМОДУЛЯХ проверен и закрыт ДО мержа ядра (раздел 1)
 [ ] 2. upstream-дрейф проверен (раздел 2)
+[ ] 2a. версии зависимостей сверены с upstream/stable, а не только коммиты (раздел 2a): тулчейн Go,
+        go.mod, CRONET_GO_VERSION, NDK/JDK, protoc-плагины, upstream.version, GitHub Actions;
+        каждое расхождение устранено ИЛИ помечено `lx:` с причиной и записано в changelog
 [ ] 3. если upstream впереди — взят/смержен/собран (раздел 3), ИЛИ сознательно отложен с причиной
 [ ] 4. go build ./... и build -tags with_lx_command — зелёные; полный набор — make -f Makefile.lx lx-build
        (⚠️ SPEC 049: версия тулчейна живёт в ЕДИНСТВЕННОМ файле `go.version` в корне — его читают
-        все шаги `setup-go` во всех `lx-*.yml` (сейчас go1.26.5). НЕ `go-version-file: go.mod`:
-        оттуда приедет 1.24.x, а это регрессия SPEC 044 — go1.24-AAR убивает quic-go-аутбаунды
-        на вендорских Android-ядрах, и badtls там заглушка. Win7-джоба — свой патченный тулчейн,
+        все шаги `setup-go` во всех `lx-*.yml`. НЕ `go-version-file: go.mod`:
+        оттуда приедет языковой floor, а не пин тулчейна (когда там стояло 1.24.x, это была регрессия
+        SPEC 044 — go1.24-AAR убивает quic-go-аутбаунды на вендорских Android-ядрах, и badtls там
+        заглушка). Win7-джоба — свой патченный тулчейн,
         её и апстримный workflow этот пин не трогает. Поднимать минорку пина
         только после прогона AAR на реальном устройстве)
+[ ] 4a. если с прошлого релиза менялся тулчейн или версия зависимости из раздела 2a — полная
+        релизная сборка без публикации (dry run `lx-release.yml`) зелёная (раздел 2b)
 [ ] 5. gofmt -l по lx-owned файлам — пусто
 [ ] 6. docs-lx/lx-changelog.md содержит секцию #### v<этот-тег> с верным содержимым
        (проверить ИМЕННО тем же awk, что в CI — см. раздел 4);
@@ -151,10 +161,10 @@ URL-тест меряет, WG/AWG-узлы живы, и всё это — нес
 ## 2. Проверь, не ушёл ли upstream вперёд (ОБЯЗАТЕЛЬНО перед каждым релизом)
 
 **Линия отсчёта — `upstream/stable`, и только она.** По `upstream/testing` дрейф не мерят:
-это ветка разработки апстрима, она уходит вперёд на сотни коммитов и нулём не станет никогда
-(замер 2026-08-14: stable — ahead=0, testing — ahead=233 от своей merge-base; цифра растёт
-сама по себе и приведена только как порядок величины). Гейт по testing даёт вечно-красный
-результат и блокирует релиз на ровном месте.
+это ветка разработки апстрима, она всегда впереди и нулём не станет никогда (замер 2026-08-14:
+stable — ahead=0, testing — ahead=233 от своей merge-base; 2026-09-14, после перестройки testing
+поверх stable, — 21; цифра гуляет сама по себе и приведена только как порядок величины). Гейт по
+testing даёт вечно-красный результат и блокирует релиз на ровном месте.
 
 ```bash
 git fetch upstream --tags
@@ -196,6 +206,78 @@ comm -23 <(git log --format=%s $(git merge-base lx upstream/stable)..upstream/st
 Почему «обычно брать»: чем дольше копится дрейф, тем дороже и рискованнее слияние (конфликты в
 `.pb.go`, форк-сабмодули wireguard-go и sing-tun, изменения интерфейсов adapter/*). Маленькие
 частые merge'и дешевле одного большого перед релизом.
+
+## 2a. Сверь версии зависимостей — не только коммиты (ОБЯЗАТЕЛЬНО перед каждым релизом)
+
+Нулевой дрейф по merge-base ещё не значит, что мы собираем тем же, чем апстрим. Мерж приносит
+апстримные файлы (`build.yml`, `go.mod`, `.github/CRONET_GO_VERSION`, скрипты тулчейна), но наши
+пины — `go.version`, NDK и JDK в `lx-*.yml`, плагины protoc в `Makefile.lx` — остаются как были, и
+расхождение копится молча. Так после мержа stable 2026-09-05 апстрим собирался на Go 1.26.7, а мы
+до 2026-09-14 — на 1.26.6.
+
+**Ориентир — `upstream/stable`.** Каждое расхождение либо устраняется до тега, либо остаётся
+осознанно: причина — `lx:`-комментарием рядом с пином (как у `ndk-version: r28c` в
+`lx-release.yml`) и строкой в changelog-секции релиза.
+
+| Зависимость | Наш пин | С чем сверять |
+|---|---|---|
+| Язык: тулчейн Go | `go.version` | `go-version:` в `upstream/stable:.github/workflows/build.yml`; `VERSION=` в `.github/setup_go_for_windows7.sh` и `setup_go_for_macos1013.sh` — это файлы апстрима, они приезжают мержем и должны совпасть с `go.version` |
+| Язык: `go.mod` | директивы `go` / `toolchain` | `upstream/stable:go.mod` — совпадают |
+| Go-модули | блок `require` в `go.mod` | `upstream/stable:go.mod` — набор совпадает; `replace` на форк-сабмодули — раздел 1.1 |
+| Форк-сабмодули | `submodules/{wireguard-go,sing-tun,gvisor}` | раздел 1.1 |
+| naive / cronet-go | `.github/CRONET_GO_VERSION` | тот же файл в `upstream/stable`; после бампа — вручную `lx-musl-toolchain-mirror.yml` (SPEC 023) |
+| Android | `ndk-version`, OpenJDK в `lx-*.yml` | `ndk-version` / `java-version` в upstream `build.yml` |
+| Кодогенерация | `LX_PROTOC_GEN_GO_VERSION`, `LX_PROTOC_GEN_GO_GRPC_VERSION` в `Makefile.lx` | `google.golang.org/protobuf` / `grpc` в `go.mod` и стиль сгенерированного кода апстрима |
+| База версии | `upstream.version` | `git describe --tags --abbrev=0 upstream/stable` |
+| GitHub Actions | мажоры `uses:` в `lx-*.yml` | те же actions в upstream-workflow — наши не старше |
+
+```bash
+git fetch upstream --tags
+S=upstream/stable
+modlist() { awk '/^require \($/{r=1;next} r&&/^\)$/{r=0;next} r&&NF>=2&&$1!~/^\/\//{print $1, $2} /^require [^(]/{print $2, $3}'; }
+acts() { grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[^ ]+( # v[0-9.]+)?' \
+  | sed -E 's/@[0-9a-f]{40} # /@/; s/^uses: //; s/@/ /' | sort -u \
+  | awk '{v[$1]=(v[$1]?v[$1]",":"")$2} END{for(k in v)print k, v[k]}' | sort; }
+echo "Go:     lx=$(cat go.version)  stable=$(git show $S:.github/workflows/build.yml | grep -oE 'go-version: *[0-9.]+' | awk '{print $2}' | sort -u | xargs)  scripts: $(grep -hoE 'VERSION="[0-9.]+"' .github/setup_go_for_*.sh | sort -u | xargs)"
+echo "go.mod: lx=$(grep -E '^(go|toolchain) ' go.mod | xargs)  stable=$(git show $S:go.mod | grep -E '^(go|toolchain) ' | xargs)"
+diff <(git show $S:go.mod | modlist | sort) <(modlist < go.mod | sort) && echo "require: == stable"
+echo "cronet: lx=$(cat .github/CRONET_GO_VERSION)  stable=$(git show $S:.github/CRONET_GO_VERSION)"
+echo "NDK:    lx=$(grep -hoE 'ndk-version: *[a-z0-9]+' .github/workflows/lx-*.yml | awk '{print $2}' | sort -u | xargs)  stable=$(git show $S:.github/workflows/build.yml | grep -oE 'ndk-version: *[a-z0-9]+' | awk '{print $2}' | sort -u | xargs)"
+echo "JDK:    lx=$(grep -hoE 'openjdk-[0-9]+' .github/workflows/lx-*.yml | sort -u | xargs)  stable=$(git show $S:.github/workflows/build.yml | grep -oE 'java-version: *[0-9]+' | awk '{print $2}' | sort -u | xargs)"
+echo "protoc: $(grep -E '^LX_PROTOC' Makefile.lx | tr -s ' ' | xargs)  go.mod: $(grep -E 'google.golang.org/(protobuf|grpc) ' go.mod | xargs)"
+echo "base:   upstream.version=$(cat upstream.version)  stable=$(git describe --tags --abbrev=0 $S)"
+join -a2 -e '—' -o 0,1.2,2.2 <(git show $S:.github/workflows/build.yml | acts) <(cat .github/workflows/lx-*.yml | acts) | column -t
+# для сведения — актуальные выпуски Go (ориентир всё равно stable):
+curl -s 'https://go.dev/dl/?mode=json' | grep -oE '"version": *"go[0-9.]+"' | grep -oE 'go[0-9.]+' | sort -u
+```
+
+- Всё совпадает или расхождение уже помечено `lx:` с причиной → дальше.
+- Апстрим поднял версию → поднять следом до тега; смена тулчейна или версии зависимости требует
+  полной релизной сборки (раздел 2b).
+- У Go вышел патч, а stable на нём ещё не стоит → по умолчанию остаёмся со stable, известное
+  отставание записываем в changelog-секцию релиза.
+- `require` отличается от stable → это либо недомерженный апстрим (раздел 3), либо наша новая
+  зависимость — её назвать в changelog.
+
+## 2b. Полная релизная сборка без публикации (dry run)
+
+`lx-ci` на пуше собирает только нативный linux; ручной запуск `lx-ci` добавляет cross, AAR и musl,
+но без Win7, mips и darwin на macOS-раннере. Всю релизную матрицу — windows вместе с Win7 на
+патченном тулчейне, linux mips, darwin, linux-musl, `libbox` + `libbox-legacy` — собирает только
+`lx-release.yml`. Флаг `dry_run` запускает её без публикации:
+
+```bash
+gh workflow run lx-release.yml --ref lx -f tag=v<следующая-версия>-dryrun -f dry_run=true
+gh run list --workflow lx-release.yml --limit 1      # id прогона
+gh run watch <id> --exit-status
+```
+
+- Джоба `publish release` пропускается: GitHub Release не создаётся, тег в origin не появляется
+  (AAR-джоба ставит тег только локально в раннере — для `git describe`). Артефакты остаются в прогоне.
+- `tag` в dry run только прошивает версию в бинарники — суффикс `-dryrun`, чтобы артефакт нельзя
+  было спутать с релизом.
+- **Обязательно**, если с прошлого релиза менялся тулчейн или версия любой зависимости из
+  раздела 2a: иначе первой полной сборкой на новом тулчейне станет сам релиз.
 
 ## 3. Возьми изменения upstream себе (merge, затем сборка) — и ТОЛЬКО потом релиз
 
@@ -303,8 +385,10 @@ make -f Makefile.lx lx-check     # собрать lx-бинарь + check мин
 
 ### Одной строкой
 
-`fetch upstream → merge-base сверить с tip → если впереди, merge себе → build+gofmt+lx-check →
+`fetch upstream → merge-base сверить с tip → версии зависимостей сверить со stable → если впереди,
+merge себе → build+gofmt+lx-check → сменился тулчейн или зависимость — dry run lx-release →
 changelog (+проверить awk; для stable ещё docs-lx/releases/v<тег>.md) → push ветку lx → тег →
 сверить ноты/ассеты/суммы`.
-Дрейф проверяется **каждый** раз и **только по merge-base**; слияние — поведение по умолчанию,
-пропуск — осознанное исключение с записанной причиной.
+Дрейф и версии зависимостей проверяются **каждый** раз, дрейф — **только по merge-base**; слияние
+и подъём версий вслед за stable — поведение по умолчанию, пропуск — осознанное исключение с
+записанной причиной.

@@ -9,9 +9,13 @@ Repository context:
 
 - `upstream` = `https://github.com/SagerNet/sing-box.git`; we track the **`upstream/stable`** branch.
   **Measure drift ONLY against `upstream/stable`.** `upstream/testing` is upstream's development
-  line; it runs hundreds of commits ahead at all times (Go bumps, immature refactors). Measuring
+  line (the next minor version in alpha); it is always ahead — by tens or hundreds of commits (Go
+  bumps, immature refactors) — and gets rebuilt on top of stable with a force-push. Measuring
   drift against it is meaningless — it will NEVER read zero, and a red gate on testing blocks
   releases forever. Zero against `upstream/stable` = no drift, the tag can be cut.
+  The banner on the fork's page, "N commits behind SagerNet/sing-box:testing", counts from testing
+  (upstream's default branch) — it is not drift. Do not press **Sync fork**: it merges testing into
+  `lx`, and on conflicts it offers "Discard commits", which resets `lx` to upstream.
 - Our working branch is **`lx`** (also the GitHub default); upstream integration is a manual
   **`git merge upstream/stable`** (NOT rebase; see `wg-1.14-migration` in memory and
   [BUILD_CI_CD](../SPECS/FEATURES/001-BUILD_CI_CD/FEATURE.md)).
@@ -44,14 +48,20 @@ Repository context:
 ```
 [ ] 1. drift in the fork SUBMODULES checked and closed BEFORE merging the core (section 1)
 [ ] 2. upstream drift checked (section 2)
+[ ] 2a. dependency versions checked against upstream/stable, not just commits (section 2a): Go
+        toolchain, go.mod, CRONET_GO_VERSION, NDK/JDK, protoc plugins, upstream.version, GitHub
+        Actions; every mismatch fixed OR marked `lx:` with a reason and recorded in the changelog
 [ ] 3. if upstream is ahead — taken/merged/built (section 3), OR deliberately deferred with a reason
 [ ] 4. go build ./... and build -tags with_lx_command are green; full set — make -f Makefile.lx lx-build
        (⚠️ SPEC 049: the toolchain version lives in a SINGLE file `go.version` at the root — every
-        `setup-go` step across all `lx-*.yml` reads it (currently go1.26.5). NOT
-        `go-version-file: go.mod`: that yields 1.24.x, which is the SPEC 044 regression — a
-        go1.24 AAR kills quic-go outbounds on vendor Android kernels, and badtls is a stub there.
-        The Win7 job has its own patched toolchain; neither it nor the upstream workflow is touched
-        by this pin. Raise the pin's minor only after running an AAR on a real device)
+        `setup-go` step across all `lx-*.yml` reads it. NOT `go-version-file: go.mod`: that yields
+        the language floor, not the toolchain pin (while it said 1.24.x that was the SPEC 044
+        regression — a go1.24 AAR kills quic-go outbounds on vendor Android kernels, and badtls is
+        a stub there). The Win7 job has its own patched toolchain; neither it nor the upstream
+        workflow is touched by this pin. Raise the pin's minor only after running an AAR on a real
+        device)
+[ ] 4a. if the toolchain or any section 2a dependency version changed since the last release — the
+        full release build without publishing (`lx-release.yml` dry run) is green (section 2b)
 [ ] 5. gofmt -l over lx-owned files — empty
 [ ] 6. docs-lx/lx-changelog.md contains a #### v<this-tag> section with correct content
        (verify with the SAME awk as CI — see section 4);
@@ -148,10 +158,10 @@ measures, WG/AWG nodes are alive — and all of it several times in a row, becau
 ## 2. Check whether upstream moved ahead (MANDATORY before every release)
 
 **The baseline is `upstream/stable`, and only that.** Drift is not measured against
-`upstream/testing`: it is upstream's development branch, it runs hundreds of commits ahead and will
-never read zero (measured 2026-08-14: stable — ahead=0, testing — ahead=233 from its own
-merge-base; the number grows on its own and is quoted only as an order of magnitude). A gate on
-testing is permanently red and blocks releases for no reason.
+`upstream/testing`: it is upstream's development branch, it is always ahead and will never read zero
+(measured 2026-08-14: stable — ahead=0, testing — ahead=233 from its own merge-base; 2026-09-14,
+after testing was rebuilt on top of stable, — 21; the number moves on its own and is quoted only as
+an order of magnitude). A gate on testing is permanently red and blocks releases for no reason.
 
 ```bash
 git fetch upstream --tags
@@ -192,6 +202,78 @@ already-resolved conflicts (49 of them in that case) against a stale base.
 Why "normally take it": the longer drift accumulates, the more expensive and risky the merge
 (conflicts in `.pb.go`, the wireguard-go and sing-tun fork submodules, adapter interface changes).
 Small frequent merges are cheaper than one big one right before a release.
+
+## 2a. Check dependency versions — not just commits (MANDATORY before every release)
+
+Zero drift by merge-base does not yet mean we build with what upstream builds with. A merge brings
+upstream's own files (`build.yml`, `go.mod`, `.github/CRONET_GO_VERSION`, the toolchain scripts),
+but our pins — `go.version`, NDK and JDK in `lx-*.yml`, the protoc plugins in `Makefile.lx` — stay
+as they were, and the mismatch accumulates silently. That is how, after the 2026-09-05 stable merge,
+upstream built with Go 1.26.7 while we stayed on 1.26.6 until 2026-09-14.
+
+**The baseline is `upstream/stable`.** Every mismatch is either fixed before the tag or kept
+deliberately: the reason goes into an `lx:` comment next to the pin (like `ndk-version: r28c` in
+`lx-release.yml`) and into a line of the release's changelog section.
+
+| Dependency | Our pin | Compare with |
+|---|---|---|
+| Language: Go toolchain | `go.version` | `go-version:` in `upstream/stable:.github/workflows/build.yml`; `VERSION=` in `.github/setup_go_for_windows7.sh` and `setup_go_for_macos1013.sh` — upstream files that arrive with the merge and must match `go.version` |
+| Language: `go.mod` | `go` / `toolchain` directives | `upstream/stable:go.mod` — identical |
+| Go modules | the `require` blocks in `go.mod` | `upstream/stable:go.mod` — the same set; `replace` onto fork submodules — section 1.1 |
+| Fork submodules | `submodules/{wireguard-go,sing-tun,gvisor}` | section 1.1 |
+| naive / cronet-go | `.github/CRONET_GO_VERSION` | the same file in `upstream/stable`; after a bump run `lx-musl-toolchain-mirror.yml` by hand (SPEC 023) |
+| Android | `ndk-version`, OpenJDK in `lx-*.yml` | `ndk-version` / `java-version` in upstream `build.yml` |
+| Code generation | `LX_PROTOC_GEN_GO_VERSION`, `LX_PROTOC_GEN_GO_GRPC_VERSION` in `Makefile.lx` | `google.golang.org/protobuf` / `grpc` in `go.mod` and the style of upstream's generated code |
+| Version base | `upstream.version` | `git describe --tags --abbrev=0 upstream/stable` |
+| GitHub Actions | `uses:` majors in `lx-*.yml` | the same actions in upstream workflows — ours are not older |
+
+```bash
+git fetch upstream --tags
+S=upstream/stable
+modlist() { awk '/^require \($/{r=1;next} r&&/^\)$/{r=0;next} r&&NF>=2&&$1!~/^\/\//{print $1, $2} /^require [^(]/{print $2, $3}'; }
+acts() { grep -hoE 'uses: [A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[^ ]+( # v[0-9.]+)?' \
+  | sed -E 's/@[0-9a-f]{40} # /@/; s/^uses: //; s/@/ /' | sort -u \
+  | awk '{v[$1]=(v[$1]?v[$1]",":"")$2} END{for(k in v)print k, v[k]}' | sort; }
+echo "Go:     lx=$(cat go.version)  stable=$(git show $S:.github/workflows/build.yml | grep -oE 'go-version: *[0-9.]+' | awk '{print $2}' | sort -u | xargs)  scripts: $(grep -hoE 'VERSION="[0-9.]+"' .github/setup_go_for_*.sh | sort -u | xargs)"
+echo "go.mod: lx=$(grep -E '^(go|toolchain) ' go.mod | xargs)  stable=$(git show $S:go.mod | grep -E '^(go|toolchain) ' | xargs)"
+diff <(git show $S:go.mod | modlist | sort) <(modlist < go.mod | sort) && echo "require: == stable"
+echo "cronet: lx=$(cat .github/CRONET_GO_VERSION)  stable=$(git show $S:.github/CRONET_GO_VERSION)"
+echo "NDK:    lx=$(grep -hoE 'ndk-version: *[a-z0-9]+' .github/workflows/lx-*.yml | awk '{print $2}' | sort -u | xargs)  stable=$(git show $S:.github/workflows/build.yml | grep -oE 'ndk-version: *[a-z0-9]+' | awk '{print $2}' | sort -u | xargs)"
+echo "JDK:    lx=$(grep -hoE 'openjdk-[0-9]+' .github/workflows/lx-*.yml | sort -u | xargs)  stable=$(git show $S:.github/workflows/build.yml | grep -oE 'java-version: *[0-9]+' | awk '{print $2}' | sort -u | xargs)"
+echo "protoc: $(grep -E '^LX_PROTOC' Makefile.lx | tr -s ' ' | xargs)  go.mod: $(grep -E 'google.golang.org/(protobuf|grpc) ' go.mod | xargs)"
+echo "base:   upstream.version=$(cat upstream.version)  stable=$(git describe --tags --abbrev=0 $S)"
+join -a2 -e '—' -o 0,1.2,2.2 <(git show $S:.github/workflows/build.yml | acts) <(cat .github/workflows/lx-*.yml | acts) | column -t
+# for reference — current Go releases (the baseline is still stable):
+curl -s 'https://go.dev/dl/?mode=json' | grep -oE '"version": *"go[0-9.]+"' | grep -oE 'go[0-9.]+' | sort -u
+```
+
+- Everything matches, or the mismatch is already marked `lx:` with a reason → move on.
+- Upstream raised a version → raise ours before the tag; a toolchain or dependency version change
+  requires the full release build (section 2b).
+- Go shipped a patch that stable is not on yet → by default stay with stable and record the known
+  lag in the release's changelog section.
+- `require` differs from stable → either an unmerged upstream change (section 3) or a new dependency
+  of ours — name it in the changelog.
+
+## 2b. Full release build without publishing (dry run)
+
+`lx-ci` on push builds only native linux; a manual `lx-ci` run adds cross, AAR and musl, but not
+Win7, mips or darwin on the macOS runner. Only `lx-release.yml` builds the whole release matrix —
+windows including Win7 on the patched toolchain, linux mips, darwin, linux-musl, `libbox` +
+`libbox-legacy`. The `dry_run` flag runs it without publishing:
+
+```bash
+gh workflow run lx-release.yml --ref lx -f tag=v<next-version>-dryrun -f dry_run=true
+gh run list --workflow lx-release.yml --limit 1      # run id
+gh run watch <id> --exit-status
+```
+
+- The `publish release` job is skipped: no GitHub Release is created and no tag appears on origin
+  (the AAR job tags only locally inside the runner, for `git describe`). Artifacts stay on the run.
+- In a dry run `tag` only stamps the version into the binaries — use a `-dryrun` suffix so an
+  artifact cannot be mistaken for a release.
+- **Mandatory** if the toolchain or any section 2a dependency version changed since the last
+  release: otherwise the first full build on the new toolchain is the release itself.
 
 ## 3. Take upstream's changes (merge, then build) — and ONLY then release
 
@@ -306,8 +388,10 @@ release's changelog section (as in `b8ff5c78`: "rc.6 also carries the upstream a
 
 ### In one line
 
-`fetch upstream → compare merge-base with tip → if ahead, merge it in → build+gofmt+lx-check →
+`fetch upstream → compare merge-base with tip → check dependency versions against stable → if ahead,
+merge it in → build+gofmt+lx-check → toolchain or a dependency changed — lx-release dry run →
 changelog (+verify the awk; for stable also docs-lx/releases/v<tag>.md) → push branch lx → tag →
 verify notes/assets/checksums`.
-Drift is checked **every** time and **only via merge-base**; merging is the default behaviour, and
-skipping it is a deliberate exception with a recorded reason.
+Drift and dependency versions are checked **every** time, drift **only via merge-base**; merging and
+following stable's versions are the default behaviour, and skipping either is a deliberate exception
+with a recorded reason.
