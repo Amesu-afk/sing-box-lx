@@ -278,6 +278,20 @@ gh run watch <id> --exit-status
   было спутать с релизом.
 - **Обязательно**, если с прошлого релиза менялся тулчейн или версия любой зависимости из
   раздела 2a: иначе первой полной сборкой на новом тулчейне станет сам релиз.
+- Проверить, каким тулчейном собрана каждая джоба. Сводный `gh run view <id> --log` отдаёт логи
+  не всех джоб, поэтому — по одной:
+
+  ```bash
+  gh run view <id> --json jobs --jq '.jobs[] | select(.conclusion=="success") | "\(.databaseId) \(.name)"' |
+    while read -r jid name; do
+      echo "$name: $(gh api repos/Leadaxe/sing-box-lx/actions/jobs/$jid/logs | grep -oE 'Successfully set up Go version [0-9.]+|Environment: go[0-9.]+' | sort -u | xargs)"
+    done
+  ```
+
+  У `build windows/386` строка пустая — это Win7 на своём патченном тулчейне из кеша, версия
+  которого — `VERSION=` в `.github/setup_go_for_windows7.sh` (раздел 2a).
+- Убедиться, что ничего не опубликовано: `gh release view v<версия>-dryrun` → `release not found`,
+  `gh api repos/Leadaxe/sing-box-lx/releases/latest -q .tag_name` — прежний тег.
 
 ## 3. Возьми изменения upstream себе (merge, затем сборка) — и ТОЛЬКО потом релиз
 

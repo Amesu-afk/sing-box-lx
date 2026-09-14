@@ -274,6 +274,20 @@ gh run watch <id> --exit-status
   artifact cannot be mistaken for a release.
 - **Mandatory** if the toolchain or any section 2a dependency version changed since the last
   release: otherwise the first full build on the new toolchain is the release itself.
+- Check which toolchain built each job. The aggregate `gh run view <id> --log` does not return the
+  logs of every job, so go job by job:
+
+  ```bash
+  gh run view <id> --json jobs --jq '.jobs[] | select(.conclusion=="success") | "\(.databaseId) \(.name)"' |
+    while read -r jid name; do
+      echo "$name: $(gh api repos/Leadaxe/sing-box-lx/actions/jobs/$jid/logs | grep -oE 'Successfully set up Go version [0-9.]+|Environment: go[0-9.]+' | sort -u | xargs)"
+    done
+  ```
+
+  `build windows/386` prints an empty line — that is Win7 on its own patched toolchain from the
+  cache, whose version is `VERSION=` in `.github/setup_go_for_windows7.sh` (section 2a).
+- Make sure nothing was published: `gh release view v<version>-dryrun` → `release not found`, and
+  `gh api repos/Leadaxe/sing-box-lx/releases/latest -q .tag_name` still returns the previous tag.
 
 ## 3. Take upstream's changes (merge, then build) — and ONLY then release
 
