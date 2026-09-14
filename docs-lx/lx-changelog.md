@@ -28,6 +28,42 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.0-lx.39
+
+Стабильный релиз: хотфикс UDP через SOCKS5-прокси с BND.ADDR `0.0.0.0`/`::`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.0-lx.39.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.0-lx.39.md).
+
+**Что вошло:**
+
+- 🛰 **socks5-outbound: TCP ходит, UDP молча нет с серверами, отвечающими на UDP ASSOCIATE
+  `0.0.0.0`/`::`** ([SPEC 085](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/085-SOCKS5_UDP_ASSOCIATE_UNSPECIFIED_BIND/SPEC.md)).
+  Отчёт Cultsonfire (Telegram, 2026-09-14, LxBox 2.23.1, ядро `lx.34`): публичные socks5-прокси,
+  часть через `detour` на MASQUE; в v2rayNG/Xray те же прокси по UDP работают; без MASQUE картина
+  та же. Корень в sing (`protocol/socks/client.go:161-167`, v0.9.0…v0.9.3, апстримный `dev` тоже):
+  клиент диалит релей по `response.Bind` как есть, а для Go неопределённый хост означает локальную
+  систему (документация `net.Dial`; на Mac dial `0.0.0.0:9` → `127.0.0.1:9`) — датаграммы уходили
+  на loopback, ошибки нет. Xray подставляет адрес прокси (`proxy/socks/client.go:97-100`). Фикс в
+  нашем слое, без форка sing и без копии его кода: `protocol/socks/udp_associate_lx.go` —
+  `relayDialer`, обёртка dialer'а для `socks.NewClient`: sing сам делает хендшейк и сам диалит релей
+  через переданный dialer (`client.go:162`), обёртка перехватывает этот единственный UDP-dial и
+  нормализует адрес (unspecified/пустой BND.ADDR → адрес сервера из конфига с портом из ответа;
+  порт 0 — ошибка; адрес из конфига, а не `tcpConn.RemoteAddr()`, который под `detour` — пир
+  плеча); один шов `lx:begin socks-udp-bind` в `NewOutbound` (`protocol/socks/outbound.go`, +5
+  строк, только `version: 5`; TCP/BIND/UoT проходят через обёртку как есть). Хендшейк, отмена по
+  ctx и таймауты остаются в sing — копия его ветки отвергнута, чтобы не разойтись молча на бампе.
+  Red/green: `protocol/socks/udp_associate_lx_test.go` — записывающий dialer (независим от ОС: на
+  macOS/Linux dial на `0.0.0.0:port` уходит на loopback, и живой релей на 127.0.0.1 получил бы
+  датаграмму и на старом коде), контракт с sing `TestLxRelayDialerNormalisesBind` («ровно один
+  UDP-dial через переданный dialer, по адресу сервера» — упадёт, если sing начнёт диалить релей
+  мимо), живой round-trip через настоящий `NewOutbound` (`[::]:port` при сервере на 127.0.0.1 —
+  красный вживую на старом коде; `version: 4` — прежняя ошибка sing), `-race`; страж
+  `TestLxUpstreamSocksClientDialsUnspecifiedBind` фиксирует текущее поведение sing и упадёт на
+  бампе, когда апстрим починит сам — условие снятия. Реестр 004-HOTFIXES дополнен. Остаток: полевая
+  проверка на прокси репортёра (диагноз по коду, дампа UDP-пути нет; дешёвая проверка — снять
+  BND.ADDR одним хендшейком). Ноль правок в LxBox/лаунчере.
+- База апстрима без изменений: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33), дрейф 0.
+  Desktop/router-бинарники и их набор тегов не меняются; AAR — тот же набор тегов, что в lx.38.
+
 #### v1.14.0-lx.38
 
 Стабильный релиз: Tailscale в Android AAR и хотфикс вложенных selector'ов. Пользовательские ноты (EN+RU):
