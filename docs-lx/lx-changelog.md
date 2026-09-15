@@ -28,6 +28,63 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.1
+
+Стабильный релиз: перевод форка на новую базу апстрима **sing-box `v1.14.1`** плюс бамп
+Go-тулчейна. Наших изменений поведения нет — всё содержимое пришло из апстрима.
+Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.1-lx.1.md`](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/releases/v1.14.1-lx.1.md).
+
+**Нумерация.** Апстрим выпустил `v1.14.1`, поэтому `upstream.version` → `1.14.1` и счётчик
+линии начинается заново: `1.14.1-lx.1`, а не `1.14.0-lx.40`. Предыдущая линия закрыта на
+`v1.14.0-lx.39`.
+
+**Что вошло:**
+
+- ⬆️ **База апстрима: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33) → 9dddbefb2** — тег
+  `v1.14.1` (`1ac1a339c`) плюс два коммита апстрима сверху. Мерж `78237b737`, дрейф снова 0.
+  Из апстрима приехало: дедупликация DNS-запросов после неудачного обмена (`f2bc7cff5`),
+  OOM-killer timer на darwin больше не перезапускается из memory-pressure-колбэка после
+  остановки (`b5d5338e5`), пробуждение инстанса после device pause на iOS (`54e5c497b`),
+  чтение имени процесса из `comm` в resolved-фолбэке (`c827ec830`), а также бампы
+  зависимостей: `bbolt` (краш на битом файле кеша), `sing` v0.9.3 → v0.9.4 (распознавание
+  ошибок закрытого соединения на Windows), `tailscale` mod.4 → mod.5 (netmap expiry timer
+  держал живым закрытый endpoint).
+- 🧩 **Конфликты мержа — два, оба разобраны вручную.**
+  - `dns/client.go`: апстрим переписал дедупликацию (`chan struct{}` → `exchangePending`,
+    выделен `continueExchange`, `finishExchange` принял `err`). Все наши швы сохранены —
+    SPEC 018 (`transport`-аргумент в `log*`, `emitFailedQuery` на loopback / rejected-cached
+    / rejected), SPEC 035 (`dnstrack` для `DNSTypeGroup`), SPEC 022 §3 (fresh-hit в
+    `questionCache`). Шов SPEC 018 для ошибки обмена **переехал** из `Exchange` и
+    `ExchangeAsync` в единую точку `finishExchange`: апстрим централизовал там обработку
+    `err`, и дублировать его в двух вызывающих стало нечем. Новый путь `sharedResponse`
+    (дедуплицированный ждун получает чужой ответ) идёт через `finishExchange` с `err=nil` и
+    эмитит своё событие каждому заявителю — дублей нет, семантика потока SPEC 018 прежняя.
+  - `go.sum`: механический, взята upstream-сторона.
+- ✅ **Автослияние проверено вручную** (правило «автослияние ломает молча»): `go.mod`
+  сохранил все `replace`-блоки на форк-сабмодули, четыре guard'а `early-rpc-guard`
+  (SPEC 047) в `experimental/libbox/command_server.go` на месте; новый апстримный
+  `endDevicePause` в guard'е не нуждается — сам проверяет `instance`/`PauseManager`.
+- 🔒 **Страж SPEC 085 на новом sing.** `TestLxUpstreamSocksClientDialsUnspecifiedBind`
+  зелёный на `sing` v0.9.4: апстрим по-прежнему не нормализует BND.ADDR, обёртка
+  `relayDialer` остаётся нужна. Условие её снятия не наступило.
+- 🧰 **Go-тулчейн `go.version`: go1.26.7 → go1.26.8** (`090f7ce94`, отдельным коммитом от
+  мержа — чтобы откатывался независимо). Апстрим поднял тулчейн в `9713a546e`; их workflow
+  и `setup_go_for_{windows7,macos1013}.sh` приехали мержем на 1.26.8, наш пин сравнялся с
+  ними. У Go на дату релиза есть 1.27.1 — ориентир прежний, `upstream/stable`.
+- Форк-сабмодули (`wireguard-go` 6383749, `sing-tun` 6f13ebc, `gvisor` 117243aa) **не
+  менялись**: их версии совпадали с `upstream/stable` ещё до мержа. Набор тегов desktop/
+  router/AAR прежний.
+
+**Проверено:** `make -f Makefile.lx lx-build` полным `LX_TAGS` на go1.26.8; полный
+`go test ./...` под теми же тегами с `-ldflags "-checklinkname=0"`; стенды `lx-test/chain`
+и `lx-test/startclose` зелёные; `gofmt` чист; dry run всей релизной матрицы.
+`lx-test/zombie` (`TestURLTestZombieDoesNotSurviveRestart`) красный — предсуществующий, не
+следствие мержа: проверено прогоном на выпущенном `v1.14.0-lx.39`, падает идентично, и мерж
+не тронул ни одного файла в тракте urltest/group.
+
+**Не гонялось:** AAR на реальном устройстве.
+
 #### v1.14.0-lx.39
 
 Стабильный релиз: хотфикс UDP через SOCKS5-прокси с BND.ADDR `0.0.0.0`/`::`. Пользовательские ноты (EN+RU):
