@@ -23,6 +23,7 @@ package v2rayxhttp
 
 import (
 	"context"
+	"math/big"
 	"math/rand"
 	"net"
 	"net/http"
@@ -255,17 +256,19 @@ type Client struct {
 	// newTransport builds a fresh HTTP/2 transport (and therefore a fresh
 	// underlying TLS/REALITY connection on first use). Held so a stale slot can
 	// be swapped for a live one.
-	newTransport func() *poolTransport
-	slots        []*transportSlot
-	slotIdx      atomic.Uint64
-	refreshMu    sync.Mutex
-	lastRefresh  time.Time
-	scheme       string
-	host         string
-	path         string
-	mode         string
-	headers      http.Header
-	paddingRange intRange
+	newTransport    func() *poolTransport
+	slots           []*transportSlot
+	slotIdx         atomic.Uint64
+	refreshMu       sync.Mutex
+	lastRefresh     time.Time
+	scheme          string
+	host            string
+	path            string
+	mode            string
+	headers         http.Header
+	paddingRange    intRange
+	sessionIDTable  string
+	sessionIDLength intRange
 	// meta holds the normalized placement/key/method selection (session, seq,
 	// uplink-data, X-Padding obfs). Computed once in NewClient.
 	meta metaConfig
@@ -302,6 +305,10 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 
 	paddingRange, err := parseRangeOr(options.XPaddingBytes, "x_padding_bytes", intRange{100, 1000})
+	if err != nil {
+		return nil, err
+	}
+	sessionIDTable, sessionIDLength, err := normalizeSessionIDOptions(options.SessionIDTable, options.SessionIDLength)
 	if err != nil {
 		return nil, err
 	}
@@ -417,26 +424,28 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 
 	return &Client{
-		ctx:            ctx,
-		dialer:         dialer,
-		serverAddr:     serverAddr,
-		newTransport:   newTransport,
-		slots:          slots,
-		scheme:         scheme,
-		host:           host,
-		path:           path,
-		mode:           mode,
-		headers:        headers,
-		paddingRange:   paddingRange,
-		meta:           meta,
-		realityEnabled: tlsConfigIsReality(tlsConfig),
-		noGRPCHeader:   options.NoGRPCHeader,
-		plog:           plog,
+		ctx:             ctx,
+		dialer:          dialer,
+		serverAddr:      serverAddr,
+		newTransport:    newTransport,
+		slots:           slots,
+		scheme:          scheme,
+		host:            host,
+		path:            path,
+		mode:            mode,
+		headers:         headers,
+		paddingRange:    paddingRange,
+		sessionIDTable:  sessionIDTable,
+		sessionIDLength: sessionIDLength,
+		meta:            meta,
+		realityEnabled:  tlsConfigIsReality(tlsConfig),
+		noGRPCHeader:    options.NoGRPCHeader,
+		plog:            plog,
 	}, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	sessionID := newSessionID()
+	sessionID := newSessionID(c.sessionIDTable, c.sessionIDLength)
 	switch c.mode {
 	case modeAuto:
 		// Match Xray's auto resolution (transport/internet/splithttp/dialer.go):
@@ -667,11 +676,59 @@ func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr strin
 	return request.WithContext(ctx), nil
 }
 
-// newSessionID returns a random session id formatted as a dashed UUID string
-// (8-4-4-4-12), matching Xray's sessionId = uuid.New().String() (verified against
-// XTLS/Xray-core transport/internet/splithttp dialer.go). The server treats it as
-// an opaque grouping key; the dashed format keeps it interchangeable with Xray.
-func newSessionID() string {
+// Xray's current XHTTP client can generate a session id from a configured ASCII
+// table and length range. With no table it preserves the historical dashed UUID
+// (8-4-4-4-12). The server treats either form as an opaque grouping key.
+var predefinedSessionIDTables = map[string]string{
+	"ALPHABET": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+	"Alphabet": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+	"BASE36":   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+	"Base62":   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+	"HEX":      "0123456789ABCDEF",
+	"alphabet": "abcdefghijklmnopqrstuvwxyz",
+	"base36":   "0123456789abcdefghijklmnopqrstuvwxyz",
+	"hex":      "0123456789abcdef",
+	"number":   "0123456789",
+}
+
+func normalizeSessionIDOptions(table, length string) (string, intRange, error) {
+	if predefined, exists := predefinedSessionIDTables[table]; exists {
+		table = predefined
+	}
+	if table == "" {
+		return "", intRange{}, nil
+	}
+	for index := range len(table) {
+		if table[index] >= 0x80 {
+			return "", intRange{}, E.New("v2ray-xhttp: session_id_table must contain only ASCII characters")
+		}
+	}
+	idLength, err := parseRangeOr(length, "session_id_length", intRange{})
+	if err != nil {
+		return "", intRange{}, err
+	}
+	if idLength.min <= 0 {
+		return "", intRange{}, E.New("v2ray-xhttp: session_id_length must be greater than zero when session_id_table is set")
+	}
+	room := new(big.Int)
+	base := big.NewInt(int64(len(table)))
+	for size := idLength.min; size <= idLength.max; size++ {
+		room.Add(room, new(big.Int).Exp(base, big.NewInt(int64(size)), nil))
+	}
+	if room.Cmp(big.NewInt(2<<30)) < 0 {
+		return "", intRange{}, E.New("v2ray-xhttp: session_id_table or session_id_length is too small")
+	}
+	return table, idLength, nil
+}
+
+func newSessionID(table string, length intRange) string {
+	if table != "" && length.min > 0 {
+		id := make([]byte, length.rand())
+		for index := range id {
+			id[index] = table[rand.Intn(len(table))]
+		}
+		return string(id)
+	}
 	var b [16]byte
 	for i := range b {
 		b[i] = byte(rand.Intn(256))

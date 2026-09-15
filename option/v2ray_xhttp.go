@@ -54,6 +54,12 @@ type V2RayXHTTPOptions struct {
 	// when placement is not "path". Empty defaults to "X-Session" (header) or
 	// "x_session" (query/cookie).
 	SessionKey string `json:"session_key,omitempty"`
+	// SessionIDTable selects a predefined Xray character table name (for example
+	// Base62) or a literal ASCII character set for generated session ids.
+	SessionIDTable string `json:"session_id_table,omitempty"`
+	// SessionIDLength is the inclusive length range for table-generated session
+	// ids. It is used only when SessionIDTable is set; empty preserves UUID ids.
+	SessionIDLength string `json:"session_id_length,omitempty"`
 	// SeqPlacement selects where the per-packet upload sequence number is carried
 	// in packet-up mode: path|query|header|cookie. Empty defaults to "path".
 	SeqPlacement string `json:"seq_placement,omitempty"`

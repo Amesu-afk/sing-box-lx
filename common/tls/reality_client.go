@@ -31,7 +31,6 @@ import (
 	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -152,23 +151,19 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
-	uConn := utls.UClient(conn, uConfig, e.uClient.id)
-	verifier.UConn = uConn
-	err := uConn.BuildHandshakeState()
+	helloSpec, err := utls.UTLSIdToSpec(e.uClient.id)
 	if err != nil {
 		return nil, err
 	}
-	for _, extension := range uConn.Extensions {
-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
-			})
-		}
-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
-			})
-		}
+	// lx: SPEC 053 — Xray v26.9.8+ requires the X25519MLKEM768 key share
+	// before the optional X25519 fallback. Older sing-box removed the hybrid
+	// share for REALITY, and Firefox fingerprints do not add it themselves.
+	ensureRealityHybridKeyShare(helloSpec.Extensions)
+	uConn := utls.UClient(conn, uConfig, utls.HelloCustom)
+	verifier.UConn = uConn
+	err = uConn.ApplyPreset(&helloSpec)
+	if err != nil {
+		return nil, err
 	}
 	err = uConn.BuildHandshakeState()
 	if err != nil {
@@ -256,6 +251,64 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	return &realityClientConnWrapper{uConn}, nil
+}
+
+// ensureRealityHybridKeyShare keeps GREASE ordering intact, inserts the hybrid
+// group immediately before X25519, and preserves X25519 for REALITY's auth key.
+func ensureRealityHybridKeyShare(extensions []utls.TLSExtension) {
+	for _, extension := range extensions {
+		switch typedExtension := extension.(type) {
+		case *utls.SupportedCurvesExtension:
+			insertAt := -1
+			curves := make([]utls.CurveID, 0, len(typedExtension.Curves)+2)
+			for _, curveID := range typedExtension.Curves {
+				if curveID == utls.X25519MLKEM768 || curveID == utls.X25519 {
+					if insertAt < 0 {
+						insertAt = len(curves)
+					}
+					continue
+				}
+				curves = append(curves, curveID)
+			}
+			if insertAt < 0 {
+				insertAt = len(curves)
+			}
+			curves = append(curves, 0, 0)
+			copy(curves[insertAt+2:], curves[insertAt:len(curves)-2])
+			curves[insertAt] = utls.X25519MLKEM768
+			curves[insertAt+1] = utls.X25519
+			typedExtension.Curves = curves
+		case *utls.KeyShareExtension:
+			insertAt := -1
+			var hybridShare utls.KeyShare
+			var x25519Share utls.KeyShare
+			keyShares := make([]utls.KeyShare, 0, len(typedExtension.KeyShares)+2)
+			for _, keyShare := range typedExtension.KeyShares {
+				if keyShare.Group == utls.X25519MLKEM768 || keyShare.Group == utls.X25519 {
+					if insertAt < 0 {
+						insertAt = len(keyShares)
+					}
+					if keyShare.Group == utls.X25519MLKEM768 {
+						hybridShare = keyShare
+					} else {
+						x25519Share = keyShare
+					}
+					continue
+				}
+				keyShares = append(keyShares, keyShare)
+			}
+			if insertAt < 0 {
+				insertAt = len(keyShares)
+			}
+			hybridShare.Group = utls.X25519MLKEM768
+			x25519Share.Group = utls.X25519
+			keyShares = append(keyShares, utls.KeyShare{}, utls.KeyShare{})
+			copy(keyShares[insertAt+2:], keyShares[insertAt:len(keyShares)-2])
+			keyShares[insertAt] = hybridShare
+			keyShares[insertAt+1] = x25519Share
+			typedExtension.KeyShares = keyShares
+		}
+	}
 }
 
 func realityClientFallback(ctx context.Context, uConn net.Conn, serverName string, fingerprint utls.ClientHelloID) {

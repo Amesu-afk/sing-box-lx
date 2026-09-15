@@ -23,7 +23,7 @@ vless://<uuid>@<host>:<port>?type=xhttp&<params...>[&extra=<urlencoded-json>]#<r
   "server": "<host>",
   "server_port": <port>,
   "uuid": "<uuid>",
-  "flow": "",                       // XHTTP несовместим с xtls-rprx-vision → flow всегда пустой
+  "flow": "",                       // обычно пустой; Vision допустим с VLESS encryption (§4)
   "tls": { ... },                   // из security/sni/fp/pbk/sid/alpn (см. §3)
   "transport": {
     "type": "xhttp",
@@ -70,8 +70,10 @@ JSON-ключи sing-box — **snake_case**. Источник в URL — camelCa
 
 | URL-параметр | → transport JSON | Тип | Дефолт | Допустимые |
 |--------------|------------------|-----|--------|------------|
-| `sessionPlacement`   | `session_placement`   | str | `path` | path\|query\|header\|cookie |
-| `sessionKey`         | `session_key`         | str | `X-Session`/`x_session` | |
+| `sessionIDPlacement` / `sessionPlacement` | `session_placement` | str | `path` | path\|query\|header\|cookie |
+| `sessionIDKey` / `sessionKey` | `session_key` | str | `X-Session`/`x_session` | |
+| `sessionIDTable`     | `session_id_table`    | str | пусто | имя таблицы Xray или ASCII-алфавит |
+| `sessionIDLength`    | `session_id_length`   | str | пусто | `"min-max"`; действует при заданной таблице |
 | `seqPlacement`       | `seq_placement`       | str | `path` | path\|query\|header\|cookie |
 | `seqKey`             | `seq_key`             | str | `X-Seq`/`x_seq` | |
 | `uplinkDataPlacement`| `uplink_data_placement` | str | `auto` | body\|auto\|header\|cookie |
@@ -108,7 +110,7 @@ JSON-ключи sing-box — **snake_case**. Источник в URL — camelCa
 | `scMaxConcurrentPosts` | **Accept-but-ignore.** Legacy-поле старого Xray (в текущем Xray/extended его нет — там 1 POST-тело за раз). Клиент sing-box-lx шлёт upload-POST последовательно (= текущий Xray). Можно влить как `sc_max_concurrent_posts` (принято, но не используется) — или опустить (см. §6). |
 | `serverMaxHeaderBytes`, `noSSEHeader`, `scMaxBufferedPosts`, `scStreamUpServerSecs` | server-only. Можно влить как `server_max_header_bytes`/`no_sse_header`/`sc_max_buffered_posts`/`sc_stream_up_server_secs` (клиент их принимает, но игнорирует) — или просто опустить. |
 | `fragment`, `fm`, `fragment=...` | TLS-фрагментация (Xray-специфика). **Не часть XHTTP.** Маппить в свою TLS-fragment-фичу, если есть; иначе опустить. |
-| `flow` | Для XHTTP всегда пустой (vision несовместим). |
+| `flow` | Пустой для обычного XHTTP; сохраняется для XHTTP + непустого VLESS `encryption`. |
 
 ---
 
@@ -139,8 +141,9 @@ JSON-ключи sing-box — **snake_case**. Источник в URL — camelCa
    привести к строке `"min-max"` (см. §2.4).
 4. **`mode=auto` сам резолвится в транспорте** (reality→stream-one, иначе→packet-up). Парсеру **не нужно**
    подменять `auto` на конкретный режим — передавать `auto` как есть.
-5. **`flow` всегда пустой** для XHTTP. Если в ссылке `flow=xtls-rprx-vision` — это ошибка ноды для XHTTP;
-   ставить `flow=""`.
+5. **Vision имеет узкое исключение.** Для обычного XHTTP `flow` очищается. Для
+   XHTTP + непустого VLESS `encryption` значение `xtls-rprx-vision` сохраняется:
+   этот вариант поддерживает Xray и его экспортируют актуальные 3x-ui.
 6. **camelCase → snake_case** — не передавать camelCase-ключи в JSON sing-box, он их не поймёт.
 
 ---

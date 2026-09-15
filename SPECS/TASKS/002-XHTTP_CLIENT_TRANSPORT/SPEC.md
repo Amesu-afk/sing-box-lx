@@ -77,6 +77,8 @@ sing-box-extended; все `omitempty`):
 **Placement / keys (core):**
 - `session_placement` (string: `path`|`query`|`header`|`cookie`; default `path`)
 - `session_key` (string; default `X-Session`/`x_session` по placement)
+- `session_id_table` (string; predefined Xray table name or literal ASCII alphabet; empty keeps UUID)
+- `session_id_length` (string range; required when `session_id_table` is set)
 - `seq_placement` (string: `path`|`query`|`header`|`cookie`; default `path`)
 - `seq_key` (string; default `X-Seq`/`x_seq` по placement)
 
