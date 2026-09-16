@@ -48,6 +48,27 @@
 - Серверная сторона REALITY (`RealityServer` в форке) не трогается; SagerNet/sing-box#4290 не чиним.
 - Ядро по-прежнему не подменяет отпечаток ([083 §5](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#5-границы)).
 
+## Передача реализации
+
+**Источники (полные хеши).**
+- База форка: `metacubex/utls` тег `v1.8.7` = `f7d52c22f3a8d2f510ad1470f75cb6c3fe26aa37`.
+- Переносимые коммиты `refraction-networking/utls`: `fc716b2d1316dbf12aa46f66916061098d6664e4`, затем `ddebe3904b4d7c7f2c6c89181b349f0bb7bd1d00`.
+
+**Ожидаемая зона конфликтов** — генерация key share в `u_parrots.go` (`ApplyPreset`) и `KeyShare`/`KeySharePrivateKeys` в `u_public.go`. Коммит metacubex `800edd4` намеренно генерирует для гибрида **отдельный** ECDHE-ключ (его сообщение само оговаривает: «this will have to change when we support more browsers with different ways of handling this»), а `fc716b2`/`ddebe39` добавляют опциональный reuse ровно там. Поведение существующих пресетов (Chrome — раздельные ключи) не меняется; reuse включается только маркерами Firefox 148.
+
+**Контракт с 083, который нельзя сломать.** `common/tls/reality_client.go` считает `AuthKey` по `KeySharePrivateKeys.Ecdhe`, а при `nil` — по `MlkemEcdhe`. Под reuse оба поля должны остаться заполненными (одним и тем же ключом), иначе `AuthKey` разойдётся с сервером. Нужен тест на Firefox 148.
+
+**CI.** Все `lx-*.yml` чекаутят `submodules: recursive` — новый сабмодуль подхватится без правок workflow; только проверить прогоном.
+
+**Метод для критерия 3.** В тесте форка после `BuildHandshakeState` сравнить: порядок расширений, группы key share (`X25519MLKEM768` перед `X25519`), совпадение X25519-хвоста гибрида с классической записью. Эталон refraction собирать в отдельном scratch-модуле — в `go.mod` ядра `refraction-networking/utls` не добавлять.
+
+**Стенд для критерия 4** — как в [083 §2](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#2-доказательство) (Xray на loopback, v26.9.9 и v26.7.28), dest не `www.microsoft.com`.
+
+**Только с явного «да» владельца.**
+- Создание репозитория `Leadaxe/utls-lx` на GitHub и первый push.
+- Порядок push: сабмодуль → суперпроект (иначе «not our ref» во всех джобах).
+- Тег/релиз не резать; другие отпечатки не трогать; полевой прогон — за владельцем.
+
 ## Цена сопровождения
 
 - Четвёртый форк-сабмодуль: дрейф сабмодулей разбирается **до** мержа ядра ([раннбук §1](../../../docs-lx/lx-release-runbook.ru.md)), иначе ядро зелёное, а AAR сломан.
