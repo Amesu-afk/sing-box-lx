@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — апстримный костыль, протухший вместе с зависимостью; жив в upstream (issue [SagerNet/sing-box#4520](https://github.com/SagerNet/sing-box/issues/4520) без реакции) |
-| Статус | V (verified) — стенд на Mac 2026-09-13: Xray v26.9.9 (после отсечки), v26.7.28 и v26.7.11 (до); выпущено в v1.14.0-lx.36 |
+| Статус | V (verified) — стенд на Mac 2026-09-13: Xray v26.9.9 (после отсечки), v26.7.28 и v26.7.11 (до); выпущено в v1.14.0-lx.36. Фикс покрывает **только chrome-семейство**: у остальных отпечатков гибридного шара нет в самой utls — разбор и следствия в §5a |
 | Связанные | [053](../053-REALITY_MIN_CLIENT_VER/SPEC.md) — предыдущая тихая отсечка REALITY, закрыта полевым прогоном на этом же стенде |
 
 Xray-сервер начиная с v26.9.8 отвергает ClientHello, в котором нет key_share
@@ -192,8 +192,11 @@ Unit: `go test -tags with_utls ./common/tls/` зелёный; `go vet` чист�
 
 - Серверная сторона REALITY (`reality_server.go`) вне scope — форк client-focused.
 - Ядро **не подменяет** отпечаток при REALITY: `fingerprint` — явный выбор
-  пользователя, а Xray сам ведёт себя так же (не-Chrome отпечатки там тоже
-  мертвы после `8cdf7bf`). Подмена и предупреждение — уровень приложения:
+  пользователя. Не-chrome отпечатки мертвы на Xray ≥ v26.9.8 из-за самой
+  библиотеки utls, а не нашего кода (разбор — §5a; ⚠️ прежняя формулировка
+  «Xray сам ведёт себя так же» **неверна**: у Xray другая ветка utls, где
+  `HelloFirefox_Auto = HelloFirefox_148` с гибридным шаром, и там `fp=firefox`
+  работает). Подмена и предупреждение — уровень приложения:
   LxBox §281 (при REALITY отпечаток не из chrome-семейства → `chrome` +
   предупреждение на ноде). Ручку «принудительно chrome при reality» в ядро
   не вводим — у выбора нет второго осмысленного значения.
@@ -203,6 +206,82 @@ Unit: `go test -tags with_utls ./common/tls/` зелёный; `go vet` чист�
   не имеет, в scope не входит.
 - `X25519Kyber768Draft00` (спеки `chrome_pq` старых utls) сервером за гибрид не
   считается — ничего не делаем, у нас эти имена и так схлопнуты в `HelloChrome_133`.
+
+## 5a. Граница фикса: не-chrome отпечатки (исследование 2026-09-16)
+
+Полевой отчёт (issue лаунчера [#124](https://github.com/Leadaxe/singbox-launcher/issues/124)):
+узел провайдера отдаёт `fp=firefox` прямо в ссылке, и на Xray ≥ v26.9.8 такой
+узел не поднимается ни на одной версии ядра, хотя `fp=chrome` после этой SPEC
+даёт 204. Причина — вне нашего кода, и снять её в нашем слое нечем.
+
+**Гибридный шар есть только у трёх пресетов `metacubex/utls` v1.8.7:**
+`HelloChrome_133` (= `HelloChrome_Auto`), `HelloChrome_131`, `HelloChrome_120_PQ`
+(проверено `grep X25519MLKEM768 u_parrots.go` по модулю в кеше). У
+`HelloFirefox_Auto = HelloFirefox_120` его нет; `safari`/`ios`/`android`/`edge`/
+`360`/`qq` — тоже без него. Поэтому эта SPEC починила chrome и **не могла**
+починить остальных: у них шара нет в спецификации ClientHello, вырезать или
+сохранять нечего.
+
+**Почему ядро на `metacubex/utls`.** Это не наш выбор: строка
+`github.com/metacubex/utls v1.8.7` в `go.mod` идентична у нас и у
+`upstream/stable`, `replace` на неё нет — зависимость наследуется от апстрима.
+
+**Чем `metacubex/utls` отличается от первоисточника
+`refraction-networking/utls`.** Это не «форк ради пары патчей»: ветки разошлись
+в апреле 2025, у metacubex 60+ собственных коммитов трёх родов:
+
+1. **Целый REALITY-сервер, которого у refraction нет вообще** — `RealityConfig`,
+   `RealityServer()`, `Clone()`, rate limiting фолбэка, `X25519MLKEM768 for
+   reality server`. Проверено: у refraction `RealityConfig` не существует.
+2. **Экспорт внутренностей под `//go:linkname`** — `export hkdf`, `export mlkem`,
+   `export cpu`, `export HasAESGCMHardwareSupport`, `fix more linkname`. На этом
+   стоят `common/badtls/registry_utls.go` (семь linkname в `utls.(*Conn)` /
+   `utls.(*halfConn)`) и `common/ktls/ktls_prf.go`.
+3. **Портируемость** — loong64, riscv64, s390x, `replace internal/cpu`,
+   `remove fipsonly`, `change back to go1.20`.
+
+Обратная сторона этой ветки — свежие профили браузеров в неё не попадают:
+metacubex отстал от refraction на **34 коммита**, и ровно в них лежит нужное —
+`fc716b2` (Firefox 148 + keyshare reuse), `6d6e1c6` (ML-KEM в supported groups),
+`aa6edf4` (Safari 26.3).
+
+**Почему у Xray это работает.** Xray сидит на `refraction-networking/utls`, причём
+пином на коммит мимо релизов: `v1.8.3-0.20260301010127-aa6edf4b11af` при последнем
+теге `v1.8.2` — то есть на полтора месяца свежее любого тега (`fc716b2` является
+предком этого пина, проверено `git merge-base --is-ancestor`). Он может позволить
+себе первоисточник, потому что REALITY у него **свой** (`xtls/reality`), а не
+библиотечный. Нам туда нельзя: без метакубикового `utls.RealityConfig` /
+`utls.RealityServer` не соберётся `common/tls/reality_server.go`, и развалятся
+linkname в `badtls`/`ktls`. **Это не «Xray решил лучше» — это разные библиотеки
+под разные архитектурные решения.**
+
+**Ждать нечего.** У metacubex `v1.8.7` — последняя версия, а на `master`
+`HelloFirefox_Auto` по-прежнему `HelloFirefox_120`: ни пресета Firefox 148, ни
+reuse-механики там нет вовсе. Пин на коммит (приём Xray) нам ничего не даёт —
+тянуть неоткуда.
+
+**Путь «попросить апстрим библиотеки» закрыт эмпирически.** В `metacubex/utls`
+**issues отключены** (`has_issues: false`), а из внешних PR за всю историю
+репозитория **не влит ни один** — 6 из 6 закрыты, включая ровно наши сценарии:
+#5 «Merge refraction-networking/utls/master» (синк с апстримом), #3 «Updated
+fingerprints», #2 «added HelloChrome_147» (новый профиль). В #4 автор пинговал
+мейнтейнера и ответа не получил.
+
+**Апстрим sing-box знает и не чинит.** [SagerNet/sing-box#4520](https://github.com/SagerNet/sing-box/issues/4520)
+открыт с 2026-09-11 без реакции мейнтейнера. Там же — подтверждение стороннего
+репортёра, что **mihomo v1.19.30 проходит на том же сервере, пиная тот же
+`metacubex/utls v1.8.7`**: значит дело не в библиотеке целиком, а в том, как
+строится приветствие, — что эта SPEC для chrome и закрыла.
+
+**Следствие.** Единственный путь к `fp=firefox` — форк `metacubex/utls`
+сабмодулем (четвёртым, к `wireguard-go`/`sing-tun`/`gvisor`) с cherry-pick
+`fc716b2`. Оговорка: `fc716b2` трогает не только декларативный пресет, но и
+`u_public.go` — добавляет **неэкспортируемое** поле `hybridClassicalReuseWith`
+в `KeyShare` плюс helper `ReuseHybridAndClassicalKeyShares`, поэтому
+«скопировать только пресет в наш слой» невозможно: нужен форк библиотеки.
+Firefox 148 переиспользует один классический X25519-ключ в гибридной и
+классической записях key share — без этой механики отпечаток не совпадёт с
+настоящим Firefox, а именно мимикрия и есть смысл `fp=firefox`.
 
 ## 6. Условие снятия
 
