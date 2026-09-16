@@ -28,7 +28,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
-#### Не выпущено / Unreleased
+#### v1.14.1-lx.2
 
 - 🦊 **REALITY `fp=firefox` снова проходит на Xray ≥ v26.9.8**
   ([SPEC 086](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md),
@@ -88,6 +88,17 @@ required for stable tags); this changelog section is the fallback used for pre-r
   красным на `lx.36` и на выпущенном `v1.14.0-lx.39` (проверено прогоном на самом теге) —
   теперь зелёный, весь `go test ./...` под `LX_TAGS` без падений. Остаток SPEC 050 прежний:
   живой XHTTP-узел и device-верификация по `dumpStacks()` (критерии 3–5).
+- 📌 **База апстрима и дрейф.** База без изменений — `v1.14.1` (`9dddbefb2` + 2), мержей
+  апстрима в этот тег не было. На момент среза `upstream/stable` впереди на 5 коммитов:
+  `10e9f86bc` Fix systemd daemon reload after package installation, `c3074cc48` Fix TestFlight
+  publish being skipped on stable, `b6e8d9845` Add App Store review submission command,
+  `dbe8c0833` Fix TestFlight publish picking builds of other versions, `103f3af14` Bind network
+  reset dispatch to manager lifecycle (`route/network.go`). В хотфикс-релиз намеренно не взяты —
+  приедут следующим синком. Go-тулчейн `1.26.8` без изменений (`go.version`). Форк-сабмодулей
+  теперь четыре: `wireguard-go`, `sing-tun`, `gvisor` и новый
+  [`utls`](https://github.com/Leadaxe/utls-lx) — сборка из исходников требует
+  `git clone --recurse-submodules`, дрейф всех четырёх разбирается до мержа ядра
+  ([раннбук §1](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/lx-release-runbook.ru.md)).
 
 #### v1.14.1-lx.1
 

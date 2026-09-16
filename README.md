@@ -55,6 +55,8 @@ Detailed reports: [`SPECS/TASKS/002-…`](SPECS/TASKS/002-XHTTP_CLIENT_TRANSPORT
 
 > **Not supported (Reality layer, deferred):** post-quantum Reality (`pqv` / ML-DSA-65) and Xray's `spiderX`. These are Xray-specific Reality features absent from sing-box, and Reality is the upstream TLS layer we keep untouched (it is not one of our features). Classic X25519 Reality works; a server that *mandates* post-quantum Reality won't connect. This is a sing-box limitation — best addressed upstream (we'd inherit it on rebase).
 
+> **REALITY against Xray ≥ v26.9.8 (utls fingerprints).** Those servers accept a ClientHello only when it carries an `X25519MLKEM768` key share ahead of `X25519`. [SPEC 083](SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) removed the upstream filter that cut the hybrid share out, which fixed `fp=chrome` (shipped in `v1.14.0-lx.36`); [SPEC 086](SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md) added the `submodules/utls` fork (Firefox 148 preset + key share reuse) so `fp=firefox` passes too. The remaining fingerprints — `safari`, `ios`, `edge`, `android`, `360`, `qq` — carry no hybrid share in `metacubex/utls` and are still rejected by such servers: a known boundary of the upstream library, not a fork bug. Older Xray servers are unaffected on every fingerprint.
+
 ---
 
 ## Build
@@ -67,15 +69,15 @@ make -f Makefile.lx lx-build
 # → ./sing-box binary with a version like 1.14.0-lx.18
 ```
 
-> `--recurse-submodules` is required for `with_awg`: the AmneziaWG runtime is wired in as the submodule `submodules/wireguard-go` → [Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx).
+> `--recurse-submodules` is required for **every** build, not just `with_awg`: four dependencies are swapped for fork submodules through `replace` in `go.mod` — `submodules/sing-tun`, `submodules/gvisor` and `submodules/utls` unconditionally, `submodules/wireguard-go` ([Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx), the AmneziaWG runtime) behind `with_awg`. A clone without them fails at `go build`.
 
 Under the hood it is a plain `go build` with this tag set (`make -f Makefile.lx lx-print-tags` is the single source of truth):
 
 ```
-with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_lx_command,with_lxd,with_openvpn,with_openconnect,with_lx_chain
+with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_lx_command,with_lxd,with_openvpn,with_openconnect,with_lx_chain,with_tailscale
 ```
 
-That is upstream's client feature-set **minus** the server/irrelevant tags — `with_acme` (server-side cert issuance), `with_ccm`/`with_ocm` (AI-proxy services) — **plus** `with_purego` (CGO-free cross-compile, so `with_naive_outbound`/cronet builds at `CGO=0` on every desktop target except the Windows 7 / 32-bit legacy build, which drops naive — `cronet-go` has no windows/386), upstream's `with_openvpn` / `with_openconnect` / `with_tailscale` (the `tailscale` endpoint is in the desktop and router binaries, not in the Android AAR), and our features `with_xhttp` / `with_awg` / `with_lx_command` / `with_lxd` / `with_lx_chain`. Everything else is exactly upstream.
+That is upstream's client feature-set **minus** the server/irrelevant tags — `with_acme` (server-side cert issuance), `with_ccm`/`with_ocm` (AI-proxy services) — **plus** `with_purego` (CGO-free cross-compile, so `with_naive_outbound`/cronet builds at `CGO=0` on every desktop target except the Windows 7 / 32-bit legacy build, which drops naive — `cronet-go` has no windows/386), upstream's `with_openvpn` / `with_openconnect` / `with_tailscale` (the `tailscale` endpoint is in the desktop and router binaries, and in the Android AAR since `v1.14.0-lx.38` with the `ts_omit_*` trims), and our features `with_xhttp` / `with_awg` / `with_lx_command` / `with_lxd` / `with_lx_chain`. Everything else is exactly upstream.
 
 Our two tags are independent by design (SPEC 067): **`with_lx_command`** carries the libbox command-protocol extensions (`URLTestOutbound`, `GetRules`, `GetGroups`, … — what LxBox lives on), **`with_lxd`** carries the `lxd/` package and the daemon subcommand. The Windows 7 legacy build ships without `with_lxd` (no Windows service and no log rotation there, so the subcommand would exist without what makes it a daemon) while keeping the RPC. The Android AAR never had the daemon: gomobile builds `experimental/libbox`, which does not import `lxd/`.
 
@@ -90,7 +92,7 @@ Validate configs:
 
 > `lx-test/config/` holds our samples (upstream `test/` is a separate Go module — we don't use it).
 
-**Android (`libbox.aar`).** `make lib_install && make lib_android` builds the gomobile AAR — `libbox.aar` (SDK 23) + `libbox-legacy.aar` (SDK 21) — with `with_xhttp`/`with_awg`/`with_lx_command`/`with_lx_idle_suspend`/`with_lx_chain` baked in (and `tailscale`/`clash_api` dropped — external Clash dashboards are a desktop concern), for embedding in an Android consumer app (needs NDK r28 + OpenJDK 17). `Libbox.version()` reports `…-lx.N`.
+**Android (`libbox.aar`).** `make lib_install && make lib_android` builds the gomobile AAR — `libbox.aar` (SDK 23) + `libbox-legacy.aar` (SDK 21) — with `with_xhttp`/`with_awg`/`with_lx_command`/`with_lx_idle_suspend`/`with_lx_chain` baked in (plus `with_tailscale` trimmed by the `ts_omit_*` tags; `clash_api` is the one dropped — external Clash dashboards are a desktop concern), for embedding in an Android consumer app (needs NDK r28 + OpenJDK 17). `Libbox.version()` reports `…-lx.N`.
 
 ---
 

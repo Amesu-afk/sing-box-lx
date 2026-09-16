@@ -55,6 +55,8 @@
 
 > **Не поддерживается (слой Reality, отложено):** post-quantum Reality (`pqv` / ML-DSA-65) и `spiderX` из Xray. Это Xray-специфичные фичи Reality, которых нет в sing-box, а Reality — upstream-слой TLS, который мы держим нетронутым (это не одна из наших фич). Классический X25519 Reality работает; сервер, который **требует** post-quantum Reality, не подключится. Это ограничение sing-box — правильнее решать в upstream (получим на ребейзе).
 
+> **REALITY против Xray ≥ v26.9.8 (utls-отпечатки).** Такие серверы принимают ClientHello, только если в нём key share `X25519MLKEM768` идёт перед `X25519`. [SPEC 083](SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) сняла апстрим-фильтр, вырезавший гибридный шар, — это починило `fp=chrome` (отгружено в `v1.14.0-lx.36`); [SPEC 086](SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md) добавила форк-сабмодуль `submodules/utls` (пресет Firefox 148 + reuse ключа key share), и `fp=firefox` тоже проходит. Остальные отпечатки — `safari`, `ios`, `edge`, `android`, `360`, `qq` — гибридного шара в `metacubex/utls` не несут и такими серверами по-прежнему отвергаются: это известная граница апстрим-библиотеки, а не баг форка. На более старых Xray-серверах работают все отпечатки.
+
 ---
 
 ## Сборка
@@ -67,15 +69,15 @@ make -f Makefile.lx lx-build
 # → бинарь ./sing-box с версией вида 1.14.0-lx.18
 ```
 
-> `--recurse-submodules` обязателен для `with_awg`: рантайм AmneziaWG подключён submodule'ом `submodules/wireguard-go` → [Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx).
+> `--recurse-submodules` обязателен **любой** сборке, а не только `with_awg`: четыре зависимости подменены форк-сабмодулями через `replace` в `go.mod` — `submodules/sing-tun`, `submodules/gvisor` и `submodules/utls` безусловно, `submodules/wireguard-go` ([Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx), рантайм AmneziaWG) — за `with_awg`. Клон без них падает на `go build`.
 
 Под капотом — стандартный `go build` с набором тегов (единственный источник истины — `make -f Makefile.lx lx-print-tags`):
 
 ```
-with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_lx_command,with_lxd,with_openvpn,with_openconnect,with_lx_chain
+with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_xhttp,with_awg,with_lx_command,with_lxd,with_openvpn,with_openconnect,with_lx_chain,with_tailscale
 ```
 
-Это клиентский feature-set upstream **минус** серверные/нерелевантные теги — `with_acme` (серверный выпуск сертов), `with_ccm`/`with_ocm` (AI-прокси) — **плюс** `with_purego` (CGO-free кросс-сборка, чтобы `with_naive_outbound`/cronet собирался при `CGO=0` на любом desktop-таргете, кроме Windows 7 / 32-бит legacy-сборки, где naive выкинут — у `cronet-go` нет windows/386), апстримные `with_openvpn` / `with_openconnect` / `with_tailscale` (endpoint `tailscale` есть в desktop- и роутерных бинарях, в Android-AAR его нет) и наши фичи `with_xhttp` / `with_awg` / `with_lx_command` / `with_lxd` / `with_lx_chain`. Всё остальное — ровно как upstream.
+Это клиентский feature-set upstream **минус** серверные/нерелевантные теги — `with_acme` (серверный выпуск сертов), `with_ccm`/`with_ocm` (AI-прокси) — **плюс** `with_purego` (CGO-free кросс-сборка, чтобы `with_naive_outbound`/cronet собирался при `CGO=0` на любом desktop-таргете, кроме Windows 7 / 32-бит legacy-сборки, где naive выкинут — у `cronet-go` нет windows/386), апстримные `with_openvpn` / `with_openconnect` / `with_tailscale` (endpoint `tailscale` есть в desktop- и роутерных бинарях, а с `v1.14.0-lx.38` — и в Android-AAR, обрезанный тегами `ts_omit_*`) и наши фичи `with_xhttp` / `with_awg` / `with_lx_command` / `with_lxd` / `with_lx_chain`. Всё остальное — ровно как upstream.
 
 Наши два тега независимы по замыслу (SPEC 067): **`with_lx_command`** несёт расширения командного протокола libbox (`URLTestOutbound`, `GetRules`, `GetGroups`, … — ими живёт LxBox), **`with_lxd`** — пакет `lxd/` и подкоманду демона. Legacy-сборка Windows 7 идёт **без** `with_lxd` (там нет ни службы Windows, ни ротации лога, так что подкоманда существовала бы без того, что делает её демоном), сохраняя RPC. В Android-AAR демона не было и раньше: gomobile собирает `experimental/libbox`, который `lxd/` не импортирует.
 
@@ -90,7 +92,7 @@ with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_nai
 
 > `lx-test/config/` — наши примеры (upstream `test/` — отдельный Go-модуль, его не используем).
 
-**Android (`libbox.aar`).** `make lib_install && make lib_android` собирает gomobile-AAR — `libbox.aar` (SDK 23) + `libbox-legacy.aar` (SDK 21) — с зашитыми `with_xhttp`/`with_awg`/`with_lx_command`/`with_lx_idle_suspend`/`with_lx_chain` (и без `tailscale`/`clash_api` — внешние Clash-дашборды остаются заботой десктопа), для встраивания в Android-приложение-потребитель (нужны NDK r28 + OpenJDK 17). `Libbox.version()` отдаёт `…-lx.N`.
+**Android (`libbox.aar`).** `make lib_install && make lib_android` собирает gomobile-AAR — `libbox.aar` (SDK 23) + `libbox-legacy.aar` (SDK 21) — с зашитыми `with_xhttp`/`with_awg`/`with_lx_command`/`with_lx_idle_suspend`/`with_lx_chain` (плюс `with_tailscale`, обрезанный тегами `ts_omit_*`; выкинут только `clash_api` — внешние Clash-дашборды остаются заботой десктопа), для встраивания в Android-приложение-потребитель (нужны NDK r28 + OpenJDK 17). `Libbox.version()` отдаёт `…-lx.N`.
 
 ---
 
