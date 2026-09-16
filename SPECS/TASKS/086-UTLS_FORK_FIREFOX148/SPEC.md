@@ -9,7 +9,7 @@
 | Ветка | `lx` |
 | Связанные | предшествующая [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (§5a — почему без форка не обойтись); issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22); полевой отчёт [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124); прецедент форк-сабмодуля — [048](../048-GVISOR_HANDSHAKE_NIL_CRASH/SPEC.md) |
 
-**Touches:** `go.mod` (`replace`), `.gitmodules` (`submodules/utls`), CI-чекаут сабмодуля во всех `lx-*.yml`, `common/tls/utls_client.go` (проверка маппинга `"firefox"`), реестр HOTFIXES — строка при реализации.
+**Touches:** `go.mod` (`replace`), `.gitmodules` (`submodules/utls`), `common/tls/utls_client.go` (проверка маппинга `"firefox"`), реестр HOTFIXES — строка при реализации.
 
 ## Why
 
@@ -31,7 +31,7 @@
 - **R1. Форк сабмодулем.** `metacubex/utls` → `Leadaxe/utls-lx` (по аналогии с `gvisor-lx`, `sing-tun-lx`), ветка `lx` от тега `v1.8.7` (= текущий пин ядра и апстрима), сабмодуль `submodules/utls`, `replace github.com/metacubex/utls => ./submodules/utls`. Путь модуля не меняется — `//go:linkname github.com/metacubex/utls.…` в `common/badtls` и `common/ktls` продолжают резолвиться.
 - **R2. Перенос.** Cherry-pick `fc716b2` + `ddebe39` через расхождение веток (с апреля 2025, 34 коммита). Каждый конфликт и его разрешение — в этот SPEC.
 - **R3. Маппинг.** На `master` refraction `HelloFirefox_Auto = HelloFirefox_148`; наш `"firefox"` уже смотрит в `HelloFirefox_Auto` (`common/tls/utls_client.go`). После переноса проверить, что алиас переключён, иначе — явно.
-- **R4. CI.** Сабмодуль чекаутится во всех джобах `lx-*.yml` так же, как три существующих; `libbox` и `libbox-legacy` собираются.
+- **R4. CI.** Правок workflow нет: все `lx-*.yml` уже чекаутят `submodules: recursive`. Проверить прогоном, что `libbox` и `libbox-legacy` собираются.
 
 ## Критерии приёмки
 
