@@ -237,3 +237,20 @@ replace github.com/sagernet/sing-tun => ./submodules/sing-tun
 replace github.com/sagernet/gvisor => ./submodules/gvisor
 
 // lx:end gvisor-handshake-guard
+
+// lx:begin utls-firefox148 (SPECS/TASKS/086)
+// Fork of metacubex/utls at the pinned v1.8.7 (the exact `require` above, identical to
+// upstream's pin) plus two commits cherry-picked from refraction-networking/utls:
+// fc716b2 (the HelloFirefox_148 preset + reuse of one classical X25519 key between the
+// hybrid and the classical key_share entries) and ddebe39 (the same reuse re-done via
+// marker bytes in KeyShare.Data instead of an unexported field). REALITY servers on
+// Xray >= v26.9.8 accept a ClientHello only with an X25519MLKEM768 share ahead of
+// X25519; metacubex/utls carries that share in the chrome presets alone, so
+// `fp=firefox` (HelloFirefox_120 there) is silently rejected. The primary source can't
+// be used directly: metacubex/utls carries the REALITY server and the go:linkname
+// exports common/badtls and common/ktls stand on, and metacubex itself takes no
+// external PRs and has no Firefox 148. Local-path replace, same scheme as the other
+// three submodules; the module path is unchanged so the linknames keep resolving.
+replace github.com/metacubex/utls => ./submodules/utls
+
+// lx:end utls-firefox148

@@ -19,3 +19,7 @@
 	path = submodules/gvisor
 	url = https://github.com/Leadaxe/gvisor-lx
 	branch = lx
+[submodule "submodules/utls"]
+	path = submodules/utls
+	url = https://github.com/Leadaxe/utls-lx
+	branch = lx
