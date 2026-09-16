@@ -64,7 +64,7 @@ git tag v<X.Y.Z>-lx.<N> && git push origin v<X.Y.Z>-lx.<N>   # тег из СУ�
 
 - Не запускать интерактивные git-флаги (`-i`).
 - Ветку `lx` не форс-пушить; `--force-with-lease` — только на фичевых ветках.
-- **Оба форк-сабмодуля** (`submodules/wireguard-go` = Leadaxe/wireguard-go-awg2-lx, `submodules/sing-tun` = Leadaxe/sing-tun-lx) обновлять осознанно: фиксировать конкретный коммит, встречные upstream-бампы гитлинков на мерже не принимать вслепую. Коммит сабмодуля пушить **до** суперпроекта (иначе CI падает «not our ref»).
+- **Все форк-сабмодули** (`submodules/wireguard-go` = Leadaxe/wireguard-go-awg2-lx, `submodules/sing-tun` = Leadaxe/sing-tun-lx, `submodules/gvisor` = Leadaxe/gvisor-lx, `submodules/utls` = Leadaxe/utls-lx) обновлять осознанно: фиксировать конкретный коммит, встречные upstream-бампы гитлинков на мерже не принимать вслепую. Коммит сабмодуля пушить **до** суперпроекта (иначе CI падает «not our ref»).
 
 ---
 

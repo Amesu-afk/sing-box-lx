@@ -318,6 +318,7 @@ upstream  https://github.com/SagerNet/sing-box.git
 | `include/v2rayxhttp.go` | регистрация транспорта за build-tag |
 | `submodules/gvisor` | submodule: пин-снапшот gVisor с нашим nil-guard'ом хендшейка ([Leadaxe/gvisor-lx](https://github.com/Leadaxe/gvisor-lx)) |
 | `submodules/sing-tun` | submodule: форк sing-tun с самолечением acceptLoop ([Leadaxe/sing-tun-lx](https://github.com/Leadaxe/sing-tun-lx)) |
+| `submodules/utls` | submodule: форк metacubex/utls с пресетом Firefox 148 и reuse ключа между гибридной и классической записями key share, перенесёнными из refraction-networking/utls, — REALITY `fp=firefox` проходит Xray ≥ v26.9.8 ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx)) |
 | `protocol/chain/` | outbound `chain`: хопы, рантайм-звенья, strip/rewrite/MTU (за `with_lx_chain`) |
 | `lxd/` | демон `lxd`: admin-REST, mTLS, установка службой, телеметрия хоста (за `with_lxd`) |
 | `go.version` / `upstream.version` | пин Go-тулчейна (его читает каждый `setup-go` в CI) / апстрим-версия, на которой стоит форк |

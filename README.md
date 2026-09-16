@@ -317,6 +317,7 @@ upstream  https://github.com/SagerNet/sing-box.git
 | `include/v2rayxhttp.go` | transport registration behind a build tag |
 | `submodules/gvisor` | submodule: pinned gVisor snapshot with our handshake nil-guard ([Leadaxe/gvisor-lx](https://github.com/Leadaxe/gvisor-lx)) |
 | `submodules/sing-tun` | submodule: sing-tun fork with the acceptLoop self-heal ([Leadaxe/sing-tun-lx](https://github.com/Leadaxe/sing-tun-lx)) |
+| `submodules/utls` | submodule: metacubex/utls fork with the Firefox 148 preset and the hybrid/classical key share reuse ported from refraction-networking/utls, so REALITY `fp=firefox` passes Xray ≥ v26.9.8 ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx)) |
 | `protocol/chain/` | `chain` outbound: hops, runtime links, strip/rewrite/MTU (behind `with_lx_chain`) |
 | `lxd/` | the `lxd` daemon: admin-REST, mTLS, service install, host telemetry (behind `with_lxd`) |
 | `go.version` / `upstream.version` | pinned Go toolchain (read by every CI `setup-go`) / the upstream version the fork is based on |

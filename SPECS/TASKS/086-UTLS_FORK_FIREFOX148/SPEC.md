@@ -5,11 +5,11 @@
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — граница фикса [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md): REALITY с `fp=firefox` не проходит на Xray ≥ v26.9.8, потому что в `metacubex/utls` нет пресета Firefox с гибридным key share |
-| Статус | N (new) — план утверждён владельцем 2026-09-16: форк `metacubex/utls` сабмодулем + перенос Firefox 148 из `refraction-networking/utls`; конфликты не проверены |
+| Статус | I (implemented) — реализовано 2026-09-16: форк [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) (`v1.8.7` + `fc716b2` + `ddebe39`, единственный конфликт — блок import), сабмодуль + `replace`, страж-тесты в `common/tls`. Критерии 1, 3, 4, 5 закрыты стендом на Mac (Xray v26.9.9: `fp=firefox` 204, ядро до фикса — `reality verification failed`; v26.7.28/v26.7.11 и `chrome` без регрессии); критерий 2 — локально (сборка полным `LX_TAGS`, `go test ./...`, кросс-сборка android/arm64 с linkname), оба AAR — CI после push суперпроекта. Push и полевой прогон — за владельцем (стоп-точки в «Передаче реализации») |
 | Ветка | `lx` |
 | Связанные | предшествующая [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (§5a — почему без форка не обойтись); issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22); полевой отчёт [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124); прецедент форк-сабмодуля — [048](../048-GVISOR_HANDSHAKE_NIL_CRASH/SPEC.md) |
 
-**Touches:** `go.mod` (`replace`), `.gitmodules` (`submodules/utls`), `common/tls/utls_client.go` (проверка маппинга `"firefox"`), реестр HOTFIXES — строка при реализации.
+**Touches:** `go.mod` (`replace`, блок `lx:begin utls-firefox148`) + `go.sum` (сняты строки заменённого модуля), `.gitmodules` (`submodules/utls`), `common/tls/utls_client.go` (маппинг `"firefox"` не менялся — проверен тестом), новый `common/tls/utls_firefox148_lx_test.go` (страж), реестр HOTFIXES, `SPECS/README.md`, `README.md`/`README.ru.md` (таблица сабмодулей), `docs-lx/lx-release-runbook.{ru.,}md` §1.1/§3 (четвёртый сабмодуль), `SPECS/CONSTITUTION.md`, `SPECS/IMPLEMENTATION_PROMPT.md`, `docs-lx/lx-changelog.md`.
 
 ## Why
 
@@ -35,11 +35,11 @@
 
 ## Критерии приёмки
 
-1. Список конфликтов cherry-pick и их разрешение записаны в SPEC.
-2. `make -f Makefile.lx lx-build` полным `LX_TAGS`; `go test ./...` с `-ldflags "-checklinkname=0"`; оба AAR — зелёные (linkname в `badtls`/`ktls` резолвятся).
-3. ClientHello `fp=firefox`: `X25519MLKEM768` стоит перед `X25519`, классическая часть гибрида и отдельная запись `X25519` — один ключ. Структура приветствия совпадает с тем же пресетом из refraction.
-4. REALITY `fp=firefox` против Xray ≥ v26.9.8 → 204; против Xray < v26.9.8 → 204. ⚠️ dest стенда — `swdist.apple.com` или `www.cloudflare.com`, **не** `www.microsoft.com` (серверная ловушка, [комментарий в #22](https://github.com/Leadaxe/sing-box-lx/issues/22#issuecomment-5694711194)).
-5. `fp=chrome` без регрессии ([083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md)).
+1. Список конфликтов cherry-pick и их разрешение записаны в SPEC. ✅ (Реализация → критерий 1)
+2. `make -f Makefile.lx lx-build` полным `LX_TAGS`; `go test ./...` с `-ldflags "-checklinkname=0"`; оба AAR — зелёные (linkname в `badtls`/`ktls` резолвятся). ✅ сборка, тесты и кросс-сборка android/arm64 локально; AAR — ⏳ CI после push (Реализация → критерий 2)
+3. ClientHello `fp=firefox`: `X25519MLKEM768` стоит перед `X25519`, классическая часть гибрида и отдельная запись `X25519` — один ключ. Структура приветствия совпадает с тем же пресетом из refraction. ✅ (Реализация → критерий 3 + страж-тесты)
+4. REALITY `fp=firefox` против Xray ≥ v26.9.8 → 204; против Xray < v26.9.8 → 204. ⚠️ dest стенда — `swdist.apple.com` или `www.cloudflare.com`, **не** `www.microsoft.com` (серверная ловушка, [комментарий в #22](https://github.com/Leadaxe/sing-box-lx/issues/22#issuecomment-5694711194)). ✅ стенд 2026-09-16 (Реализация → критерии 4 и 5)
+5. `fp=chrome` без регрессии ([083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md)). ✅ (тот же стенд)
 
 ## Границы
 
@@ -68,6 +68,141 @@
 - Создание репозитория `Leadaxe/utls-lx` на GitHub и первый push.
 - Порядок push: сабмодуль → суперпроект (иначе «not our ref» во всех джобах).
 - Тег/релиз не резать; другие отпечатки не трогать; полевой прогон — за владельцем.
+
+## Реализация — 2026-09-16
+
+### Форк `Leadaxe/utls-lx`
+
+- Самостоятельный репозиторий (не GitHub-fork — как `gvisor-lx`/`sing-tun-lx`), ветка `lx`
+  (default) от тега `v1.8.7` = `f7d52c22f3a8d2f510ad1470f75cb6c3fe26aa37`; тег `v1.8.7` запушен
+  вместе с веткой, чтобы база сверялась с remote (`git describe` → `v1.8.7-2-g6b7f051`). История
+  metacubex взята целиком — клон 9.9 МБ, снапшот как у gvisor не нужен.
+- Коммиты поверх базы: `9fd088e` = `cherry-pick -x fc716b2`, `6b7f051` = `cherry-pick -x ddebe39`.
+  Собственных правок библиотеки нет; апстримный workflow `go.yml` metacubex не трогался.
+- `go.mod` форка не менялся: metacubex держит `go 1.20`, refraction — `go 1.24`, но перенесённый код
+  ничего новее 1.20 не использует (`crypto/ecdh` есть с 1.20; ML-KEM — через metacubex-овский
+  `internal/mlkem`, см. конфликт ниже). Сборка под go1.26.8 идёт с языковой версией модуля 1.20 —
+  проверено.
+- Проверка форка: `go build ./...`, `go vet .`, `go test ./...` — весь набор metacubex плюс
+  перенесённый `u_parrots_test.go` (`TestParrotFingerprintsReuseHybridClassicalKeyShare`,
+  `TestHybridClassicalKeySharesAreIndependentByDefault`) — зелёные под go1.26.8.
+- Подключение в ядре: сабмодуль `submodules/utls` (`.gitmodules`: `branch = lx`), `replace
+  github.com/metacubex/utls => ./submodules/utls` (блок `lx:begin utls-firefox148` в `go.mod`);
+  `go list -m github.com/metacubex/utls` → `v1.8.7 => ./submodules/utls`. Из `go.sum` сняты две
+  строки `metacubex/utls v1.8.7` (h1 и /go.mod) — ровно то, что предлагает `go mod tidy -diff`;
+  для директорийного `replace` хеш не проверяется, у `sing-tun`/`gvisor` таких строк тоже нет.
+  (`tidy -diff` попутно показывает давно лишние строки `sagernet/wireguard-go v0.0.6` — чужой
+  хвост, здесь не трогался.)
+
+### Критерий 1 — конфликты cherry-pick
+
+| Коммит | Конфликт | Разрешение |
+|---|---|---|
+| `fc716b2` | один, `u_parrots.go`, блок `import`: refraction добавляет `"crypto/ecdh"` рядом со своим `"crypto/mlkem"`, а у metacubex `crypto/mlkem` нет — ML-KEM живёт в `github.com/metacubex/utls/internal/mlkem` (совместимость с go1.20; `crypto/mlkem` появился в Go 1.24) | оставлен metacubex-овский `internal/mlkem`, добавлен только `"crypto/ecdh"`; API совпадает (`mlkem.SeedSize`, `NewDecapsulationKey768`, `EncapsulationKey().Bytes()`), тело коммита легло без правок |
+| `ddebe39` | нет | — |
+
+Ожидавшийся конфликт в зоне генерации key share **не случился**: регион `case *KeyShareExtension`
+в `ApplyPreset` у metacubex `v1.8.7` и у refraction на `fc716b2^` текстуально идентичен (сверено
+`diff`), структуры `KeyShare` и `KeySharePrivateKeys` — тоже; `800edd4` (раздельный ECDHE-ключ
+для гибрида) лежит в обеих ветках после точки расхождения (`9dd2a0b`, 2025-04-20). Дельта форка
+= дельта двух коммитов refraction + одна строка импорта.
+
+### Критерий 3 — ClientHello Firefox 148 против refraction
+
+Метод — по разделу «Передача реализации»: scratch-модуль вне ядра (в `go.mod` ядра refraction не
+добавлялся) с двумя импортами — `github.com/metacubex/utls` (→ форк через `replace`) и
+`github.com/refraction-networking/utls` на пине Xray `v1.8.3-0.20260301010127-aa6edf4b11af`
+(потомок `ddebe39`). У обоих `UClient(…, HelloFirefox_148)` + `BuildHandshakeState()` с
+детерминированным `Config.Rand`, затем разбор **сырого** ClientHello по байтам, без библиотечных
+типов: версия, длины random/session_id, cipher suites, compression, порядок и содержимое
+расширений (для key_share — группы и длины записей).
+
+Результат: `HelloFirefox_Auto` = `148` у обоих (R3 закрыт — `"firefox"` в `utls_client.go`
+менять не пришлось); 15 расширений одного типа в одном порядке; форма приветствия идентична:
+
+| Поле | Значение (одинаково у форка и refraction) |
+|---|---|
+| cipher_suites | `1301 1303 1302 c02b c02f cca9 cca8 c02c c030 c00a c009 c013 c014 009c 009d 002f 0035` |
+| расширения по порядку | sni, extended_master_secret, renegotiation_info, supported_groups, ec_point_formats, alpn (`h2`, `http/1.1`), status_request, delegated_credentials (`0403 0503 0603 0203`), sct, key_share, supported_versions (`0304 0303`), signature_algorithms (`0403 0503 0603 0804 0805 0806 0401 0501 0601 0203 0201`), record_size_limit (`0x4001`), compress_certificate (zlib, brotli, zstd), ECH GREASE (281 байт, payload 239) |
+| supported_groups | `X25519MLKEM768 (11ec), X25519 (001d), P-256, P-384, P-521, ffdhe2048, ffdhe3072` |
+| key_share | `X25519MLKEM768: 1216 байт, X25519: 32, P-256: 65` — гибрид **перед** X25519, каждый по разу |
+| reuse | последние 32 байта гибридной записи == запись `X25519` (проверено на обеих библиотеках) |
+
+Единственное различие сырых байтов — AEAD в ECH GREASE (`0x0001`/`0x0003`): обе библиотеки
+выбирают его монетой из одного набора кандидатов (`AES-128-GCM`, `ChaCha20-Poly1305`; за 40
+приветствий — lx 9/31, refraction 17/23). Это случайность внутри одного пресета, не структура.
+
+### Страж в ядре — `common/tls/utls_firefox148_lx_test.go` (`with_utls`)
+
+- `TestLxFirefoxFingerprintIsFirefox148` — `"firefox"` → `HelloFirefox_Auto` == `HelloFirefox_148`
+  (R3; на голом metacubex упадёт: там `Auto = 120`).
+- `TestLxRealityFingerprintsCarryHybridShareFirst` — для `chrome` и `firefox`: `X25519MLKEM768`
+  перед `X25519` и ровно по одному разу в key_share и в supported_groups, длины записей 1216/32.
+  Это же автоматизирует проверку из [083 §6](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#6-условие-снятия)
+  («`HelloChrome_Auto` несёт гибрид перед X25519») — теперь она падает в CI, а не в поле.
+- `TestLxFirefox148ReusesClassicalKeyAcrossShares` — X25519-хвост гибрида == запись `X25519`;
+  `KeySharePrivateKeys.Ecdhe` и `.MlkemEcdhe` оба не nil и **один и тот же** объект
+  (`require.Same`), публичный ключ `Ecdhe` == записи `X25519` — контракт `AuthKey` из 083
+  (`Ecdhe`, при nil — `MlkemEcdhe`) под reuse держится: сервер возьмёт чистый X25519, мы считаем
+  по тому же ключу.
+
+Три теста зелёные (`go test -tags with_utls -ldflags "-checklinkname=0" ./common/tls/`).
+
+### Критерий 2 — сборка и тесты ядра
+
+- `make -f Makefile.lx lx-build` полным `LX_TAGS` (go1.26.8, darwin/amd64) — ✅, версия
+  `1.14.1-lx.1`.
+- `go test ./...` под `LX_TAGS` с `-ldflags "-checklinkname=0"` — ✅ 39 пакетов ok. В первом прогоне три
+  пакета упали по таймингам при load average ≈35 (параллельная сборка + сторонняя нагрузка на Mac):
+  `common/tls` — пять Apple-платформенных `TestAppleClient*` (`context deadline exceeded`), `dns` —
+  `TestDNSEvaluateParallelFallback`/`TestDNSLogicalRace` («436ms is not less than 350ms»),
+  `dns/transport/group` — `TestTargetBudgetLeavesRoomForRescue`/`TestTraceElectionFanned`. Повтор
+  тех же тестов на разгруженной машине — все три пакета ok; к utls отношения не имеют.
+- linkname `badtls`/`ktls` на android — ✅ кросс-сборка `GOOS=android GOARCH=arm64 CGO_ENABLED=0 go
+  build ./cmd/sing-box` с тегами AAR (`cmd/internal/build_libbox/main.go`, без `with_naive_outbound`:
+  cronet без cgo не собирается, к linkname это не относится) и `-ldflags "-checklinkname=0"` —
+  слинковалась (ELF aarch64 для android). Это проверка резолва linkname под android-таргет, не
+  замена AAR: сам gomobile-билд — в CI.
+- Оба AAR — только CI (`lx-ci.yml`, job «Build libbox.aar + libbox-legacy.aar») после push
+  суперпроекта.
+
+### Критерии 4 и 5 — стенд (Mac, 2026-09-16)
+
+Как в [083 §2](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#2-доказательство): Xray-сервер на loopback
+(`127.0.0.1:14443`, VLESS + REALITY, `xtls-rprx-vision`, `show: true`), `dest`/`serverNames` =
+`www.apple.com` — тот же стенд, что закрыл 083, чтобы «до/после» сравнивались один в один, — плюс
+контрольный прогон с `www.cloudflare.com` (один из двух dest, названных в критерии 4). Ядро «после» =
+эта ветка (`sing-box-086`, darwin/amd64, полный `LX_TAGS`); ядро «до» = сборка со стенда 083 (фильтр
+083 снят, utls — стоковый metacubex v1.8.7). `mixed`-inbound, `curl -x socks5h://…
+http://www.gstatic.com/generate_204` ×3 на отпечаток. Пробник ждёт открытия портов, а не спит
+фиксированные паузы: первый прогон под load average ≈35 от параллельного `go test ./...` дал `000`
+по всем клеткам, включая базовые из 083, — стенд, не ядро.
+
+| Ядро | Xray | chrome | firefox |
+|---|---|---|---|
+| **после (086)** | **v26.9.9** | 204 204 204 | **204 204 204** |
+| до (083, стоковый utls) | v26.9.9 | 204 204 204 | ✗ ✗ ✗ `reality verification failed` |
+| после (086) | v26.7.28 | 204 204 204 | 204 204 204 |
+| после (086) | v26.7.11 | 204 204 204 | 204 204 204 |
+| до (083) | v26.7.28 | — | 204 204 204 |
+| после (086), dest `www.cloudflare.com` | v26.9.9 | 204 204 204 | 204 204 204 |
+
+- Лог Xray v26.9.9 «после», каждое соединение: `hs.c.AuthKey[:16]: […]`, `hs.c.ClientVer: [26 3 27]`,
+  `hs.c.conn == conn: true`, затем `accepted tcp:www.gstatic.com:80` — сервер посчитал `AuthKey` по
+  тому же ключу, что и мы: reuse не разошёлся с контрактом 083 (критерий 4 ✅).
+- «До» с `fp=firefox`: `forwarded SNI: www.apple.com` без `AuthKey`, затем `processed invalid
+  connection … authentication failed or validation criteria not met` — та же отсечка, что в 083 §2,
+  теперь только у стокового utls.
+- Строка `processed invalid connection … failed to read client hello` в начале каждого лога Xray —
+  это проверка открытого порта пробником (`nc -z`), не клиент.
+- `fp=chrome` — 204 на всех трёх версиях Xray, регрессии 083 нет (критерий 5 ✅).
+
+### CI
+
+Правок workflow нет (R4): все `actions/checkout` в `lx-*.yml` уже с `submodules: recursive`
+(сверено по каждому чекауту, включая `lx-rebase.yml` с явным `git submodule update --init
+--recursive`). Единственный чекаут без сабмодулей — job публикации релиза в `lx-release.yml`,
+который Go не собирает.
 
 ## Цена сопровождения
 

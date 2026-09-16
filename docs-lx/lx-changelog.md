@@ -30,6 +30,36 @@ required for stable tags); this changelog section is the fallback used for pre-r
 
 #### Не выпущено / Unreleased
 
+- 🦊 **REALITY `fp=firefox` снова проходит на Xray ≥ v26.9.8**
+  ([SPEC 086](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md),
+  продолжение [SPEC 083](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md),
+  issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22), полевой отчёт
+  [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124)). 083 вернула
+  гибридный key share `X25519MLKEM768` в ClientHello, но в `metacubex/utls` v1.8.7 он есть только у
+  chrome-пресетов: `firefox` там — Firefox 120 без гибрида, и сервер `XTLS/REALITY@8cdf7bf` отсекает
+  его так же тихо (`reality verification failed`). metacubex Firefox 148 не несёт и внешних PR не
+  принимает, апстрим sing-box сидит на той же библиотеке, а на первоисточник
+  `refraction-networking/utls` перейти нельзя — на metacubex-ветке стоят REALITY-сервер и
+  `go:linkname` из `common/badtls`/`common/ktls`. Решение — четвёртый форк-сабмодуль
+  `submodules/utls` = [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx): metacubex `v1.8.7` +
+  два cherry-pick из refraction (`fc716b2` — пресет `HelloFirefox_148` и reuse одного X25519-ключа
+  между гибридной и классической записями key share, `ddebe39` — та же механика через
+  байт-маркеры); собственных правок библиотеки нет, единственный конфликт — блок import
+  (`internal/mlkem` metacubex вместо `crypto/mlkem`), путь модуля не менялся, linkname резолвятся
+  (сборка полным `LX_TAGS` и кросс-сборка android/arm64). `replace github.com/metacubex/utls =>
+  ./submodules/utls` в `go.mod`; `"firefox"` по-прежнему смотрит в `HelloFirefox_Auto`, который
+  теперь = 148. Структура ClientHello Firefox 148 совпала с refraction по сырым байтам
+  (scratch-сравнение; единственное отличие — случайный AEAD в ECH GREASE, монета у обеих
+  библиотек). Страж `common/tls/utls_firefox148_lx_test.go`: `firefox` = Firefox 148; у `chrome` и
+  `firefox` `X25519MLKEM768` перед `X25519` по одному разу (это же — проверка 083 §6 на каждом
+  мерже, теперь в CI); X25519-хвост гибрида == отдельная запись `X25519`, `Ecdhe` и `MlkemEcdhe` —
+  один ключ (контракт `AuthKey` 083 под reuse). Стенд на Mac 2026-09-16 (Xray на loopback, как в
+  083): v26.9.9 — `fp=firefox` 204 ×3 (ядро до фикса — `reality verification failed` ×3), v26.7.28
+  и v26.7.11 — 204, `fp=chrome` без регрессии на всех трёх, контроль с dest `www.cloudflare.com` —
+  204. Остальные не-chrome отпечатки (`safari`, `ios`, `edge`, `android`, `360`, `qq`) не
+  трогались — отдельное решение (#22). Сопровождение: дрейф теперь четырёх сабмодулей разбирается
+  до мержа ядра (раннбук §1.1 — сверка тега `metacubex/utls` и двух коммитов поверх); условие
+  снятия — metacubex выпустит тег с Firefox 148 и reuse. Полевой прогон — за владельцем.
 - 🧟 **Отмена dial-контекста прерывает `encryption`-хендшейк VLESS**
   ([SPEC 050](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/050-URLTEST_ZOMBIE_RUN_SURVIVES_RESTART/SPEC.md) §2,
   критерий приёмки 2). `ClientInstance.Handshake` заканчивается блокирующим `io.ReadFull`

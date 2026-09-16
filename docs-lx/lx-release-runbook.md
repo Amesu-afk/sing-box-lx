@@ -76,7 +76,7 @@ Repository context:
 
 **Drift in the child fork repositories is resolved BEFORE merging the core, not after.**
 Our `replace` directives in `go.mod` substitute upstream modules with fork submodules
-(`wireguard-go`, `sing-tun`, `gvisor`). Merging the core raises the versions in `require`, but
+(`wireguard-go`, `sing-tun`, `gvisor`, `utls`). Merging the core raises the versions in `require`, but
 `replace` keeps substituting OUR branch — so the build silently runs on code upstream no longer
 expects.
 
@@ -106,6 +106,21 @@ done
 
 For `gvisor` the `require` version carries no hash (it is a snapshot) — compare the version string
 against the snapshot date in the submodule's history.
+
+For `utls` the pin is a `metacubex/utls vX.Y.Z` tag (currently `v1.8.7`), also without a hash: the
+fork's `lx` branch must sit **on that tag** and carry exactly two commits ported from refraction on
+top (Firefox 148 + key share reuse, SPEC 086):
+
+```bash
+req=$(grep -oE 'metacubex/utls v[0-9.]+' go.mod | awk '{print $2}')
+git -C submodules/utls fetch metacubex --tags 2>/dev/null
+git -C submodules/utls merge-base --is-ancestor "$req" HEAD && echo "✅ lx sits on $req" || echo "❌ DRIFT: go.mod requires $req"
+git -C submodules/utls log --oneline "$req..HEAD"   # expect exactly 2 lines (cherry-picks of fc716b2, ddebe39)
+```
+
+An upstream `metacubex/utls` bump means moving the fork's `lx` branch onto the new tag with the
+same two commits on top (metacubex accepts no external PRs — the sync is ours alone); the
+condition for dropping the fork is in SPEC 086.
 
 ### 1.2 Take the whole upstream line, not selected commits
 
@@ -220,7 +235,7 @@ deliberately: the reason goes into an `lx:` comment next to the pin (like `ndk-v
 | Language: Go toolchain | `go.version` | `go-version:` in `upstream/stable:.github/workflows/build.yml`; `VERSION=` in `.github/setup_go_for_windows7.sh` and `setup_go_for_macos1013.sh` — upstream files that arrive with the merge and must match `go.version` |
 | Language: `go.mod` | `go` / `toolchain` directives | `upstream/stable:go.mod` — identical |
 | Go modules | the `require` blocks in `go.mod` | `upstream/stable:go.mod` — the same set; `replace` onto fork submodules — section 1.1 |
-| Fork submodules | `submodules/{wireguard-go,sing-tun,gvisor}` | section 1.1 |
+| Fork submodules | `submodules/{wireguard-go,sing-tun,gvisor,utls}` | section 1.1 |
 | naive / cronet-go | `.github/CRONET_GO_VERSION` | the same file in `upstream/stable`; after a bump run `lx-musl-toolchain-mirror.yml` by hand (SPEC 023) |
 | Android | `ndk-version`, OpenJDK in `lx-*.yml` | `ndk-version` / `java-version` in upstream `build.yml` |
 | Code generation | `LX_PROTOC_GEN_GO_VERSION`, `LX_PROTOC_GEN_GO_GRPC_VERSION` in `Makefile.lx` | `google.golang.org/protobuf` / `grpc` in `go.mod` and the style of upstream's generated code |
@@ -302,18 +317,23 @@ On conflicts, these are the zones we touch most often (keep lx semantics, accept
   upstream regenerated the descriptors, regenerate via `make -f Makefile.lx lx-proto` and re-apply
   the lx fields, or do it by hand: see `lx-commandclient-extensions` in memory (pinned protoc
   toolchain).
-- `submodules/wireguard-go`, `submodules/sing-tun` and `submodules/gvisor` — our fork submodules.
-  Never accept an upstream bump blindly (including a commit like "Update sing-tun" or a
-  `sagernet/gvisor` bump in `go.mod`): it silently moves `replace` off the fork and reverts our
-  patches (AWG obfuscation, SPEC 040 acceptLoop self-heal, SPEC 041 rebind, SPEC 048 nil-guard in
-  gvisor's `handleConnecting`); see `wg-1.14-migration` and the 2026-08-01 sync in the changelog.
+- `submodules/wireguard-go`, `submodules/sing-tun`, `submodules/gvisor` and `submodules/utls` — our
+  fork submodules. Never accept an upstream bump blindly (including a commit like "Update sing-tun"
+  or a `sagernet/gvisor` / `metacubex/utls` bump in `go.mod`): it silently moves `replace` off the
+  fork and reverts our patches (AWG obfuscation, SPEC 040 acceptLoop self-heal, SPEC 041 rebind,
+  SPEC 048 nil-guard in gvisor's `handleConnecting`, SPEC 086 Firefox 148 + key share reuse in
+  utls); see `wg-1.14-migration` and the 2026-08-01 sync in the changelog.
   The revert is silent: everything builds, package tests are green, and the bug returns in the
-  field — so after any merge that touched `go.mod`, verify all three with `go list -m`:
+  field — so after any merge that touched `go.mod`, verify all four with `go list -m`:
 
   ```bash
-  go list -m github.com/sagernet/wireguard-go github.com/sagernet/sing-tun github.com/sagernet/gvisor
+  go list -m github.com/sagernet/wireguard-go github.com/sagernet/sing-tun github.com/sagernet/gvisor github.com/metacubex/utls
   # each must resolve to => ./submodules/<name>
   ```
+
+  For `utls` the tests guard it too: `go test -tags with_utls ./common/tls/` (`TestLxFirefox…`,
+  `TestLxRealityFingerprints…`) fails if `HelloFirefox_Auto` stops being Firefox 148 or the hybrid
+  share leaves `chrome`/`firefox` — i.e. if `replace` slid onto bare metacubex.
 
   `submodules/gvisor` is maintained as a **snapshot of the pin without history** (upstream's full
   history is 1.45 GB per CI clone): a new pin lands as a new snapshot commit, the patch is applied

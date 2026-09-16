@@ -74,7 +74,7 @@
 
 **Дрейф в дочерних форк-репозиториях разбирается ДО мержа ядра, а не после.**
 Наши `replace` в `go.mod` подменяют апстримовые модули на форк-сабмодули
-(`wireguard-go`, `sing-tun`, `gvisor`). Мерж ядра поднимает версии в `require`,
+(`wireguard-go`, `sing-tun`, `gvisor`, `utls`). Мерж ядра поднимает версии в `require`,
 но `replace` продолжает подставлять НАШУ ветку — то есть сборка молча идёт на
 коде, которого апстрим уже не ожидает.
 
@@ -104,6 +104,21 @@ done
 
 Для `gvisor` версия в `require` без хеша (снапшот) — там сверять строку версии
 с датой снапшота в истории сабмодуля.
+
+Для `utls` пин — тег `metacubex/utls vX.Y.Z` (сейчас `v1.8.7`), тоже без хеша:
+ветка `lx` форка должна стоять **на этом теге** и нести поверх ровно два
+перенесённых коммита refraction (Firefox 148 + reuse key share, SPEC 086):
+
+```bash
+req=$(grep -oE 'metacubex/utls v[0-9.]+' go.mod | awk '{print $2}')
+git -C submodules/utls fetch metacubex --tags 2>/dev/null
+git -C submodules/utls merge-base --is-ancestor "$req" HEAD && echo "✅ lx стоит на $req" || echo "❌ ДРЕЙФ: go.mod требует $req"
+git -C submodules/utls log --oneline "$req..HEAD"   # ожидаем ровно 2 строки (cherry-pick fc716b2, ddebe39)
+```
+
+Апстримный бамп `metacubex/utls` → ветка `lx` форка переезжает на новый тег с
+теми же двумя коммитами поверх (metacubex внешние PR не принимает — синк только
+своими силами); условие снятия форка — в SPEC 086.
 
 ### 1.2 Брать ленту ЦЕЛИКОМ, а не выборочные коммиты
 
@@ -224,7 +239,7 @@ comm -23 <(git log --format=%s $(git merge-base lx upstream/stable)..upstream/st
 | Язык: тулчейн Go | `go.version` | `go-version:` в `upstream/stable:.github/workflows/build.yml`; `VERSION=` в `.github/setup_go_for_windows7.sh` и `setup_go_for_macos1013.sh` — это файлы апстрима, они приезжают мержем и должны совпасть с `go.version` |
 | Язык: `go.mod` | директивы `go` / `toolchain` | `upstream/stable:go.mod` — совпадают |
 | Go-модули | блок `require` в `go.mod` | `upstream/stable:go.mod` — набор совпадает; `replace` на форк-сабмодули — раздел 1.1 |
-| Форк-сабмодули | `submodules/{wireguard-go,sing-tun,gvisor}` | раздел 1.1 |
+| Форк-сабмодули | `submodules/{wireguard-go,sing-tun,gvisor,utls}` | раздел 1.1 |
 | naive / cronet-go | `.github/CRONET_GO_VERSION` | тот же файл в `upstream/stable`; после бампа — вручную `lx-musl-toolchain-mirror.yml` (SPEC 023) |
 | Android | `ndk-version`, OpenJDK в `lx-*.yml` | `ndk-version` / `java-version` в upstream `build.yml` |
 | Кодогенерация | `LX_PROTOC_GEN_GO_VERSION`, `LX_PROTOC_GEN_GO_GRPC_VERSION` в `Makefile.lx` | `google.golang.org/protobuf` / `grpc` в `go.mod` и стиль сгенерированного кода апстрима |
@@ -305,18 +320,23 @@ git merge upstream/stable             # ручной merge, НЕ rebase
 - `daemon/*.pb.go` / `*.proto` — наши поля аддитивны (`detourList=23`, DnsQueryEvent 1..12). Если
   upstream регенерил дескрипторы, перегенери через `make -f Makefile.lx lx-proto` и заново наложи
   lx-поля, либо вручную: см. `lx-commandclient-extensions` в памяти (pinned protoc-toolchain).
-- `submodules/wireguard-go`, `submodules/sing-tun` и `submodules/gvisor` — наши форк-сабмодули;
-  upstream-bump (в т.ч. коммит вида «Update sing-tun» или бамп `sagernet/gvisor` в `go.mod`)
-  не принимать вслепую — он молча уводит `replace` с форка и откатывает наши патчи
-  (обфускация AWG, SPEC 040 self-heal acceptLoop, SPEC 041 rebind, SPEC 048 nil-guard
-  в gvisor `handleConnecting`); см. `wg-1.14-migration` и синк 2026-08-01 в changelog.
+- `submodules/wireguard-go`, `submodules/sing-tun`, `submodules/gvisor` и `submodules/utls` — наши
+  форк-сабмодули; upstream-bump (в т.ч. коммит вида «Update sing-tun», бамп `sagernet/gvisor`
+  или `metacubex/utls` в `go.mod`) не принимать вслепую — он молча уводит `replace` с форка и
+  откатывает наши патчи (обфускация AWG, SPEC 040 self-heal acceptLoop, SPEC 041 rebind,
+  SPEC 048 nil-guard в gvisor `handleConnecting`, SPEC 086 Firefox 148 + reuse key share в utls);
+  см. `wg-1.14-migration` и синк 2026-08-01 в changelog.
   Откат бесшумный: всё собирается, тесты пакета зелёные, а баг возвращается в поле —
-  поэтому после мержа, тронувшего `go.mod`, сверять `go list -m` по всем трём:
+  поэтому после мержа, тронувшего `go.mod`, сверять `go list -m` по всем четырём:
 
   ```bash
-  go list -m github.com/sagernet/wireguard-go github.com/sagernet/sing-tun github.com/sagernet/gvisor
+  go list -m github.com/sagernet/wireguard-go github.com/sagernet/sing-tun github.com/sagernet/gvisor github.com/metacubex/utls
   # каждый должен резолвиться в => ./submodules/<name>
   ```
+
+  Для `utls` страж есть и в тестах: `go test -tags with_utls ./common/tls/` (`TestLxFirefox…`,
+  `TestLxRealityFingerprints…`) падает, если `HelloFirefox_Auto` перестал быть Firefox 148 или
+  гибридный шар ушёл из `chrome`/`firefox` — то есть если `replace` съехал на голый metacubex.
 
   `submodules/gvisor` ведётся **снапшотом пина без истории** (полная история апстрима —
   1.45 ГБ на каждый CI-клон): новый пин вливается новым снапшот-коммитом, патч
