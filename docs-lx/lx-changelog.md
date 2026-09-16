@@ -28,6 +28,24 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.3
+
+- 🧭 **REALITY `fp=safari` проходит на Xray ≥ v26.9.8**
+  ([SPEC 087](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/087-UTLS_SAFARI_26_3/SPEC.md),
+  продолжение [SPEC 086](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md)).
+  Тот же приём, что для `firefox`: в форк `submodules/utls` ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx))
+  перенесён третий коммит refraction `aa6edf4` — пресет `HelloSafari_26_3` с `X25519MLKEM768` перед
+  `X25519`; `HelloSafari_Auto` = 26.3 (было Safari 16.0 без гибрида). Cherry-pick без конфликтов,
+  собственных правок библиотеки нет. Структура ClientHello Safari 26.3 совпала с refraction
+  (scratch-сравнение по сырым байтам). Страж `common/tls/utls_firefox148_lx_test.go` расширен:
+  `safari` = Safari 26.3, гибрид перед X25519 по разу у `chrome`/`firefox`/`safari`. Стенд на Mac
+  2026-09-16 (Xray на loopback): v26.9.9 — `fp=safari` 204 ×3 (ядро lx.2 — `reality verification
+  failed` ×3), v26.7.28 и v26.7.11 — 204, `chrome`/`firefox` без регрессии. Решение владельца
+  2026-09-16: `edge`, `ios`, `android`, `360`, `qq` остаются без гибрида — пресетов с ним нет ни у
+  metacubex, ни у refraction (у самого Xray-core та же граница), подмена на уровне приложений
+  (LxBox §281, лаунчер), ядро их не трогает. База апстрима и дрейф — как в lx.2 (`v1.14.1`,
+  `upstream/stable` впереди на те же 5 коммитов, не взяты), Go 1.26.8 без изменений.
+
 #### v1.14.1-lx.2
 
 - 🦊 **REALITY `fp=firefox` снова проходит на Xray ≥ v26.9.8**

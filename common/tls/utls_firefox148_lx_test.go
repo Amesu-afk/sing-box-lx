@@ -14,11 +14,12 @@ import (
 // (XTLS/REALITY@8cdf7bf) accepts a ClientHello only when it carries an X25519MLKEM768
 // key_share ahead of the optional X25519 one, each at most once. SPEC 083 stopped the
 // client from cutting that share out; whether a fingerprint carries it at all is decided
-// by the utls preset. `chrome` had it in metacubex/utls v1.8.7 already; `firefox` gets it
-// from the fork submodule (submodules/utls: Firefox 148 + key share reuse ported from
-// refraction-networking/utls). These tests pin what the two presets send, so a utls bump
-// that drops the hybrid share, reorders it behind X25519, or loses the Firefox 148 alias
-// fails here instead of in the field as a silent `reality verification failed`.
+// by the utls preset. `chrome` had it in metacubex/utls v1.8.7 already; `firefox` and
+// `safari` get it from the fork submodule (submodules/utls: Firefox 148 + key share reuse,
+// SPEC 086, and Safari 26.3, SPEC 087, ported from refraction-networking/utls). These tests
+// pin what the three presets send, so a utls bump that drops the hybrid share, reorders it
+// behind X25519, or loses the Firefox 148 / Safari 26.3 aliases fails here instead of in
+// the field as a silent `reality verification failed`.
 
 func lxBuildClientHello(t *testing.T, id utls.ClientHelloID) *utls.UConn {
 	t.Helper()
@@ -82,10 +83,21 @@ func TestLxFirefoxFingerprintIsFirefox148(t *testing.T) {
 	require.Equal(t, "148", id.Version)
 }
 
-// Both presets the fork stands on for REALITY send X25519MLKEM768 before X25519, each
-// exactly once, in key_share and in supported_groups — the server's acceptance rule.
+// The `safari` name resolves to HelloSafari_Auto, which the fork's port makes Safari 26.3
+// (SPEC 087). A metacubex/utls without the port would leave it at HelloSafari_16_0 — no
+// hybrid share, dead on Xray >= v26.9.8.
+func TestLxSafariFingerprintIsSafari26_3(t *testing.T) {
+	id, err := uTLSClientHelloID("safari")
+	require.NoError(t, err)
+	require.Equal(t, utls.HelloSafari_Auto, id)
+	require.Equal(t, utls.HelloSafari_26_3, id)
+	require.Equal(t, "26.3", id.Version)
+}
+
+// The three presets the fork stands on for REALITY send X25519MLKEM768 before X25519,
+// each exactly once, in key_share and in supported_groups — the server's acceptance rule.
 func TestLxRealityFingerprintsCarryHybridShareFirst(t *testing.T) {
-	for _, name := range []string{"chrome", "firefox"} {
+	for _, name := range []string{"chrome", "firefox", "safari"} {
 		t.Run(name, func(t *testing.T) {
 			id, err := uTLSClientHelloID(name)
 			require.NoError(t, err)
