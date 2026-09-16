@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — остаток границы [086](../086-UTLS_FORK_FIREFOX148/SPEC.md): REALITY с `fp=safari` не проходит на Xray ≥ v26.9.8, потому что `HelloSafari_Auto` в `metacubex/utls` v1.8.7 = `HelloSafari_16_0` без гибридного key share |
-| Статус | C (complete) — критерии закрыты стендом на Mac 2026-09-16 (Xray v26.9.9: `fp=safari` 204 ×3, ядро lx.2 на том же стенде — `reality verification failed` ×3; v26.7.28/v26.7.11 и `chrome`/`firefox` без регрессии). Реализовано 2026-09-16: третий `cherry-pick -x` в форк [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) (`aa6edf4` «feat: add safari 26.3»), страж в `common/tls` расширен. Выпущено в `v1.14.1-lx.3`. Остаток — как в 086: AAR на AVD/устройстве (LxBox после бампа пина) |
+| Статус | C (complete) — критерии закрыты стендом на Mac 2026-09-16 (Xray v26.9.9: `fp=safari` 204 ×3, ядро lx.2 на том же стенде — `reality verification failed` ×3; v26.7.28/v26.7.11 и `chrome`/`firefox` без регрессии). Реализовано 2026-09-16: третий `cherry-pick -x` в форк [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) (`aa6edf4` «feat: add safari 26.3»), страж в `common/tls` расширен. Выпущено в `v1.14.1-lx.3`. LxBox v2.24.1 на пине lx.3 снял предупреждение и для `safari` (подробности — в 086). Остаток — как в 086: прогон AAR на AVD/устройстве — за владельцем |
 | Ветка | `lx` |
 | Связанные | предшествующая [086](../086-UTLS_FORK_FIREFOX148/SPEC.md) (форк-сабмодуль и метод), [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (контракт `AuthKey`); issue [#22](https://github.com/Leadaxe/sing-box-lx/issues/22) (закрыт); полевой отчёт [singbox-launcher#124](https://github.com/Leadaxe/singbox-launcher/issues/124) |
 
@@ -115,3 +115,5 @@ ECH GREASE в этом пресете нет (в отличие от Firefox 148
 ## Условие снятия
 
 metacubex выпустит тег с Firefox 148 + reuse **и** Safari 26.3, либо апстрим sing-box переедет на библиотеку, где они есть → убрать `replace` и сабмодуль; `"safari"` и `"firefox"` уже смотрят в соответствующие `*_Auto`.
+
+⚠️ Связь с приложениями — [086, «Условие снятия»](../086-UTLS_FORK_FIREFOX148/SPEC.md#условие-снятия): набор без предупреждения в LxBox v2.24.1 включает `safari`, поэтому потеря гибрида у этого имени в ядре требует сузить набор в LxBox и контракте лаунчера в той же поставке.
