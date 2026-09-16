@@ -131,8 +131,8 @@ not met`. Неотличимо от чужого ключа или неверн�
 
 Гибрид есть только у `HelloChrome_131`/`HelloChrome_133`; `HelloChrome_115_PQ`/
 `120_PQ` несут `X25519Kyber768Draft00`, который сервер не считает за гибрид.
-Это паритет с самим Xray: там после `8cdf7bf` тоже работают только
-Chrome-отпечатки. Ядро отпечаток **не подменяет** (см. Границы); приложение
+У Xray `fp=firefox` при этом работает: его uTLS — другая ветка, где
+`HelloFirefox_Auto = HelloFirefox_148` с гибридом (§5a, продолжение — [086](../086-UTLS_FORK_FIREFOX148/SPEC.md)). Ядро отпечаток **не подменяет** (см. Границы); приложение
 подменяет на своём уровне — LxBox §281.
 
 ## 2. Доказательство
@@ -214,9 +214,9 @@ Unit: `go test -tags with_utls ./common/tls/` зелёный; `go vet` чист�
 узел не поднимается ни на одной версии ядра, хотя `fp=chrome` после этой SPEC
 даёт 204. Причина — вне нашего кода, и снять её в нашем слое нечем.
 
-**Гибридный шар есть только у трёх пресетов `metacubex/utls` v1.8.7:**
-`HelloChrome_133` (= `HelloChrome_Auto`), `HelloChrome_131`, `HelloChrome_120_PQ`
-(проверено `grep X25519MLKEM768 u_parrots.go` по модулю в кеше). У
+**Гибридный шар `X25519MLKEM768` есть только у двух пресетов `metacubex/utls` v1.8.7:**
+`HelloChrome_133` (= `HelloChrome_Auto`) и `HelloChrome_131`; `HelloChrome_120_PQ` несёт
+`X25519Kyber768Draft00`, который сервер за гибрид не считает (§1.5). У
 `HelloFirefox_Auto = HelloFirefox_120` его нет; `safari`/`ios`/`android`/`edge`/
 `360`/`qq` — тоже без него. Поэтому эта SPEC починила chrome и **не могла**
 починить остальных: у них шара нет в спецификации ClientHello, вырезать или
