@@ -106,19 +106,20 @@ done
 с датой снапшота в истории сабмодуля.
 
 Для `utls` пин — тег `metacubex/utls vX.Y.Z` (сейчас `v1.8.7`), тоже без хеша:
-ветка `lx` форка должна стоять **на этом теге** и нести поверх ровно два
-перенесённых коммита refraction (Firefox 148 + reuse key share, SPEC 086):
+ветка `lx` форка должна стоять **на этом теге** и нести поверх ровно три
+перенесённых коммита refraction (Firefox 148 + reuse key share, SPEC 086; Safari 26.3,
+SPEC 087):
 
 ```bash
 req=$(grep -oE 'metacubex/utls v[0-9.]+' go.mod | awk '{print $2}')
 git -C submodules/utls fetch metacubex --tags 2>/dev/null
 git -C submodules/utls merge-base --is-ancestor "$req" HEAD && echo "✅ lx стоит на $req" || echo "❌ ДРЕЙФ: go.mod требует $req"
-git -C submodules/utls log --oneline "$req..HEAD"   # ожидаем ровно 2 строки (cherry-pick fc716b2, ddebe39)
+git -C submodules/utls log --oneline "$req..HEAD"   # ожидаем ровно 3 строки (cherry-pick fc716b2, ddebe39, aa6edf4)
 ```
 
 Апстримный бамп `metacubex/utls` → ветка `lx` форка переезжает на новый тег с
-теми же двумя коммитами поверх (metacubex внешние PR не принимает — синк только
-своими силами); условие снятия форка — в SPEC 086.
+теми же тремя коммитами поверх (metacubex внешние PR не принимает — синк только
+своими силами); условие снятия форка — в SPEC 086/087.
 
 ### 1.2 Брать ленту ЦЕЛИКОМ, а не выборочные коммиты
 
@@ -324,7 +325,7 @@ git merge upstream/stable             # ручной merge, НЕ rebase
   форк-сабмодули; upstream-bump (в т.ч. коммит вида «Update sing-tun», бамп `sagernet/gvisor`
   или `metacubex/utls` в `go.mod`) не принимать вслепую — он молча уводит `replace` с форка и
   откатывает наши патчи (обфускация AWG, SPEC 040 self-heal acceptLoop, SPEC 041 rebind,
-  SPEC 048 nil-guard в gvisor `handleConnecting`, SPEC 086 Firefox 148 + reuse key share в utls);
+  SPEC 048 nil-guard в gvisor `handleConnecting`, SPEC 086/087 Firefox 148 + reuse key share + Safari 26.3 в utls);
   см. `wg-1.14-migration` и синк 2026-08-01 в changelog.
   Откат бесшумный: всё собирается, тесты пакета зелёные, а баг возвращается в поле —
   поэтому после мержа, тронувшего `go.mod`, сверять `go list -m` по всем четырём:
@@ -335,8 +336,8 @@ git merge upstream/stable             # ручной merge, НЕ rebase
   ```
 
   Для `utls` страж есть и в тестах: `go test -tags with_utls ./common/tls/` (`TestLxFirefox…`,
-  `TestLxRealityFingerprints…`) падает, если `HelloFirefox_Auto` перестал быть Firefox 148 или
-  гибридный шар ушёл из `chrome`/`firefox` — то есть если `replace` съехал на голый metacubex.
+  `TestLxRealityFingerprints…`) падает, если `HelloFirefox_Auto` перестал быть Firefox 148,
+  `HelloSafari_Auto` — Safari 26.3, или гибридный шар ушёл из `chrome`/`firefox`/`safari` — то есть если `replace` съехал на голый metacubex.
 
   `submodules/gvisor` ведётся **снапшотом пина без истории** (полная история апстрима —
   1.45 ГБ на каждый CI-клон): новый пин вливается новым снапшот-коммитом, патч

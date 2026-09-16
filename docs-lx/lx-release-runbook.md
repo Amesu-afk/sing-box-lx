@@ -108,19 +108,19 @@ For `gvisor` the `require` version carries no hash (it is a snapshot) — compar
 against the snapshot date in the submodule's history.
 
 For `utls` the pin is a `metacubex/utls vX.Y.Z` tag (currently `v1.8.7`), also without a hash: the
-fork's `lx` branch must sit **on that tag** and carry exactly two commits ported from refraction on
-top (Firefox 148 + key share reuse, SPEC 086):
+fork's `lx` branch must sit **on that tag** and carry exactly three commits ported from refraction on
+top (Firefox 148 + key share reuse, SPEC 086; Safari 26.3, SPEC 087):
 
 ```bash
 req=$(grep -oE 'metacubex/utls v[0-9.]+' go.mod | awk '{print $2}')
 git -C submodules/utls fetch metacubex --tags 2>/dev/null
 git -C submodules/utls merge-base --is-ancestor "$req" HEAD && echo "✅ lx sits on $req" || echo "❌ DRIFT: go.mod requires $req"
-git -C submodules/utls log --oneline "$req..HEAD"   # expect exactly 2 lines (cherry-picks of fc716b2, ddebe39)
+git -C submodules/utls log --oneline "$req..HEAD"   # expect exactly 3 lines (cherry-picks of fc716b2, ddebe39, aa6edf4)
 ```
 
 An upstream `metacubex/utls` bump means moving the fork's `lx` branch onto the new tag with the
-same two commits on top (metacubex accepts no external PRs — the sync is ours alone); the
-condition for dropping the fork is in SPEC 086.
+same three commits on top (metacubex accepts no external PRs — the sync is ours alone); the
+condition for dropping the fork is in SPEC 086/087.
 
 ### 1.2 Take the whole upstream line, not selected commits
 
@@ -321,7 +321,7 @@ On conflicts, these are the zones we touch most often (keep lx semantics, accept
   fork submodules. Never accept an upstream bump blindly (including a commit like "Update sing-tun"
   or a `sagernet/gvisor` / `metacubex/utls` bump in `go.mod`): it silently moves `replace` off the
   fork and reverts our patches (AWG obfuscation, SPEC 040 acceptLoop self-heal, SPEC 041 rebind,
-  SPEC 048 nil-guard in gvisor's `handleConnecting`, SPEC 086 Firefox 148 + key share reuse in
+  SPEC 048 nil-guard in gvisor's `handleConnecting`, SPEC 086/087 Firefox 148 + key share reuse + Safari 26.3 in
   utls); see `wg-1.14-migration` and the 2026-08-01 sync in the changelog.
   The revert is silent: everything builds, package tests are green, and the bug returns in the
   field — so after any merge that touched `go.mod`, verify all four with `go list -m`:
@@ -332,8 +332,8 @@ On conflicts, these are the zones we touch most often (keep lx semantics, accept
   ```
 
   For `utls` the tests guard it too: `go test -tags with_utls ./common/tls/` (`TestLxFirefox…`,
-  `TestLxRealityFingerprints…`) fails if `HelloFirefox_Auto` stops being Firefox 148 or the hybrid
-  share leaves `chrome`/`firefox` — i.e. if `replace` slid onto bare metacubex.
+  `TestLxRealityFingerprints…`) fails if `HelloFirefox_Auto` stops being Firefox 148, `HelloSafari_Auto`
+  stops being Safari 26.3, or the hybrid share leaves `chrome`/`firefox`/`safari` — i.e. if `replace` slid onto bare metacubex.
 
   `submodules/gvisor` is maintained as a **snapshot of the pin without history** (upstream's full
   history is 1.45 GB per CI clone): a new pin lands as a new snapshot commit, the patch is applied

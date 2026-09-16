@@ -56,7 +56,7 @@
 ### 3.4 Синхронизация
 - **Ручной merge `upstream/testing`, не rebase.** Ветка `lx` — рабочая и релизная, никогда не форс-пушится; дрейф проверяется по merge-base (`upstream/testing` сам форс-пушится, счётчики `rev-list` врут). Полный ритуал — [docs-lx/lx-release-runbook.md](../docs-lx/lx-release-runbook.md).
 - `origin` = `Leadaxe/sing-box-lx`, `upstream` = `SagerNet/sing-box`. Теги тянем из `upstream`.
-- **Форк-сабмодули — часть дельты.** `submodules/wireguard-go` ([Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx)), `submodules/sing-tun` (Leadaxe/sing-tun-lx), `submodules/gvisor` (Leadaxe/gvisor-lx) и `submodules/utls` (Leadaxe/utls-lx) подключены `replace`-директивами в `go.mod`; встречный upstream-бамп этих зависимостей на мерже не принимается вслепую — он молча откатил бы наши патчи (обфускация AWG, self-heal acceptLoop, nil-guard хендшейка gvisor, Firefox 148 с reuse key share в utls).
+- **Форк-сабмодули — часть дельты.** `submodules/wireguard-go` ([Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx)), `submodules/sing-tun` (Leadaxe/sing-tun-lx), `submodules/gvisor` (Leadaxe/gvisor-lx) и `submodules/utls` (Leadaxe/utls-lx) подключены `replace`-директивами в `go.mod`; встречный upstream-бамп этих зависимостей на мерже не принимается вслепую — он молча откатил бы наши патчи (обфускация AWG, self-heal acceptLoop, nil-guard хендшейка gvisor, Firefox 148 + Safari 26.3 в utls).
 
 ### 3.5 Дистрибуция
 - **Desktop — бинарь `sing-box`** (drop-in для лаунчера `singbox-launcher`, который ищет `LookPath("sing-box")` → `bin/sing-box`).
