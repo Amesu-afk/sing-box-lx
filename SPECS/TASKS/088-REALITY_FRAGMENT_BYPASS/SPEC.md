@@ -37,7 +37,7 @@ uConn := utls.UClient(conn, uConfig, e.uClient.id)   // reality_client.go, до 
 
 - **R1.** При `fragment` или `record_fragment` REALITY-клиент пишет ClientHello через `tf.Conn`; без флагов — на голое соединение (лишней обёртки нет).
 - **R2.** Дефолт 060 (`DialedThroughDetour` → `record_fragment`) доходит до REALITY без отдельного кода: обёртка читает те же поля `uClient`, которые 060 уже заполняет.
-- **R3.** Стражи в `common/tls`: структурный (тип `UConn.NetConn()` по матрице флагов) и проводной (первый пакет по `net.Pipe`: без флагов — ровно одна TLS-запись, с `record_fragment` — две и больше). Оба должны падать, если мерж вернёт `utls.UClient(conn, …)` на голый conn.
+- **R3.** Стражи в `common/tls`: структурный (тип `UConn.NetConn()` по матрице флагов), проводной (первый пакет по `net.Pipe`: без флагов — ровно одна TLS-запись, с `record_fragment` — две и больше) и проводной для дефолта 060 (`NewClientWithOptions` с `DialedThroughDetour` и без флагов → REALITY-hello уходит несколькими записями; идея теста — Alex01d, [PR #23](https://github.com/Leadaxe/sing-box-lx/pull/23), пришедший с тем же фиксом за несколько часов до 088). Все должны падать, если мерж вернёт `utls.UClient(conn, …)` на голый conn.
 - **R4.** Существующие тесты `TestUTLSClient_Client_*` (гейт обёртки uTLS-клиента) зелёные — helper не изменил их поведение.
 
 ## Критерии приёмки

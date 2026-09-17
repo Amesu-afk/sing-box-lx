@@ -167,6 +167,31 @@ func TestLxRealityRecordFragmentSplitsFirstFlight(t *testing.T) {
 	require.GreaterOrEqual(t, lxTLSRecordCount(t, fragmented), 2, "record_fragment must split the REALITY ClientHello into several TLS records")
 }
 
+// The SPEC 060 default — record_fragment switched on when the outbound dials
+// through a detour — must reach the REALITY wire, not just the config struct.
+// Built through NewClientWithOptions with DialedThroughDetour and no fragment
+// flags of its own, so the only thing that can split the first flight is the
+// default. Test idea by Alex01d (PR #23): checking the flag alone was
+// false-green before SPEC 088, the bytes were not.
+func TestLxRealityDetourDefaultFragmentsFirstFlight(t *testing.T) {
+	t.Parallel()
+	options := lxRealityOptions("chrome", "", false, false)
+	config, err := NewClientWithOptions(ClientOptions{
+		Context:             context.Background(),
+		Logger:              logger.NOP(),
+		ServerAddress:       "www.example.com",
+		Options:             options,
+		DialedThroughDetour: true,
+	})
+	require.NoError(t, err)
+	client, isReality := config.(*RealityClientConfig)
+	require.True(t, isReality, "expected *RealityClientConfig, got %T", config)
+	require.True(t, client.uClient.recordFragment, "detour default must reach the REALITY uTLS config")
+
+	flight := lxRealityFirstFlight(t, client)
+	require.GreaterOrEqual(t, lxTLSRecordCount(t, flight), 2, "detour default must split the REALITY ClientHello on the wire")
+}
+
 // --- SPEC 089 -----------------------------------------------------------------
 
 // Default (empty) key_share keeps SPEC 083: the fingerprint's hybrid share goes
