@@ -14,13 +14,15 @@ import (
 	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common/json/badoption"
 	"github.com/sagernet/sing/common/logger"
 
 	utls "github.com/metacubex/utls"
 	"github.com/stretchr/testify/require"
 )
 
-// lx: SPEC 088 / SPEC 089 guards for the REALITY client.
+// lx: SPEC 088 / SPEC 089 / SPEC 090 guards for the REALITY client (and, for 090,
+// the REALITY server).
 //
 // SPEC 088: `fragment` / `record_fragment` (and the SPEC 060 detour default) are
 // applied to the REALITY ClientHello. Upstream builds the UConn on the bare conn,
@@ -30,6 +32,10 @@ import (
 // SPEC 089: `reality.key_share` — "" keeps what the fingerprint carries (the
 // SPEC 083 contract), "classical" strips X25519MLKEM768 from key_share and
 // supported_groups, "hybrid" fails early when the fingerprint has no hybrid share.
+//
+// SPEC 090: `short_id` longer than 16 hex characters must be a config error, not
+// a panic — upstream decodes into a [8]byte without checking the length first,
+// and hex.Decode writes len(src)/2 bytes regardless of the destination's size.
 
 func lxRealityOptions(fingerprint, keyShare string, fragment, recordFragment bool) option.OutboundTLSOptions {
 	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
@@ -290,4 +296,88 @@ func TestLxRealityKeyShareSurvivesClone(t *testing.T) {
 	require.Equal(t, C.RealityKeyShareClassical, cloned.keyShare)
 	hybridIndex, _ := lxIndexOfShare(lxRealityPrepare(t, cloned).HandshakeState.Hello.KeyShares, utls.X25519MLKEM768)
 	require.Equal(t, -1, hybridIndex)
+}
+
+// --- SPEC 090 -----------------------------------------------------------------
+
+// lxRealityShortIDCases is the length matrix both constructors must agree on:
+// legal values stay legal, an over-long one is a config error (and used to be a
+// panic inside hex.Decode), malformed ones keep the upstream decode error.
+var lxRealityShortIDCases = []struct {
+	name     string
+	shortID  string
+	errorSub string // "" = must be accepted
+}{
+	{"empty", "", ""},
+	{"eight", "0123abcd", ""},
+	{"sixteen", "0123456789abcdef", ""},
+	{"eighteen", "0123456789abcdef01", "invalid short_id"},
+	{"odd", "abc", "decode short_id"},
+	{"not-hex", "zz", "decode short_id"},
+}
+
+// Client side: 18 hex characters used to run off the end of the [8]byte inside
+// hex.Decode and kill the process; the post-decode `decodedLen > 8` check never
+// got a chance to run.
+func TestLxRealityShortIDTooLongRejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range lxRealityShortIDCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			options := lxRealityOptions("chrome", "", false, false)
+			options.Reality.ShortID = tc.shortID
+			_, err := NewRealityClient(context.Background(), logger.NOP(), "www.example.com", options)
+			if tc.errorSub == "" {
+				require.NoError(t, err, tc.shortID)
+				return
+			}
+			require.Error(t, err, tc.shortID)
+			require.ErrorContains(t, err, tc.errorSub)
+		})
+	}
+}
+
+// Server side: the same string in the `short_id[]` loop of NewRealityServer.
+// The error names the index, like the decode error next to it.
+func TestLxRealityServerShortIDTooLongRejected(t *testing.T) {
+	t.Parallel()
+	for _, tc := range lxRealityShortIDCases {
+		if tc.shortID == "" {
+			continue // an empty list is the "zero short_id" branch, not a decode
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := NewRealityServer(context.Background(), logger.NOP(), lxRealityServerOptions(tc.shortID))
+			if tc.errorSub == "" {
+				require.NoError(t, err, tc.shortID)
+				return
+			}
+			require.Error(t, err, tc.shortID)
+			require.ErrorContains(t, err, tc.errorSub)
+			require.ErrorContains(t, err, "[0]")
+		})
+	}
+}
+
+// lxRealityServerOptions is the smallest inbound config NewRealityServer accepts:
+// a server name, a 32-byte private key and a handshake destination. The
+// destination is an IP literal on purpose — a domain would send the handshake
+// dialer looking for a DNS transport manager that a bare context has not got.
+func lxRealityServerOptions(shortID string) option.InboundTLSOptions {
+	privateKey, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return option.InboundTLSOptions{
+		Enabled:    true,
+		ServerName: "www.example.com",
+		Reality: &option.InboundRealityOptions{
+			Enabled: true,
+			Handshake: option.InboundRealityHandshakeOptions{
+				ServerOptions: option.ServerOptions{Server: "127.0.0.1", ServerPort: 443},
+			},
+			PrivateKey: base64.RawURLEncoding.EncodeToString(privateKey.Bytes()),
+			ShortID:    badoption.Listable[string]{shortID},
+		},
+	}
 }

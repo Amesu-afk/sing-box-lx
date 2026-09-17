@@ -28,6 +28,37 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.5
+
+- 💥 **REALITY `short_id` длиннее 16 hex-символов больше не роняет процесс**
+  ([SPEC 090](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/090-REALITY_SHORT_ID_OVERFLOW_PANIC/SPEC.md)).
+  Было: вместо ошибки конфигурации — паника `index out of range [8] with length 8`. `sing-box check`
+  падал без внятного сообщения, `run` / libbox `Start` / `lxd apply` убивали **весь** процесс (не
+  «узел с ошибкой», а мёртвый VPN), inbound `vless` + `tls.reality` на сервере/роутере — при старте.
+  Причина: `encoding/hex.Decode` пишет `len(src)/2` байт в `dst`, не сверяясь с его ёмкостью, поэтому
+  при `len(short_id) > 16` запись выходит за границы `[8]byte` **внутри** самого `hex.Decode`;
+  стоящая следом апстримная проверка `decodedLen > 8` мёртвая — управление до неё не доходит.
+  Стало: `len(short_id) > 16` отвергается **до** декодирования, с апстримным текстом `invalid short_id`
+  (на сервере — `invalid short_id[<i>]: <value>`, как у соседней ошибки); проверка после декодирования
+  снята как мёртвая. Правка в обеих точках — `common/tls/reality_client.go` и
+  `common/tls/reality_server.go`, маркер `// lx: SPEC 090`. Легальные значения не меняются: пустая
+  строка = нулевой short_id, 1…16 hex; нечётная длина (`"abc"`) и не-hex (`"zz"`) по-прежнему дают
+  `decode short_id`, как раньше. Стражи `TestLxRealityShortIDTooLongRejected` и
+  `TestLxRealityServerShortIDTooLongRejected` в `common/tls/reality_client_lx_test.go` (`with_utls`),
+  red-check пройден на обеих сторонах — до фикса оба роняли процесс тестов паникой в `hex.Decode`.
+  Код апстримный, ровесник REALITY (2023-02/03), в текущем `upstream/stable` дословно тот же; наших
+  правок в этом месте не было. Найдено DRIFT-инвентарём контракта LxBox/лаунчера на пине
+  `v1.14.1-lx.4`; приложения (LxBox §343, лаунчер) такое значение отбрасывают у себя, поэтому их
+  пользователей не било — било голое ядро с рукописным конфигом, подписки с мусорным `sid=` при
+  отключённом клиентском гарде и серверные конфиги. Реестр
+  [HOTFIXES](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/004-HOTFIXES/FEATURE.md)
+  дополнен: условие снятия — апстрим добавит проверку длины до `hex.Decode`; файлы апстримные,
+  маркер проверять на каждом мерже.
+- 📌 **Не меняются:** конфигурация, провод, наборы тегов desktop/router/AAR, Go-тулчейн 1.26.8,
+  четыре сабмодуля. База апстрима `v1.14.1` без изменений; известный дрейф `upstream/stable` —
+  **10** коммитов (с бампом `wireguard-go` v0.0.7) — по-прежнему намеренно отложен на отдельный
+  синк, см. ноты lx.4.
+
 #### v1.14.1-lx.4
 
 - ✂️ **REALITY-узлы больше не игнорируют `fragment` / `record_fragment`**

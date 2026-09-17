@@ -76,13 +76,14 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if len(publicKey) != 32 {
 		return nil, E.New("invalid public_key")
 	}
+	// lx: SPEC 090 — hex.Decode writes len(src)/2 bytes without checking dst; the post-decode check never runs
+	if len(options.Reality.ShortID) > 16 {
+		return nil, E.New("invalid short_id")
+	}
 	var shortID [8]byte
-	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
+	_, err = hex.Decode(shortID[:], []byte(options.Reality.ShortID))
 	if err != nil {
 		return nil, E.Cause(err, "decode short_id")
-	}
-	if decodedLen > 8 {
-		return nil, E.New("invalid short_id")
 	}
 	// lx: SPEC 089 — reject typos at load time; "classic" must not silently
 	// become the default.
