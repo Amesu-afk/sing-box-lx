@@ -42,14 +42,15 @@ VLESS `encryption`, AmneziaWG 3.x. `sing-box-lx` закрывает этот з�
 в своих файлах за build-тегами, а сборка без них — апстрим байт в байт; см.
 [Как сопровождается форк](#как-сопровождается-форк).
 
+Go-модуль и бинарь сохраняют имя апстрима; суффикс `-lx` живёт только в строке версии.
+Правила, по которым здесь живёт каждая фича, — [CONSTITUTION](SPECS/CONSTITUTION.md).
+
 ## О sing-box
 
 [sing-box](https://github.com/SagerNet/sing-box) от SagerNet — универсальная прокси-платформа,
 на которой построено это ядро: протоколы, движок маршрутизации, TUN-стек и биндинг `libbox`
 для мобильных — всё оттуда. Документация — [sing-box.sagernet.org](https://sing-box.sagernet.org/),
-README — [на GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md). Go-модуль и
-бинарь сохраняют имя апстрима; суффикс `-lx` живёт только в строке версии. Правила, по которым
-здесь живёт каждая фича, — [CONSTITUTION](SPECS/CONSTITUTION.md).
+README — [на GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md).
 
 ---
 

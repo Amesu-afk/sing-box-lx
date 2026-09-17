@@ -41,14 +41,15 @@ AmneziaWG 3.x. `sing-box-lx` closes that gap on its own side without forking awa
 tags, and a build without them is upstream byte for byte — see
 [How the fork is maintained](#how-the-fork-is-maintained).
 
+The Go module and the binary keep upstream's name; the `-lx` suffix lives in the version string
+only. The rules every feature here lives by — [CONSTITUTION](SPECS/CONSTITUTION.md).
+
 ## About sing-box
 
 [sing-box](https://github.com/SagerNet/sing-box) by SagerNet is the universal proxy platform this
 core is built on: the protocols, the routing engine, the TUN stack and the `libbox` binding for
 mobile all come from there. Its documentation — [sing-box.sagernet.org](https://sing-box.sagernet.org/),
-its README — [on GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md). The Go module
-and the binary keep upstream's name; the `-lx` suffix lives in the version string only. The rules
-every feature here lives by — [CONSTITUTION](SPECS/CONSTITUTION.md).
+its README — [on GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md).
 
 ---
 
