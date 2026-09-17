@@ -92,6 +92,14 @@ func applyDetourFragmentDefault(options *ClientOptions) {
 }
 ```
 
+> ⚠️ **Поправка 2026-09-17 ([088](../088-REALITY_FRAGMENT_BYPASS/SPEC.md)).** «REALITY получает
+> одинаковый дефолт» было верно только до поля структуры: `RealityClientConfig` берёт флаги из
+> `uClient`, но строил `utls.UClient` на голом соединении и обёртку `tlsfragment` не применял —
+> ни явную, ни этот дефолт. С 088 REALITY-путь идёт через тот же `wrapClientConn`, что и uTLS-клиент,
+> и дефолт до него доходит. Матрица 38/38 этой спеки REALITY-узлы за detour, следовательно, не
+> покрывала как фрагментированные — они проходили за счёт того, что их ClientHello тогда (до 083)
+> был короче порога.
+
 Признак detour вычисляется единственной функцией `tls.DialedThroughDetour(DialerOptions)` —
 протоколы не проверяют `Detour != ""` сами. Каждый TLS-outbound передаёт результат в
 `ClientOptions.DialedThroughDetour`.

@@ -718,6 +718,12 @@ vmess, anytls, shadowtls, http, masque `h2`, …) диалит **через `det
 - **`h3`/QUIC не затронут** — там нет TLS поверх TCP, а quic-go и так держит Initial ниже
   порога (masque `h3` через detour: 4/4 ОК).
 - Вложенные цепочки покрыты автоматически: у каждого звена свой `detour`.
+- **REALITY-узлы тоже — с SPEC 088.** До неё REALITY-клиент строил uTLS-соединение на голом
+  сокете, поэтому и явные `fragment` / `record_fragment`, и этот дефолт конфигом принимались, но там
+  молча не действовали. Гибридный ClientHello после
+  [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) — 1,5–1,9 КБ (два TCP-сегмента),
+  так что это стало важнее, чем было. Поможет ли фрагментация в сети, которая теряет такой первый
+  пакет, — свойство той сети.
 
 > ⚠️ **Известное ограничение:** явный `"record_fragment": false` неотличим от «не задано»,
 > поэтому под `detour` авто всё равно включится. Чтобы диалить через detour другим режимом,
@@ -834,3 +840,4 @@ make lib_install && make lib_android             # → libbox.aar (SDK23) + libb
 ```
 
 CI (`.github/workflows/lx-ci.yml`) собирает матрицу фич (`baseline` / `xhttp` / `awg` / `full`), кросс-платформенную матрицу **и Android `libbox.aar`** (gomobile), прогоняя `check` на соответствующих примерах конфигов. Push тега `v*-lx.*` запускает `lx-release.yml`, который публикует десктоп-бинари **и** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` как ассеты GitHub Release. Также публикуется legacy-бинарь **Windows 7 (32-бит)** (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) — собранный Win7-патченным Go и **без `with_naive_outbound`** (у `cronet-go` нет сборки под windows/386; все остальные фичи без изменений).
+

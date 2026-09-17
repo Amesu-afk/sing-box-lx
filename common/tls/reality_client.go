@@ -82,7 +82,6 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if decodedLen > 8 {
 		return nil, E.New("invalid short_id")
 	}
-
 	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
@@ -131,6 +130,33 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
+	uConn, verifier, err := e.prepareClientHello(conn)
+	if err != nil {
+		return nil, err
+	}
+
+	err = uConn.HandshakeContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if debug.Enabled {
+		fmt.Printf("REALITY Conn.Verified: %v\n", verifier.verified)
+	}
+
+	if !verifier.verified {
+		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
+		return nil, E.New("reality verification failed")
+	}
+
+	return &realityClientConnWrapper{uConn}, nil
+}
+
+// prepareClientHello builds the REALITY ClientHello on conn without sending it:
+// the utls UConn with the fingerprint's hello and the session id sealed with
+// the AuthKey. Split from ClientHandshake so tests can inspect what would go on
+// the wire. lx: SPEC 088.
+func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *realityVerifier, error) {
 	verifier := &realityVerifier{
 		serverName: e.uClient.ServerName(),
 	}
@@ -138,6 +164,14 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
+	// lx: SPEC 088 — the same `fragment` / `record_fragment` wrappers the plain
+	// uTLS client gets; upstream builds the UConn on the bare conn, so those
+	// flags (and the SPEC 060 detour default) were written to the config and
+	// ignored here.
+	conn, err := e.uClient.wrapClientConn(conn)
+	if err != nil {
+		return nil, nil, err
+	}
 	uConn := utls.UClient(conn, uConfig, e.uClient.id)
 	verifier.UConn = uConn
 	// lx: SPEC 083 — апстрим здесь вырезал X25519MLKEM768 из supported_groups
@@ -147,11 +181,10 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	// «reality verification failed». metacubex/utls ≥ 1.8 кладёт ключи
 	// раздельно (Ecdhe / MlkemEcdhe), фильтр больше не нужен: отпечаток
 	// шлёт то, что заложено в его спеке (Chrome — GREASE, MLKEM, X25519).
-	err := uConn.BuildHandshakeState()
+	err = uConn.BuildHandshakeState()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
 	if len(uConfig.NextProtos) > 0 {
 		for _, extension := range uConn.Extensions {
 			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
@@ -187,11 +220,11 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 	publicKey, err := ecdh.X25519().NewPublicKey(e.publicKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keyShareKeys := uConn.HandshakeState.State13.KeyShareKeys
 	if keyShareKeys == nil {
-		return nil, E.New("nil KeyShareKeys")
+		return nil, nil, E.New("nil KeyShareKeys")
 	}
 	// lx: SPEC 083 — AuthKey считается по тому же шару, что берёт сервер:
 	// чистый X25519, если он есть в ClientHello, иначе X25519-часть
@@ -201,19 +234,19 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		ecdheKey = keyShareKeys.MlkemEcdhe
 	}
 	if ecdheKey == nil {
-		return nil, E.New("nil ecdheKey")
+		return nil, nil, E.New("nil ecdheKey")
 	}
 	authKey, err := ecdheKey.ECDH(publicKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if authKey == nil {
-		return nil, E.New("nil auth_key")
+		return nil, nil, E.New("nil auth_key")
 	}
 	verifier.authKey = authKey
 	_, err = hkdf.New(sha256.New, authKey, hello.Random[:20], []byte("REALITY")).Read(authKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	aesBlock, _ := aes.NewCipher(authKey)
 	aesGcmCipher, _ := cipher.NewGCM(aesBlock)
@@ -223,22 +256,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		fmt.Printf("REALITY hello.sessionId: %v\n", hello.SessionId)
 		fmt.Printf("REALITY uConn.AuthKey: %v\n", authKey)
 	}
-
-	err = uConn.HandshakeContext(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	if debug.Enabled {
-		fmt.Printf("REALITY Conn.Verified: %v\n", verifier.verified)
-	}
-
-	if !verifier.verified {
-		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
-		return nil, E.New("reality verification failed")
-	}
-
-	return &realityClientConnWrapper{uConn}, nil
+	return uConn, verifier, nil
 }
 
 func realityClientFallback(ctx context.Context, uConn net.Conn, serverName string, fingerprint utls.ClientHelloID) {

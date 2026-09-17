@@ -717,6 +717,12 @@ Rules:
 - **`h3`/QUIC is untouched** — no TLS over TCP there, and quic-go keeps its Initial below the
   threshold anyway (masque `h3` through detour: 4/4 OK).
 - Nested chains are covered automatically: every link carries its own `detour`.
+- **REALITY nodes included — since SPEC 088.** Before it, the REALITY client built its uTLS
+  connection on the bare socket, so both an explicit `fragment` / `record_fragment` and this
+  default were accepted by the config and silently ignored there. The hybrid ClientHello after
+  [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) is 1.5–1.9 KB (two TCP segments),
+  so this matters more than it used to. Whether fragmentation helps on a network that drops that
+  first flight is a property of that network.
 
 > ⚠️ **Known limit:** an explicit `"record_fragment": false` is indistinguishable from "unset",
 > so auto still turns it on under `detour`. To dial through a detour with a different mode, set
@@ -834,3 +840,4 @@ make lib_install && make lib_android             # → libbox.aar (SDK23) + libb
 ```
 
 The CI (`.github/workflows/lx-ci.yml`) builds the feature matrix (`baseline` / `xhttp` / `awg` / `full`), a cross-platform matrix, **and the Android `libbox.aar`** (gomobile), running `check` on the matching sample configs. Pushing a `v*-lx.*` tag runs `lx-release.yml`, which publishes the desktop binaries **and** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` as GitHub Release assets. A **Windows 7 (32-bit)** legacy binary (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) is also published — built with a Win7-patched Go and **without `with_naive_outbound`** (`cronet-go` has no windows/386 build; every other feature is unchanged).
+

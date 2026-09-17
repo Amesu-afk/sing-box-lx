@@ -28,6 +28,18 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.4
+
+- ✂️ **REALITY-узлы больше не игнорируют `fragment` / `record_fragment`**
+  ([SPEC 088](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md)).
+  Апстримный `RealityClientConfig.ClientHandshake` строит `utls.UClient` на голом соединении, минуя
+  обёртку `tlsfragment`, которую получают STD- и uTLS-клиенты: опции принимались конфигом и молча не
+  действовали, а дефолт [SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md)
+  (`record_fragment` под `detour`) до REALITY не доходил. Теперь uTLS- и REALITY-клиент берут обёртку из
+  одного helper'а `wrapClientConn`. Новых ключей нет. Стражи в `common/tls/reality_client_lx_test.go`
+  (тип `NetConn()` по матрице флагов; по проводу: без флагов одна TLS-запись, с `record_fragment` — две),
+  red-check пройден. Поможет ли фрагментация на сети, где теряется длинный ClientHello, — решает сеть;
+  полевой прогон у репортёра LxBox #142 впереди.
 #### v1.14.1-lx.3
 
 - 🧭 **REALITY `fp=safari` проходит на Xray ≥ v26.9.8**
