@@ -54,14 +54,14 @@
 - Правки upstream-файлов выносятся в **отдельные атомарные коммиты** (см. IMPLEMENTATION_PROMPT). Один коммит = одна логическая правка одной зоны.
 
 ### 3.4 Синхронизация
-- **Ручной merge `upstream/testing`, не rebase.** Ветка `lx` — рабочая и релизная, никогда не форс-пушится; дрейф проверяется по merge-base (`upstream/testing` сам форс-пушится, счётчики `rev-list` врут). Полный ритуал — [docs-lx/lx-release-runbook.md](../docs-lx/lx-release-runbook.md).
+- **Ручной merge `upstream/stable`, не rebase.** Ветка `lx` — рабочая и релизная, никогда не форс-пушится; дрейф проверяется по merge-base и **только против `upstream/stable`** (апстрим переименовал ветки: `stable` = релизная линия, `testing` = следующая минорка в alpha, она всегда впереди и перестраивается force-push'ем — плашка GitHub «behind testing» дрейфом не является; счётчики `rev-list` после force-push врут). Полный ритуал — [docs-lx/lx-release-runbook.md](../docs-lx/lx-release-runbook.md).
 - `origin` = `Leadaxe/sing-box-lx`, `upstream` = `SagerNet/sing-box`. Теги тянем из `upstream`.
 - **Форк-сабмодули — часть дельты.** `submodules/wireguard-go` ([Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx)), `submodules/sing-tun` (Leadaxe/sing-tun-lx), `submodules/gvisor` (Leadaxe/gvisor-lx) и `submodules/utls` (Leadaxe/utls-lx) подключены `replace`-директивами в `go.mod`; встречный upstream-бамп этих зависимостей на мерже не принимается вслепую — он молча откатил бы наши патчи (обфускация AWG, self-heal acceptLoop, nil-guard хендшейка gvisor, Firefox 148 + Safari 26.3 в utls).
 
 ### 3.5 Дистрибуция
 - **Desktop — бинарь `sing-box`** (drop-in для лаунчера `singbox-launcher`, который ищет `LookPath("sing-box")` → `bin/sing-box`).
-- **Android — `libbox.aar`** (+ `libbox-legacy.aar`, SDK21): gomobile-сборка `experimental/libbox` через upstream `make lib_android`, с зашитыми `with_xhttp`/`with_awg` (и `with_lx_command` для расширений §3.6) (`cmd/internal/build_libbox`, `// lx:`-блок; tailscale/clash_api выкинуты). Для встраивания в Android-приложение-потребитель. `Libbox.version()` → `1.14.0-lx.N`.
-- Идентичность сборки — **в версии**: `sing-box version` / `Libbox.version()` → `1.14.0-lx.N`, где источник версии — lx-тег `vX.Y.Z-lx.N` (см. задачу BUILD_CI_RELEASE).
+- **Android — `libbox.aar`** (+ `libbox-legacy.aar`, SDK21): gomobile-сборка `experimental/libbox` через upstream `make lib_android`, с зашитыми `with_xhttp`/`with_awg`, `with_lx_command` (расширения §3.6), `with_lx_chain`, `with_lx_idle_suspend`, `with_openvpn`/`with_openconnect` и `with_tailscale` (с 2026-09-14, с апстримными `ts_omit_*`-трим-тегами) — `cmd/internal/build_libbox`, `// lx:`-блоки; `with_clash_api` из AAR выкинут намеренно (LxBox управляет ядром по нативному CommandClient). Для встраивания в Android-приложение-потребитель. `Libbox.version()` → `X.Y.Z-lx.N`.
+- Идентичность сборки — **в версии**: `sing-box version` / `Libbox.version()` → `X.Y.Z-lx.N`, где источник версии — lx-тег `vX.Y.Z-lx.N` (см. задачу BUILD_CI_RELEASE).
 
 ### 3.6 Расширения libbox command-протокола (мост LxBox ↔ ядро)
 Отдельный, более узкий режим изоляции — **только** для класса «новый RPC в нативном протоколе управления ядром» (`daemon/*.proto` + `experimental/libbox/`), где упаковка «новый файл + свой build-tag» для самого RPC невозможна: RPC объявляется внутри единого upstream-`service StartedService {}`, а `*.pb.go`/`*_grpc.pb.go` регенерируются protoc и стирают любые `// lx:` маркеры. Допускается только под §3.1(а) и при выполнении ВСЕХ условий:
