@@ -51,6 +51,16 @@ required for stable tags); this changelog section is the fallback used for pre-r
   такого клиента отвергают); `hybrid` — гибрид обязателен, на отпечатке без него (`edge`, `ios`, …)
   явная ошибка вместо тихого `reality verification failed`. Опечатка в значении отвергается при
   построении outbound'а. Контракт `AuthKey` 083 не тронут. Остаток — проводка в LxBox/лаунчер.
+- 📌 **База и дрейф.** База upstream/stable без изменений — `9dddbefb2` = v1.14.1+2. Дрейф на момент
+  среза: `upstream/stable` впереди на **10** коммитов — 5 отложенных ещё в lx.2/lx.3 (`103f3af14`
+  network reset dispatch, TestFlight/App Store ×3, systemd reload) и 5 новых (`00004faf9` API dashboard
+  default HTTP client, `930d04e8b` docs min_version, `96454e260` initial WireGuard handshake for domain
+  peers, `55d370e5d` command client cancellation, `42ec517d5` implicit default DNS/outbound initialize
+  stage) с бампом `wireguard-go` v0.0.6 → v0.0.7 и `asc-go`. WireGuard-часть требует сначала перевести
+  форк-сабмодуль `submodules/wireguard-go` на v0.0.7 (раннбук §1), поэтому весь набор **сознательно
+  отложен** на отдельный синк. Версии зависимостей (§2a) сверены: Go 1.26.8 = stable, `go.mod` `go 1.25.5`,
+  cronet, JDK 17, protoc, `upstream.version` 1.14.1 совпадают; NDK r28c и мажоры actions — наши пины
+  с `lx:`-причиной; расхождение `require` — только упомянутые два модуля из недомерженного апстрима.
 
 #### v1.14.1-lx.3
 
