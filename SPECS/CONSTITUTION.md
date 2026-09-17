@@ -90,7 +90,6 @@
 ## 5. Референсы (только как образец, код не тянуть «как есть»)
 
 - **AWG** — [`hoaxisr/amnezia-box`](https://github.com/hoaxisr/amnezia-box) (submodule + `patches/amneziawg-go`, тег `with_awg`) — референс-образец; сегодня фактическая схема своя: форк-сабмодуль `submodules/wireguard-go` = [Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx) (sagernet-база + обфускация).
-- **XHTTP** — [`hiddify/hiddify-sing-box`](https://github.com/hiddify/hiddify-sing-box), пакет `transport/v2rayxhttp`.
 - **Спецификация XHTTP** — Xray-core (актуальная версия параметров `mode`/`path`/`host`/`extra`).
 - **Clash API как функциональный эталон** для расширений §3.6 — `experimental/clashapi/` (`proxies.go` per-node delay, `rules.go` таблица правил): что именно пробрасываем в CommandClient. Код не тянуть — повторяем семантику через нативный канал.
 
