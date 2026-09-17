@@ -21,7 +21,7 @@
 | **SagerNet/sing-box** (upstream) | базовый | — | — |
 | **shtorm-7/sing-box-extended** | десятки (WARP, MASQUE, MTProxy, XHTTP, AWG, …) | «комбайн», правки повсюду | отдельная ветка, без ребейза на теги |
 | **amnezia-vpn/amnezia-box**, **hoaxisr/amnezia-box** | только AWG | толстый форк, правки in-place | синк по веткам (`dev-next`/`stable-next`) |
-| **➡ sing-box-lx** (этот репозиторий) | **малый набор (XHTTP, AWG, MASQUE, VLESS PQ-шифрование, DNS-группа, наблюдаемость, балансировка, энергосбережение, `chain`)** | **тонкий: новые файлы за build-tag, минимум касаний upstream** | **ребейз атомарных `// lx`-коммитов на upstream-теги** |
+| **➡ sing-box-lx** (этот репозиторий) | **малый набор (XHTTP, AWG, MASQUE, VLESS PQ-шифрование, REALITY PQ-обмен ключами, DNS-группа, наблюдаемость, балансировка, энергосбережение, `chain`)** | **тонкий: новые файлы за build-tag, минимум касаний upstream** | **ребейз атомарных `// lx`-коммитов на upstream-теги** |
 
 **Чем мы отличаемся:**
 
@@ -45,6 +45,7 @@
 | **round_robin** (балансировка нагрузки) | режим `urltest` | пул-балансировка на `urltest` за `with_lx_command` (для `GetPool`): `mode` `least_test` (дефолт) \| `round_robin`; `balancer{pool (дефолт 3), pool_tolerance (0=держать живые / >0=топ по задержке), sticky_hash}`. Sticky-ключ: пропущен/`[]` → дефолт `["process","domain"]`, `["none"]` → выкл; компоненты `process`/`domain`/`source_ip`/`dest_ip`/`dest_port`. Фиксированные слоты `slot[hash(key)%pool]` (FNV-64a), замена в слоте; `GetPool` отдаёт слоты | ✅ локально равномерно (10/10/10, sticky off); **device-verified end-to-end** на реальном мульти-нодовом пуле; rc.15 починил схлопывание `domain`-ключа (теперь читается `metadata.Domain`, переживающий resolve домен→IP, а не пустой `destination.Fqdn`) — на устройстве равномерность 0.27 → 0.95+. Фича — [URLTEST_BALANCE](SPECS/FEATURES/007-URLTEST_BALANCE/FEATURE.md), конфиг — [docs/.../urltest.md](docs/configuration/outbound/urltest.md) |
 | **MASQUE** (`type: masque`) | клиентский outbound | CONNECT-IP (RFC 9484) поверх HTTP/3 **или** HTTP/2 для **Cloudflare WARP** (SPEC 021): туннелирует целые IP-пакеты через userspace gVisor-стек; `profile` (`cloudflare`/`standard`), `vhttp` (`h3`/`h2`), стандартный блок `tls`, pinning ECDSA public key, idle-suspend + самовосстановление. h2 — ручной фреймер поверх `x/net/http2` (без доп. зависимостей), TLS через общий `common/tls`; `connect-ip-go` вкопан | ✅ **device-verified на Wi-Fi и LTE** (`warp=on`, реальный трафик на `h3` и `h2`); на сетях, режущих входящий UDP:443, `h3`-handshake виснет — там `vhttp: "h2"` (TCP:443). ⚠️ Форма конфига сменилась в SPEC 062: `network`→`vhttp`, плоские `sni`/`skip_cert_verify`/`fragment*` → блок `tls` (старая форма живёт с deprecation до `v1.14.0-lx.30`) |
 | **VLESS `encryption`** | поле outbound | пост-квантовый слой `mlkem768x25519plus` ВНУТРИ VLESS (SPEC 032) — под транспортом, независим от TLS/REALITY; spec-строка `mlkem768x25519plus.<native\|xorpub\|random>.<0rtt\|1rtt>….<key>`, `""`/`"none"` = выкл; только клиентская половина (порт из `starifly/sing-box` — тот же GPL-3.0 и та же upstream-база) | ✅ отгружено в `v1.14.0-lx.18`, **девайс-верифицировано**: +10 прежде мёртвых нод подписки (6/8 WS, 4/4 gRPC), остальные группы транспортов не сдвинулись. Фича — [VLESS_ENCRYPTION](SPECS/FEATURES/012-VLESS_ENCRYPTION/FEATURE.md) |
+| **REALITY (постквантовый обмен ключами)** | слой TLS | гибридный key share `X25519MLKEM768` перед `X25519` в ClientHello — его требуют серверы Xray ≥ v26.9.8, а апстримный sing-box сам его вырезает ([SPEC 083](SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md): фильтр снят, `AuthKey` считается по тому же ключу, который выбирает сервер); форк-сабмодуль `submodules/utls` ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) — `metacubex/utls` v1.8.7 + три cherry-pick) даёт несущие гибрид пресеты Firefox 148 и Safari 26.3 (SPEC [086](SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md)/[087](SPECS/TASKS/087-UTLS_SAFARI_26_3/SPEC.md)); по-узловая опция `tls.reality.key_share` — `hybrid` (гибрид обязателен, явная ошибка вместо тихого `reality verification failed`) / `classical` (гибрид вырезан — для сетей, теряющих двухсегментное приветствие в 1,5–1,9 КБ) ([SPEC 089](SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md)); `fragment` / `record_fragment` теперь действуют и на REALITY-узлах, где апстрим их молча пропускает ([SPEC 088](SPECS/TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md)) | ✅ стенд против Xray **v26.9.9** (`chrome`/`firefox`/`safari` → 204, ядро без фикса — `reality verification failed`), контроль без регрессии на v26.7.28/v26.7.11; `fp=firefox` и `fp=safari` дополнительно **подтверждены в поле** на узле репортёра. Отгружено в `v1.14.0-lx.36` (083) и `v1.14.1-lx.2`/`lx.3`/`lx.4` (086/087, 088/089). Граница: `edge`/`ios`/`android`/`360`/`qq` гибрида не несут нигде в апстриме, `pqv` / `spiderX` из Xray по-прежнему не поддерживаются. Реестр — [HOTFIXES](SPECS/FEATURES/004-HOTFIXES/FEATURE.md) |
 | **DNS-группа серверов** | тип DNS-сервера | DNS-сервер `type: group` (SPEC 033/035): режимы `stable`/`fastest`/`parallel` как грани одной TTL-модели (раздельные TTL ошибки/победы, веер с гарантированным бюджетом, `survival`-видимость деградации); live-состояние через `GetDNSGroups` (за `with_lx_command`) | ✅ код + тесты + DoD, отгружено; адверсариальная ревизия (24 агента) чистая. Полевая проверка на устройстве — впереди. Фича — [DNS_GROUP](SPECS/FEATURES/013-DNS_GROUP/FEATURE.md) |
 | **Idle-suspend (энергия)** | route-опции | три уровня сна простаивающих WG/AWG-узлов — `route.lx_idle_suspend` / `lx_idle_suspend_reachable` / `lx_idle_teardown` (SPEC 020) плюс `urltest.passive_check` (SPEC 019): батарея, нагрев и RAM на мульти-нодовых мобильных профилях; тег `with_lx_idle_suspend` (зашит в Android AAR) | ✅ **девайс-верифицировано** (SPEC 020): recv-воркеры 16→0, RSS −31 %; гайд — [docs-lx/lx-energy.ru.md](docs-lx/lx-energy.ru.md). Фича — [ENERGY](SPECS/FEATURES/008-ENERGY/FEATURE.md) |
 | **Демон `lxd`** | headless-подкоманда | `sing-box lxd` держит ядро **внутри процесса, за управляющим каналом, который переживает любую смену конфига** (SPEC 055–057): gRPC + admin-REST на одном порту, `apply` с валидацией в сабпроцессе и автооткатом на last-good, mTLS (демон сам себе CA, клиенты регистрируются одноразовым кодом), установка службой, хранилище файловых ресурсов (`.srs`, geo), телеметрия хоста (CPU по ядрам, память, температура, диски, интерфейсы) и справочник «IP → устройство»; build-tag `with_lxd` | ✅ device-verified на macOS (enrollment, обе роли службы, откат). Руководство — [docs-lx/lxd-daemon.ru.md](docs-lx/lxd-daemon.ru.md); gRPC-справочник — [lxd-grpc-api.md](docs-lx/lxd-grpc-api.md). Фича — [LXD_DAEMON](SPECS/FEATURES/014-LXD_DAEMON/FEATURE.md) |
@@ -53,9 +54,9 @@
 
 Подробные отчёты — в [`SPECS/TASKS/002-…`](SPECS/TASKS/002-XHTTP_CLIENT_TRANSPORT/IMPLEMENTATION_REPORT.md), [`SPECS/TASKS/003-…`](SPECS/TASKS/003-AWG2_CLIENT_ENDPOINT/IMPLEMENTATION_REPORT.md) и [`SPECS/TASKS/009-…`](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/IMPLEMENTATION_REPORT.md). Обзор конфига — **[docs-lx/lx-config.ru.md](docs-lx/lx-config.ru.md)**; полный справочник параметров — **[docs-lx/lx-protocols-transports.ru.md](docs-lx/lx-protocols-transports.ru.md)**.
 
-> **Не поддерживается (слой Reality, отложено):** post-quantum Reality (`pqv` / ML-DSA-65) и `spiderX` из Xray. Это Xray-специфичные фичи Reality, которых нет в sing-box, а Reality — upstream-слой TLS, который мы держим нетронутым (это не одна из наших фич). Классический X25519 Reality работает; сервер, который **требует** post-quantum Reality, не подключится. Это ограничение sing-box — правильнее решать в upstream (получим на ребейзе).
+> **Не поддерживается (слой Reality, отложено):** post-quantum Reality (`pqv` / ML-DSA-65) и `spiderX` из Xray — Xray-специфичные фичи Reality, которых нет в sing-box. `pqv` — это постквантовые **подписи**, другой механизм, не обмен ключами: гибридный key share `X25519MLKEM768` как раз поддерживается (см. строку REALITY в таблице выше; классическое приветствие выбирается по узлу через `key_share`), но сервер, который **требует** `pqv`, не подключится. Это ограничение sing-box — правильнее решать в upstream (получим на ребейзе).
 
-> **REALITY против Xray ≥ v26.9.8 (utls-отпечатки).** Такие серверы принимают ClientHello, только если в нём key share `X25519MLKEM768` идёт перед `X25519`. [SPEC 083](SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) сняла апстрим-фильтр, вырезавший гибридный шар, — это починило `fp=chrome` (отгружено в `v1.14.0-lx.36`); [SPEC 086](SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md) добавила форк-сабмодуль `submodules/utls` (пресет Firefox 148 + reuse ключа key share), и `fp=firefox` тоже проходит, а [SPEC 087](SPECS/TASKS/087-UTLS_SAFARI_26_3/SPEC.md) перенесла туда же пресет Safari 26.3 — проходит и `fp=safari`. Остальные отпечатки — `ios`, `edge`, `android`, `360`, `qq` — гибридного шара в `metacubex/utls` не несут и такими серверами по-прежнему отвергаются. Так и остаётся по решению владельца: пресетов с гибридом нет и в первоисточнике (`refraction-networking/utls`, на котором сидит сам Xray, застрял на Edge 106, iOS 14, 360 11.0, QQ 11.1 и Android 11 OkHttp) — значит у Xray та же граница; подмену отпечатка делают приложения, а не ядро. На более старых Xray-серверах работают все отпечатки. Обратная сторона: гибридный ClientHello весит 1,5–1,9 КБ, и часть сетей его теряет — [SPEC 089](SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md) добавляет `tls.reality.key_share` (`classical` = приветствие до 083, только старые серверы; `hybrid` = громко падать на отпечатке без шара), а [SPEC 088](SPECS/TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md) заставляет `fragment` / `record_fragment` действовать и на REALITY-узлах, где апстрим их молча пропускает.
+> **REALITY: почему отпечатков с гибридом всего три.** `ios`, `edge`, `android`, `360` и `qq` серверы Xray ≥ v26.9.8 по-прежнему отвергают, и так и остаётся по решению владельца: пресетов с гибридом нет и в первоисточнике (`refraction-networking/utls`, на котором сидит сам Xray, застрял на Edge 106, iOS 14, 360 11.0, QQ 11.1 и Android 11 OkHttp) — значит у Xray та же граница; подмену отпечатка делают приложения, а не ядро. На более старых Xray-серверах работают все отпечатки.
 
 ---
 
@@ -208,6 +209,35 @@ Outbound `masque` туннелирует целые IP-пакеты через *
 Отсутствует или `"none"` — слой выключен, поведение идентично upstream. Только
 клиентская половина (`decryption` — серверная, намеренно не портирована). См.
 [фичу VLESS_ENCRYPTION](SPECS/FEATURES/012-VLESS_ENCRYPTION/FEATURE.md).
+
+### REALITY `key_share` (постквантовый обмен ключами)
+
+`key_share` внутри блока `reality` решает, уходит ли в ClientHello гибридный шар
+`X25519MLKEM768`. Серверы Xray ≥ v26.9.8 его требуют, поэтому по умолчанию отправляется то,
+что несёт отпечаток, — поле задают только на узле, которому нужно другое поведение:
+
+```jsonc
+{
+  "tls": {
+    "enabled": true,
+    "server_name": "www.apple.com",
+    "utls": { "enabled": true, "fingerprint": "chrome" },
+    "reality": {
+      "enabled": true,
+      "public_key": "<reality-public-key-base64>",
+      "short_id": "0123abcd",
+      "key_share": "classical"   // "" (дефолт) = как несёт отпечаток
+                                 // "classical"  = вырезать гибрид (только Xray < v26.9.8)
+                                 // "hybrid"     = требовать его, ошибка на edge/ios/android/360/qq
+    }
+  }
+}
+```
+
+`"classical"` укорачивает приветствие примерно на 1,2 КБ до одного TCP-сегмента — для сетей,
+теряющих двухсегментное; такой узел после этого ходит только на серверы до v26.9.8. Полный
+справочник — [docs-lx/lx-config.ru.md §7](docs-lx/lx-config.ru.md#7-reality-key_share--гибридный-или-классический-clienthello-spec-089)
+и [SPEC 089](SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md).
 
 ### DNS-группа серверов
 

@@ -21,7 +21,7 @@ In the sing-box ecosystem, forks that add XHTTP / AmneziaWG fall into two camps 
 | **SagerNet/sing-box** (upstream) | baseline | — | — |
 | **shtorm-7/sing-box-extended** | dozens (WARP, MASQUE, MTProxy, XHTTP, AWG, …) | "kitchen sink", edits everywhere | separate branch, no rebasing onto tags |
 | **amnezia-vpn/amnezia-box**, **hoaxisr/amnezia-box** | AWG only | heavy fork, in-place edits | branch sync (`dev-next`/`stable-next`) |
-| **➡ sing-box-lx** (this repo) | **small set (XHTTP, AWG, MASQUE, VLESS PQ encryption, DNS group, observability, balancing, energy, `chain`)** | **thin: new files behind build tags, minimal upstream touch** | **rebase of atomic `// lx` commits onto upstream tags** |
+| **➡ sing-box-lx** (this repo) | **small set (XHTTP, AWG, MASQUE, VLESS PQ encryption, REALITY PQ key share, DNS group, observability, balancing, energy, `chain`)** | **thin: new files behind build tags, minimal upstream touch** | **rebase of atomic `// lx` commits onto upstream tags** |
 
 **How we differ:**
 
@@ -45,6 +45,7 @@ In the sing-box ecosystem, forks that add XHTTP / AmneziaWG fall into two camps 
 | **Load balancing (`round_robin`)** | urltest mode | Group-level load balancing on `urltest` (SPEC 019): `mode: round_robin` + `balancer{ pool, pool_tolerance, sticky_hash }`; FNV-64a slot binding with `sticky_hash` components `process\|domain\|source_ip\|dest_ip\|dest_port` (default `["process","domain"]`, `["none"]` = off) — `GetPool` exposes the live slots (behind `with_lx_command`) | ✅ builds, passes `check`; even rotation locally (10/10/10) and **device-verified end to end** on a real multi-node pool — rc.15 fixed the `domain`-key collapse (reads `metadata.Domain`, which survives the router's domain→IP resolve), taking on-device per-domain uniformity from ~0.27 to 0.95+. Feature — [URLTEST_BALANCE](SPECS/FEATURES/007-URLTEST_BALANCE/FEATURE.md) |
 | **MASQUE** (`type: masque`) | client outbound | CONNECT-IP (RFC 9484) over HTTP/3 **or** HTTP/2 for **Cloudflare WARP** (SPEC 021): tunnels whole IP packets through a userspace gVisor stack; `profile` (`cloudflare`/`standard`), `vhttp` (`h3`/`h2`), the standard `tls` block, ECDSA public-key pinning, idle-suspend + self-healing reconnect. h2 is a hand-rolled framer over `x/net/http2` (no extra dep) whose TLS goes through the shared `common/tls`; `connect-ip-go` vendored | ✅ **device-verified end to end on Wi-Fi and LTE** (`warp=on`, real traffic on both `h3` and `h2`); on networks that filter inbound UDP:443 the `h3` handshake hangs — use `vhttp: "h2"` (TCP:443) there. ⚠️ Config shape changed in SPEC 062: `network`→`vhttp`, flat `sni`/`skip_cert_verify`/`fragment*` → the `tls` block (old shape deprecated until `v1.14.0-lx.30`) |
 | **VLESS `encryption`** | outbound field | Post-quantum `mlkem768x25519plus` layer *inside* VLESS (SPEC 032) — beneath the transport, independent of TLS/REALITY; spec string `mlkem768x25519plus.<native\|xorpub\|random>.<0rtt\|1rtt>….<key>`, `""`/`"none"` = off; client half only (ported from `starifly/sing-box`, same GPL-3.0 + upstream base) | ✅ shipped in `v1.14.0-lx.18`, **device-verified**: +10 previously dead subscription nodes (6/8 WS, 4/4 gRPC), no other transport group moved. Feature — [VLESS_ENCRYPTION](SPECS/FEATURES/012-VLESS_ENCRYPTION/FEATURE.md) |
+| **REALITY (post-quantum key share)** | TLS layer | The hybrid `X25519MLKEM768` key share ahead of `X25519` in the ClientHello, which Xray ≥ v26.9.8 servers demand and upstream sing-box cuts out ([SPEC 083](SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md): filter removed, `AuthKey` derived from the same key the server picks); the `submodules/utls` fork ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx) — `metacubex/utls` v1.8.7 + three cherry-picks) adds the Firefox 148 and Safari 26.3 presets that carry it (SPECs [086](SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md)/[087](SPECS/TASKS/087-UTLS_SAFARI_26_3/SPEC.md)); per-node `tls.reality.key_share` — `hybrid` (require it, loud error instead of a silent `reality verification failed`) / `classical` (strip it, for networks that lose the 1.5–1.9 KB two-segment hello) ([SPEC 089](SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md)); `fragment` / `record_fragment` now actually apply to REALITY nodes, which upstream silently skips ([SPEC 088](SPECS/TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md)) | ✅ stand against Xray **v26.9.9** (`chrome`/`firefox`/`safari` → 204, unpatched core → `reality verification failed`) with v26.7.28/v26.7.11 as the no-regression control; `fp=firefox` and `fp=safari` also **field-confirmed** on a reporter's node. Shipped in `v1.14.0-lx.36` (083) and `v1.14.1-lx.2`/`lx.3`/`lx.4` (086/087, 088/089). Boundary: `edge`/`ios`/`android`/`360`/`qq` carry no hybrid share anywhere upstream, and Xray's `pqv` / `spiderX` stay unsupported. Registry — [HOTFIXES](SPECS/FEATURES/004-HOTFIXES/FEATURE.md) |
 | **DNS server group** | DNS server type | `type: group` DNS server (SPEC 033/035): modes `stable`/`fastest`/`parallel` as facets of one TTL model (error/win TTLs, fan-out with a guaranteed budget, `survival` visibility of degradation); live state via `GetDNSGroups` (behind `with_lx_command`) | ✅ code + tests + DoD, shipped; adversarial review (24 agents) clean. Field verification on device pending. Feature — [DNS_GROUP](SPECS/FEATURES/013-DNS_GROUP/FEATURE.md) |
 | **Idle-suspend (energy)** | route options | Three sleep levels for idle WG/AWG endpoints — `route.lx_idle_suspend` / `lx_idle_suspend_reachable` / `lx_idle_teardown` (SPEC 020) plus `urltest.passive_check` (SPEC 019): battery, heat and RAM savings on multi-node mobile profiles; tag `with_lx_idle_suspend` (baked into the Android AAR) | ✅ **device-verified** (SPEC 020): recv-workers 16→0, RSS −31%; guide — [docs-lx/lx-energy.md](docs-lx/lx-energy.md). Feature — [ENERGY](SPECS/FEATURES/008-ENERGY/FEATURE.md) |
 | **`lxd` daemon** | headless subcommand | `sing-box lxd` keeps the core **in-process behind a management channel that outlives every config change** (SPEC 055–057): gRPC + admin-REST on one port, `apply` validated in a subprocess with automatic rollback to last-good, mTLS where the daemon is its own CA and clients enrol by one-time code, system service install, `.srs`/geo resource store, host telemetry (CPU per core, memory, thermal, disks, interfaces) and an IP→device directory; build tag `with_lxd` | ✅ device-verified on macOS (enrolment, both service roles, rollback). Guide — [docs-lx/lxd-daemon.md](docs-lx/lxd-daemon.md); gRPC reference — [lxd-grpc-api.md](docs-lx/lxd-grpc-api.md). Feature — [LXD_DAEMON](SPECS/FEATURES/014-LXD_DAEMON/FEATURE.md) |
@@ -53,9 +54,9 @@ In the sing-box ecosystem, forks that add XHTTP / AmneziaWG fall into two camps 
 
 Detailed reports: [`SPECS/TASKS/002-…`](SPECS/TASKS/002-XHTTP_CLIENT_TRANSPORT/IMPLEMENTATION_REPORT.md), [`SPECS/TASKS/003-…`](SPECS/TASKS/003-AWG2_CLIENT_ENDPOINT/IMPLEMENTATION_REPORT.md) and [`SPECS/TASKS/009-…`](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/IMPLEMENTATION_REPORT.md). Config overview — **[docs-lx/lx-config.md](docs-lx/lx-config.md)**; full parameter reference — **[docs-lx/lx-protocols-transports.md](docs-lx/lx-protocols-transports.md)**.
 
-> **Not supported (Reality layer, deferred):** post-quantum Reality (`pqv` / ML-DSA-65) and Xray's `spiderX`. These are Xray-specific Reality features absent from sing-box, and Reality is the upstream TLS layer we keep untouched (it is not one of our features). Classic X25519 Reality works; a server that *mandates* post-quantum Reality won't connect. This is a sing-box limitation — best addressed upstream (we'd inherit it on rebase).
+> **Not supported (Reality layer, deferred):** post-quantum Reality (`pqv` / ML-DSA-65) and Xray's `spiderX` — Xray-specific Reality features absent from sing-box. `pqv` is post-quantum **signatures**, a different mechanism from the key exchange: the hybrid `X25519MLKEM768` key share *is* supported (see the REALITY row above; the classical hello is selectable per node via `key_share`), but a server that *mandates* `pqv` won't connect. This is a sing-box limitation — best addressed upstream (we'd inherit it on rebase).
 
-> **REALITY against Xray ≥ v26.9.8 (utls fingerprints).** Those servers accept a ClientHello only when it carries an `X25519MLKEM768` key share ahead of `X25519`. [SPEC 083](SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) removed the upstream filter that cut the hybrid share out, which fixed `fp=chrome` (shipped in `v1.14.0-lx.36`); [SPEC 086](SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md) added the `submodules/utls` fork (Firefox 148 preset + key share reuse) so `fp=firefox` passes too, and [SPEC 087](SPECS/TASKS/087-UTLS_SAFARI_26_3/SPEC.md) brought in the Safari 26.3 preset, so `fp=safari` passes as well. The remaining fingerprints — `ios`, `edge`, `android`, `360`, `qq` — carry no hybrid share in `metacubex/utls` and are still rejected by such servers. They stay that way by the owner's decision: presets with the hybrid share do not exist upstream either (`refraction-networking/utls`, the source Xray itself uses, is stuck on Edge 106, iOS 14, 360 11.0, QQ 11.1 and Android 11 OkHttp), so Xray has the same boundary; substituting the fingerprint is the applications' job, not the core's. Older Xray servers are unaffected on every fingerprint. The flip side: the hybrid ClientHello is 1.5–1.9 KB and some networks drop it — [SPEC 089](SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md) adds `tls.reality.key_share` (`classical` = the pre-083 hello, older servers only; `hybrid` = fail loudly on a fingerprint without the share), and [SPEC 088](SPECS/TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md) makes `fragment` / `record_fragment` actually apply to REALITY nodes, which upstream silently skips.
+> **REALITY: why only three fingerprints carry the hybrid share.** `ios`, `edge`, `android`, `360` and `qq` are still rejected by Xray ≥ v26.9.8, and they stay that way by the owner's decision: presets with the hybrid share do not exist upstream either (`refraction-networking/utls`, the source Xray itself uses, is stuck on Edge 106, iOS 14, 360 11.0, QQ 11.1 and Android 11 OkHttp), so Xray has the same boundary; substituting the fingerprint is the applications' job, not the core's. Older Xray servers are unaffected on every fingerprint.
 
 ---
 
@@ -209,6 +210,35 @@ handshake *inside* VLESS — beneath the transport and independent of TLS/REALIT
 Absent or `"none"` = layer off, behavior identical to upstream. Client half only
 (`decryption` is server-side and deliberately not ported). See
 [VLESS_ENCRYPTION feature](SPECS/FEATURES/012-VLESS_ENCRYPTION/FEATURE.md).
+
+### REALITY `key_share` (post-quantum key share)
+
+`key_share` inside the `reality` block decides whether the ClientHello carries the hybrid
+`X25519MLKEM768` share. Xray ≥ v26.9.8 servers require it, so the default is to send whatever
+the fingerprint carries — set the field only when a node needs the other behavior:
+
+```jsonc
+{
+  "tls": {
+    "enabled": true,
+    "server_name": "www.apple.com",
+    "utls": { "enabled": true, "fingerprint": "chrome" },
+    "reality": {
+      "enabled": true,
+      "public_key": "<reality-public-key-base64>",
+      "short_id": "0123abcd",
+      "key_share": "classical"   // "" (default) = as the fingerprint carries it
+                                 // "classical"  = strip the hybrid share (Xray < v26.9.8 only)
+                                 // "hybrid"     = require it, error on edge/ios/android/360/qq
+    }
+  }
+}
+```
+
+`"classical"` shortens the hello by ~1.2 KB to a single TCP segment — for networks that lose the
+two-segment one; the node then only works against pre-v26.9.8 servers. Full reference —
+[docs-lx/lx-config.md §7](docs-lx/lx-config.md#7-reality-key_share--hybrid-or-classical-clienthello-spec-089)
+and [SPEC 089](SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md).
 
 ### DNS server group
 
