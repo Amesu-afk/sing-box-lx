@@ -71,7 +71,12 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
         "enabled": true,
         "server_name": "example.com",
         "utls": { "enabled": true, "fingerprint": "chrome" },
-        "reality": { "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd" }
+        "reality": {
+          "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd",
+          "key_share": ""                       // дефолт: "" (как несёт отпечаток). §12:
+                                                //   "classical" = вырезать X25519MLKEM768 (только Xray < v26.9.8)
+                                                //   "hybrid"    = требовать его (ошибка на edge/ios/…)
+        }
       },
       "transport": {
         "type": "xhttp",                        // селектор — должно быть "xhttp"
@@ -723,7 +728,7 @@ vmess, anytls, shadowtls, http, masque `h2`, …) диалит **через `det
   молча не действовали. Гибридный ClientHello после
   [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) — 1,5–1,9 КБ (два TCP-сегмента),
   так что это стало важнее, чем было. Поможет ли фрагментация в сети, которая теряет такой первый
-  пакет, — свойство той сети.
+  пакет, — свойство той сети; второй рычаг — §12.
 
 > ⚠️ **Известное ограничение:** явный `"record_fragment": false` неотличим от «не задано»,
 > поэтому под `detour` авто всё равно включится. Чтобы диалить через detour другим режимом,
@@ -841,3 +846,26 @@ make lib_install && make lib_android             # → libbox.aar (SDK23) + libb
 
 CI (`.github/workflows/lx-ci.yml`) собирает матрицу фич (`baseline` / `xhttp` / `awg` / `full`), кросс-платформенную матрицу **и Android `libbox.aar`** (gomobile), прогоняя `check` на соответствующих примерах конфигов. Push тега `v*-lx.*` запускает `lx-release.yml`, который публикует десктоп-бинари **и** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` как ассеты GitHub Release. Также публикуется legacy-бинарь **Windows 7 (32-бит)** (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) — собранный Win7-патченным Go и **без `with_naive_outbound`** (у `cronet-go` нет сборки под windows/386; все остальные фичи без изменений).
 
+---
+
+## 12. REALITY `key_share` — гибридный или классический ClientHello (SPEC 089)
+
+Строка в `tls.reality`, по-узловая:
+
+```json
+"reality": { "enabled": true, "public_key": "…", "short_id": "0123abcd", "key_share": "classical" }
+```
+
+| Значение | ClientHello | Работает против |
+|---|---|---|
+| `""` (не задано) | Как несёт отпечаток: `chrome` / `firefox` / `safari` шлют гибридный шар `X25519MLKEM768`, `edge` / `ios` / `android` / `360` / `qq` — только X25519. Поведение без изменений. | как раньше |
+| `"classical"` | `X25519MLKEM768` вырезан из `key_share` и `supported_groups` — приветствие апстрима до SPEC 083, на ~1,2 КБ короче (`chrome`: 594 байта вместо 1720, один TCP-сегмент вместо двух). | **Только Xray < v26.9.8** — новые серверы отвергают приветствие без гибрида, молча (`reality verification failed`). |
+| `"hybrid"` | Гибрид обязателен. На отпечатке без него рукопожатие сразу падает с `reality key_share "hybrid": fingerprint Edge 85 carries no X25519MLKEM768 key share` — вместо тихого отказа сервера, неотличимого от чужого ключа. На `chrome` / `firefox` / `safari` ничего не меняет. | как `""` |
+
+Любое другое значение — ошибка конфига при загрузке (опечатка не должна молча становиться дефолтом).
+
+Зачем: в некоторых сетях двухсегментное гибридное приветствие теряется, а односегментное классическое
+проходит (LxBox #142; клиент самого Xray упирается в ту же стену, XTLS#6256). Новые Xray-серверы
+гибрид требуют. Ядро не может выбрать за тебя между «сервер отвергнет» и «сеть потеряет», поэтому
+выбор по-узловой. `classical` снижает постквантовую защиту и годится только для старых серверов;
+для нового сервера в такой сети остаются `record_fragment` (§8) и `detour`.

@@ -253,4 +253,10 @@ type OutboundRealityOptions struct {
 	Enabled   bool   `json:"enabled,omitempty"`
 	PublicKey string `json:"public_key,omitempty"`
 	ShortID   string `json:"short_id,omitempty"`
+	// KeyShare picks the key exchange offered in the REALITY ClientHello:
+	// "" = as the fingerprint carries it, "hybrid" = X25519MLKEM768 required
+	// (start-of-handshake error when the fingerprint has none), "classical" =
+	// X25519MLKEM768 stripped from key_share and supported_groups (only Xray
+	// servers older than v26.9.8 accept that). lx: SPEC 089.
+	KeyShare string `json:"key_share,omitempty" enum:"hybrid,classical"`
 }

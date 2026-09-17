@@ -283,8 +283,12 @@ Firefox 148 из первоисточника: задача [086](../086-UTLS_FO
 
 Апстрим sing-box уберёт фильтр в `common/tls/reality_client.go` и добавит
 fallback на `MlkemEcdhe` (issue #4520) — тогда наши два маркера снимаются
-в пользу апстримной формы. Пока висит: проверять на каждом мерже, что фильтр
-не вернулся (grep `X25519MLKEM768` по файлу должен давать ноль), и что
+в пользу апстримной формы. Пока висит: проверять на каждом мерже, что **безусловный**
+фильтр не вернулся — с [089](../089-REALITY_KEY_SHARE_OPTION/SPEC.md) (2026-09-17) фильтр
+в файле снова есть, но только под `case C.RealityKeyShareClassical` (`reality.key_share`);
+`grep X25519MLKEM768` по файлу больше не ноль, вместо него страж
+`TestLxRealityKeyShareDefaultKeepsHybrid` (`common/tls/reality_client_lx_test.go`) — пустой
+`key_share` обязан слать гибрид, — и что
 `HelloChrome_Auto` в новой utls по-прежнему несёт гибрид **перед** X25519 — смена
 порядка в спеке utls сломает узлы так же тихо. Вторую проверку с 086 делает тест
 `TestLxRealityFingerprintsCarryHybridShareFirst` (`common/tls/utls_firefox148_lx_test.go`)

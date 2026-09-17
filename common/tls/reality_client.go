@@ -30,6 +30,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -48,6 +49,7 @@ type RealityClientConfig struct {
 	uClient   *UTLSClientConfig
 	publicKey []byte
 	shortID   [8]byte
+	keyShare  string // lx: SPEC 089 — C.RealityKeyShare*
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -82,7 +84,15 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if decodedLen > 8 {
 		return nil, E.New("invalid short_id")
 	}
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
+	// lx: SPEC 089 — reject typos at load time; "classic" must not silently
+	// become the default.
+	switch options.Reality.KeyShare {
+	case C.RealityKeyShareDefault, C.RealityKeyShareHybrid, C.RealityKeyShareClassical:
+	default:
+		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, " (expected \"hybrid\" or \"classical\")")
+	}
+
+	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -153,9 +163,9 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 }
 
 // prepareClientHello builds the REALITY ClientHello on conn without sending it:
-// the utls UConn with the fingerprint's hello and the session id sealed with
-// the AuthKey. Split from ClientHandshake so tests can inspect what would go on
-// the wire. lx: SPEC 088.
+// the utls UConn with the fingerprint's hello, the key_share policy applied
+// (SPEC 089), and the session id sealed with the AuthKey. Split from
+// ClientHandshake so tests can inspect what would go on the wire. lx: SPEC 088/089.
 func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *realityVerifier, error) {
 	verifier := &realityVerifier{
 		serverName: e.uClient.ServerName(),
@@ -185,6 +195,38 @@ func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *r
 	if err != nil {
 		return nil, nil, err
 	}
+	// lx: SPEC 089 — `reality.key_share` поверх отпечатка. `classical` — тот
+	// самый апстримный фильтр, но по выбору узла: гибридный ClientHello
+	// (~1.9 КБ, два TCP-сегмента) кое-где теряется в сети, а классический
+	// (~0.5 КБ) проходит — ценой совместимости с Xray ≥ v26.9.8. `hybrid` —
+	// проверка, что отпечаток шар несёт: без неё узел на `edge` умирает как
+	// «reality verification failed», неотличимо от чужого ключа.
+	switch e.keyShare {
+	case C.RealityKeyShareClassical:
+		for _, extension := range uConn.Extensions {
+			if curves, isCurves := extension.(*utls.SupportedCurvesExtension); isCurves {
+				curves.Curves = common.Filter(curves.Curves, func(curveID utls.CurveID) bool {
+					return curveID != utls.X25519MLKEM768
+				})
+			}
+			if keyShares, isKeyShares := extension.(*utls.KeyShareExtension); isKeyShares {
+				keyShares.KeyShares = common.Filter(keyShares.KeyShares, func(share utls.KeyShare) bool {
+					return share.Group != utls.X25519MLKEM768
+				})
+			}
+		}
+		// Second build re-marshals the hello from the filtered extensions
+		// (the preset is applied once; see utls buildHandshakeState).
+		err = uConn.BuildHandshakeState()
+		if err != nil {
+			return nil, nil, err
+		}
+	case C.RealityKeyShareHybrid:
+		if !realityHelloCarriesHybridShare(uConn) {
+			return nil, nil, E.New("reality key_share \"hybrid\": fingerprint ", e.uClient.id.Client, " ", e.uClient.id.Version, " carries no X25519MLKEM768 key share")
+		}
+	}
+
 	if len(uConfig.NextProtos) > 0 {
 		for _, extension := range uConn.Extensions {
 			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
@@ -259,6 +301,21 @@ func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *r
 	return uConn, verifier, nil
 }
 
+// realityHelloCarriesHybridShare reports whether the built ClientHello offers
+// an X25519MLKEM768 key share — the wire fact the REALITY server checks. lx: SPEC 089.
+func realityHelloCarriesHybridShare(uConn *utls.UConn) bool {
+	for _, extension := range uConn.Extensions {
+		if keyShares, isKeyShares := extension.(*utls.KeyShareExtension); isKeyShares {
+			for _, share := range keyShares.KeyShares {
+				if share.Group == utls.X25519MLKEM768 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func realityClientFallback(ctx context.Context, uConn net.Conn, serverName string, fingerprint utls.ClientHelloID) {
 	defer uConn.Close()
 	client := &http.Client{
@@ -289,6 +346,7 @@ func (e *RealityClientConfig) Clone() Config {
 		e.uClient.Clone().(*UTLSClientConfig),
 		e.publicKey,
 		e.shortID,
+		e.keyShare,
 	}
 }
 

@@ -40,6 +40,18 @@ required for stable tags); this changelog section is the fallback used for pre-r
   (тип `NetConn()` по матрице флагов; по проводу: без флагов одна TLS-запись, с `record_fragment` — две),
   red-check пройден. Поможет ли фрагментация на сети, где теряется длинный ClientHello, — решает сеть;
   полевой прогон у репортёра LxBox #142 впереди.
+- 🔑 **`tls.reality.key_share`: `hybrid` / `classical`**
+  ([SPEC 089](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md),
+  противовес [SPEC 083](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md)).
+  По-узловой выбор, нести ли в REALITY ClientHello гибридный key share `X25519MLKEM768`. Повод —
+  LxBox #142: на одном мобильном операторе гибридное приветствие `chrome` (1720 байт, два TCP-сегмента)
+  теряется, апстримное (594 байта, один сегмент) проходит; у Xray-клиента тот же симптом (XTLS#6256).
+  `""` — как несёт отпечаток (поведение 083 без изменений); `classical` — `X25519MLKEM768` вырезается из
+  `supported_groups` и `key_share`, как делал апстрим до 083 (**только Xray < v26.9.8**, новые серверы
+  такого клиента отвергают); `hybrid` — гибрид обязателен, на отпечатке без него (`edge`, `ios`, …)
+  явная ошибка вместо тихого `reality verification failed`. Опечатка в значении отвергается при
+  построении outbound'а. Контракт `AuthKey` 083 не тронут. Остаток — проводка в LxBox/лаунчер.
+
 #### v1.14.1-lx.3
 
 - 🧭 **REALITY `fp=safari` проходит на Xray ≥ v26.9.8**

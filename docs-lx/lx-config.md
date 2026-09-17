@@ -73,7 +73,12 @@ you need and read its section below. Each comment shows the **default** and the 
         "enabled": true,
         "server_name": "example.com",
         "utls": { "enabled": true, "fingerprint": "chrome" },
-        "reality": { "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd" }
+        "reality": {
+          "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd",
+          "key_share": ""                       // default: "" (as the fingerprint carries it). §12:
+                                                //   "classical" = strip X25519MLKEM768 (Xray < v26.9.8 only)
+                                                //   "hybrid"    = require it (error on edge/ios/…)
+        }
       },
       "transport": {
         "type": "xhttp",                        // selector — must be "xhttp"
@@ -722,7 +727,7 @@ Rules:
   default were accepted by the config and silently ignored there. The hybrid ClientHello after
   [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) is 1.5–1.9 KB (two TCP segments),
   so this matters more than it used to. Whether fragmentation helps on a network that drops that
-  first flight is a property of that network.
+  first flight is a property of that network — see §12 for the other lever.
 
 > ⚠️ **Known limit:** an explicit `"record_fragment": false` is indistinguishable from "unset",
 > so auto still turns it on under `detour`. To dial through a detour with a different mode, set
@@ -841,3 +846,27 @@ make lib_install && make lib_android             # → libbox.aar (SDK23) + libb
 
 The CI (`.github/workflows/lx-ci.yml`) builds the feature matrix (`baseline` / `xhttp` / `awg` / `full`), a cross-platform matrix, **and the Android `libbox.aar`** (gomobile), running `check` on the matching sample configs. Pushing a `v*-lx.*` tag runs `lx-release.yml`, which publishes the desktop binaries **and** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` as GitHub Release assets. A **Windows 7 (32-bit)** legacy binary (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) is also published — built with a Win7-patched Go and **without `with_naive_outbound`** (`cronet-go` has no windows/386 build; every other feature is unchanged).
 
+---
+
+## 12. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)
+
+A string on `tls.reality`, per node:
+
+```json
+"reality": { "enabled": true, "public_key": "…", "short_id": "0123abcd", "key_share": "classical" }
+```
+
+| Value | ClientHello | Works against |
+|---|---|---|
+| `""` (unset) | Whatever the fingerprint carries: `chrome` / `firefox` / `safari` send the `X25519MLKEM768` hybrid share, `edge` / `ios` / `android` / `360` / `qq` send X25519 only. Unchanged behaviour. | as before |
+| `"classical"` | `X25519MLKEM768` removed from `key_share` and `supported_groups` — the pre-SPEC-083 (upstream) hello, ~1.2 KB shorter (`chrome`: 594 B instead of 1720 B, one TCP segment instead of two). | **Xray < v26.9.8 only** — newer servers reject a hello without the hybrid share, silently (`reality verification failed`). |
+| `"hybrid"` | Requires the hybrid share. On a fingerprint that has none the handshake fails at once with `reality key_share "hybrid": fingerprint Edge 85 carries no X25519MLKEM768 key share` — instead of the server's silent rejection, which looks exactly like a wrong key. On `chrome` / `firefox` / `safari` it changes nothing. | as `""` |
+
+Any other value is a config error at load time (a typo must not silently become the default).
+
+Why it exists: some networks drop the two-segment hybrid first flight while the one-segment
+classical one passes (LxBox #142; Xray's own client hits the same wall, XTLS#6256). Newer Xray
+servers require the hybrid share. The core cannot pick for you between "the server rejects it" and
+"the network loses it", so the choice is per node. `classical` reduces post-quantum protection
+and only fits older servers; for a new server on such a network the remaining levers are
+`record_fragment` (§8) and a `detour`.
