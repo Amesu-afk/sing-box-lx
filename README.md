@@ -2,16 +2,25 @@
 
 # sing-box-lx
 
-> **A thin downstream fork of [SagerNet/sing-box](https://github.com/SagerNet/sing-box).**
-> Upstream sing-box plus a small set of client-side features, kept in lx-owned files and behind
-> build tags, so the fork can follow every upstream release for years with almost no conflicts.
-> It is not a separate project and not an "improved sing-box".
+**A client core based on sing-box for the desktop launcher, LxBox and routers.** Compatibility
+with current Xray and AmneziaWG servers, a daemon and observability for the apps.
 
-> 📄 The upstream README — **[on GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md)** (always current). The rules every feature here must live by — [CONSTITUTION](SPECS/CONSTITUTION.md).
+- **Compatibility with today's servers and networks.** REALITY with the hybrid post-quantum
+  ML-KEM key exchange (X25519MLKEM768) that current Xray requires, XHTTP, VLESS `encryption`,
+  AmneziaWG 3.x, ClientHello fragmentation, WARP over MASQUE.
+- **A core built to be operated** by demanding consumers — the desktop launcher, the LxBox
+  Android app, routers: daemon mode, observability over gRPC, energy saving with sleep for idle
+  tunnels, router builds.
+- **Extra capabilities.** Multi-hop `chain`, load balancing, DNS server groups, protocol sniffers.
+- **Bugs closed where they were found — in real use**, each with a test and a condition for
+  retiring the patch.
+
+Details of every item — [Features](#features).
 
 ## Table of contents
 
-- [What makes it different](#what-makes-it-different)
+- [Why the fork exists](#why-the-fork-exists)
+- [About sing-box](#about-sing-box)
 - [Features](#features)
 - [Build](#build)
 - [Configuration — a quick tour](#configuration--a-quick-tour)
@@ -23,24 +32,23 @@
 
 ---
 
-## What makes it different
+## Why the fork exists
 
-Forks that add XHTTP / AmneziaWG to sing-box fall into two camps — and `sing-box-lx` is in neither:
+The servers people connect to often run Xray and AmneziaWG and move faster than sing-box;
+examples of the lag: REALITY, the post-quantum key exchange, XHTTP, VLESS `encryption`,
+AmneziaWG 3.x. `sing-box-lx` closes that gap on its own side without forking away: every
+`upstream/stable` release is merged within days, our code lives in its own files behind build
+tags, and a build without them is upstream byte for byte — see
+[How the fork is maintained](#how-the-fork-is-maintained).
 
-| Fork | Features | Approach | Upstream sync |
-|------|----------|----------|---------------|
-| **SagerNet/sing-box** (upstream) | baseline | — | — |
-| **shtorm-7/sing-box-extended** | dozens (WARP, MASQUE, MTProxy, XHTTP, AWG, …) | "kitchen sink", edits everywhere | separate branch, no sync onto releases |
-| **amnezia-vpn/amnezia-box**, **hoaxisr/amnezia-box** | AWG only | heavy fork, in-place edits | branch sync (`dev-next`/`stable-next`) |
-| **➡ sing-box-lx** (this repo) | **a small set** (see [Features](#features)) | **thin: new files behind build tags, minimal upstream touch** | **manual merge of every `upstream/stable` release, atomic `// lx` commits** |
+## About sing-box
 
-- **Minimal divergence.** New code lives in new files. Upstream files are touched only inside small marked seams `// lx:begin … // lx:end`, so a merge of the next upstream release costs little.
-- **Build-tag isolation.** Features turn on via `with_xhttp`, `with_awg`, `with_lx_command`, … — sing-box's own convention, applied with discipline. A build without a tag is byte-for-byte the upstream behaviour.
-- **Identity preserved.** The Go module stays `github.com/sagernet/sing-box`, the binary is still `sing-box`; the `-lx` suffix lives only in the version string (`vX.Y.Z-lx.N`).
-- **Client side only.** Server halves of the protocols are not ported; the fork exists for the clients listed under [consumers](#consumers).
-- **Specs before code.** Every feature has a black-box description in [`SPECS/FEATURES`](SPECS/FEATURES/README.md) and every unit of work a spec in [`SPECS/TASKS`](SPECS/README.md); history lives there, not in this README.
-
-> The "kitchen-sink" forks are used only as a wire-protocol reference, never as a dependency.
+[sing-box](https://github.com/SagerNet/sing-box) by SagerNet is the universal proxy platform this
+core is built on: the protocols, the routing engine, the TUN stack and the `libbox` binding for
+mobile all come from there. Its documentation — [sing-box.sagernet.org](https://sing-box.sagernet.org/),
+its README — [on GitHub](https://github.com/SagerNet/sing-box/blob/main/README.md). The Go module
+and the binary keep upstream's name; the `-lx` suffix lives in the version string only. The rules
+every feature here lives by — [CONSTITUTION](SPECS/CONSTITUTION.md).
 
 ---
 
