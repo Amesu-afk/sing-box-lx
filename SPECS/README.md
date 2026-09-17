@@ -77,8 +77,41 @@ MASQUE, энергосбережение, VLESS-шифрование, DNS-гру
 
 | Файл | Назначение |
 |------|------------|
-| **CONSTITUTION.md** | Неизменяемые принципы, приоритеты, запреты |
+| **CONSTITUTION.md** | Принципы, приоритеты реализации, правила; ориентиры и референсы — в этом файле выше |
 | **IMPLEMENTATION_PROMPT.md** | DoD, git/ребейз-ритуал, контракт выхода |
+
+## Ориентиры и референсы
+
+Заметки для реализации, вынесенные из [CONSTITUTION.md](CONSTITUTION.md) (там — только принципы
+и правила). Факты апстрим-линии 1.14, проверять на каждом мерже:
+
+- **v2ray-транспорты** диспатчатся `switch` по `options.Type` в `transport/v2ray/transport.go`
+  (`NewClientTransport`/`NewServerTransport`); константы — `constant/v2ray.go`, опции —
+  `option/v2ray_transport.go`. VLESS/VMess/Trojan ходят через общий транспорт — пер-протокольных
+  правок не требуется.
+- **WireGuard — endpoint**: `protocol/wireguard/endpoint.go`, регистрация
+  `endpoint.Register[option.WireGuardEndpointOptions](registry, C.TypeWireGuard, NewEndpoint)`,
+  проводка в `include/wireguard.go` (+ `wireguard_stub.go`). Девайс — `transport/wireguard`;
+  зависимость `github.com/sagernet/wireguard-go` заменена `replace` на форк-сабмодуль.
+- **libbox command-протокол** — gRPC-сервис `StartedService` в `daemon/started_service.proto`
+  (+ регенерируемые `*.pb.go`/`*_grpc.pb.go`), клиент `experimental/libbox/command_client.go`.
+  Опциональные RPC гейтятся build-tag'ом по парному паттерну
+  `daemon/started_service_usbip{,_stub}.go` — образец для конституции §3.6.
+- **TLS-клиенты** — общий слой `common/tls`: STD, uTLS и REALITY строятся через
+  `NewClientWithOptions`; всё, что должно действовать на все три (фрагментация, дефолты под
+  `detour`), ставится там, а не в отдельном движке (уроки SPEC 060/088).
+
+Референсы — только как образец, код «как есть» не тянуть:
+
+- **AWG** — [`hoaxisr/amnezia-box`](https://github.com/hoaxisr/amnezia-box) (submodule +
+  `patches/amneziawg-go`) — исторический образец; фактическая схема своя: форк-сабмодуль
+  `submodules/wireguard-go` = [Leadaxe/wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx).
+- **Спецификации протоколов** — Xray-core (XHTTP: `mode`/`path`/`host`/`extra`; REALITY: сервер
+  в XTLS/REALITY; VLESS `encryption`), amneziawg-go / amneziawg-tools (AWG 2.0/3.x), Cloudflare
+  WARP (MASQUE CONNECT-IP). Где смотреть — [docs-lx/lx-reference-cores.md](../docs-lx/lx-reference-cores.md).
+- **Clash API как функциональный эталон** для расширений §3.6 — `experimental/clashapi/`
+  (`proxies.go` per-node delay, `rules.go` таблица правил): что именно пробрасываем в
+  CommandClient. Код не тянуть — повторяем семантику через нативный канал.
 
 ## Методология: фича → задачи → реализация
 
