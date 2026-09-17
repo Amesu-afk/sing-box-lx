@@ -1,6 +1,6 @@
 # SPEC: 088 — REALITY_FRAGMENT_BYPASS
 
-**Фича:** [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
+**Фича:** [REALITY](../../FEATURES/017-REALITY/FEATURE.md) · хотфикс в [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
 
 | Поле | Значение |
 |------|----------|

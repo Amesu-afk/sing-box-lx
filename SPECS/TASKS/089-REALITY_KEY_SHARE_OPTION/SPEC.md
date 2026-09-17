@@ -1,6 +1,6 @@
 # SPEC: 089 — REALITY_KEY_SHARE_OPTION
 
-**Фича:** [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md) (противовес [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) в той же линии)
+**Фича:** [REALITY](../../FEATURES/017-REALITY/FEATURE.md) (противовес [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) в той же линии; в реестре [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md) — строка «что сторожить»)
 
 | Поле | Значение |
 |------|----------|

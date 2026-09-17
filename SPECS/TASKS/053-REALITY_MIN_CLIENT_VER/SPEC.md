@@ -1,6 +1,6 @@
 # SPEC: 053 — REALITY_MIN_CLIENT_VER
 
-**Фича:** [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
+**Фича:** [REALITY](../../FEATURES/017-REALITY/FEATURE.md) · хотфикс в [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
 
 | Поле | Значение |
 |------|----------|
