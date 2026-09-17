@@ -9,6 +9,17 @@ routing rules can match. Upstream sing-box recognises web and torrent protocols
 The fork adds the protocols a home router actually sees from other devices on the
 LAN: VPN tunnels and voice calls.
 
+## Table of contents
+
+- [What the fork recognises](#what-the-fork-recognises)
+- [Default order](#default-order)
+- [The one thing to know: only the first packet counts](#the-one-thing-to-know-only-the-first-packet-counts)
+- [Router example](#router-example)
+- [Deliberately not recognised](#deliberately-not-recognised)
+- [Diagnostics](#diagnostics)
+
+---
+
 ## What the fork recognises
 
 | Name | Network | Sets `domain` | First client packet that is matched | Task |

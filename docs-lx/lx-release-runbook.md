@@ -41,6 +41,22 @@ Repository context:
   previous release) is generated — do not write it into the files. The changelog is still kept per
   tag as an engineering log; it must be correct BEFORE the tag.
 
+## Table of contents
+
+- [0. Pre-release gate — do NOT cut the tag until every item is green](#0-pre-release-gate--do-not-cut-the-tag-until-every-item-is-green)
+- [1. Submodules first, core second (THE ORDER IS MANDATORY)](#1-submodules-first-core-second-the-order-is-mandatory)
+  - [1.1 Machine check: the fork's tip against `go.mod`](#11-machine-check-the-forks-tip-against-gomod)
+  - [1.2 Take the whole upstream line, not selected commits](#12-take-the-whole-upstream-line-not-selected-commits)
+  - [1.3 The second class of drift: API absent from the fork's base](#13-the-second-class-of-drift-api-absent-from-the-forks-base)
+  - [1.4 After closing the drift — a device run is mandatory](#14-after-closing-the-drift--a-device-run-is-mandatory)
+- [2. Check whether upstream moved ahead (MANDATORY before every release)](#2-check-whether-upstream-moved-ahead-mandatory-before-every-release)
+- [2a. Check dependency versions — not just commits (MANDATORY before every release)](#2a-check-dependency-versions--not-just-commits-mandatory-before-every-release)
+- [2b. Full release build without publishing (dry run)](#2b-full-release-build-without-publishing-dry-run)
+- [3. Take upstream's changes (merge, then build) — and ONLY then release](#3-take-upstreams-changes-merge-then-build--and-only-then-release)
+- [4. Update the changelog and release notes, then cut the tag](#4-update-the-changelog-and-release-notes-then-cut-the-tag)
+- [5. Post-release sanity](#5-post-release-sanity)
+  - [In one line](#in-one-line)
+
 ---
 
 ## 0. Pre-release gate — do NOT cut the tag until every item is green

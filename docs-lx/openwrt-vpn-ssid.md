@@ -30,6 +30,23 @@ Placeholder key:
 | `172.19.0.1/30` | tunnel p2p subnet | any spare /30 |
 | `lxdvpn`, `sbtun` | segment and tunnel firewall zones | your zone names |
 
+## Table of contents
+
+- [0. Preconditions (check before §2)](#0-preconditions-check-before-2)
+- [1. Principles (why it is shaped this way)](#1-principles-why-it-is-shaped-this-way)
+- [2. Bridge](#2-bridge)
+- [3. The segment's gateway interface](#3-the-segments-gateway-interface)
+- [4. DHCP for the segment](#4-dhcp-for-the-segment)
+- [5. Firewall (fail-closed)](#5-firewall-fail-closed)
+- [6. Wi-Fi into the bridge](#6-wi-fi-into-the-bridge)
+- [7. Core config (applied via the daemon)](#7-core-config-applied-via-the-daemon)
+- [8. Tunnel firewall — closing fail-closed](#8-tunnel-firewall--closing-fail-closed)
+  - [8.1. Why `sbtun_tcp`: `stack: "system"` + fw4 silently drops TCP](#81-why-sbtun_tcp-stack-system--fw4-silently-drops-tcp)
+- [9. Name/address consistency — the main landmine](#9-nameaddress-consistency--the-main-landmine)
+- [10. Verification](#10-verification)
+  - [10.1. A virtual client — how to test without a phone](#101-a-virtual-client--how-to-test-without-a-phone)
+- [11. Persistence (OpenWrt)](#11-persistence-openwrt)
+
 ---
 
 ## 0. Preconditions (check before §2)

@@ -6,6 +6,21 @@
 
 This is the main document on **why the fork saves battery on Android and how to control it**. Upstream sing-box keeps every WireGuard/AmneziaWG endpoint alive 24/7 regardless of traffic: recv-workers with their buffers (~8 MB per worker at the mobile `BatchSize=128` — the dominant GC-heat source; measured on-device: 8 endpoints suspended freed 134 MB), plus keepalive/handshake timers that wake the radio. The fork adds selective **suspension** of idle endpoints and teaches the health-check machinery **not to keep them awake**. The full model, step by step, follows.
 
+## Table of contents
+
+- [1. The big picture: three layers](#1-the-big-picture-three-layers)
+- [2. The reachability layer](#2-the-reachability-layer)
+- [3. Two idle thresholds](#3-two-idle-thresholds)
+- [4. The tick decision: gate chain](#4-the-tick-decision-gate-chain)
+- [5. Down, Close, and the wake cost](#5-down-close-and-the-wake-cost)
+- [6. urltest: probes, and how they were taught to stay quiet](#6-urltest-probes-and-how-they-were-taught-to-stay-quiet)
+- [7. Timelines](#7-timelines)
+  - [Night (round_robin pool=3, interval=15m, idle_timeout=30m, thresholds 30s/30m)](#night-round_robin-pool3-interval15m-idle_timeout30m-thresholds-30s30m)
+  - [Selector switching away from a group](#selector-switching-away-from-a-group)
+- [8. Recommended mobile configuration](#8-recommended-mobile-configuration)
+- [9. Guarantees (what will NOT break)](#9-guarantees-what-will-not-break)
+- [10. Observability and troubleshooting](#10-observability-and-troubleshooting)
+
 ---
 
 ## 1. The big picture: three layers

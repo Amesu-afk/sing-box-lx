@@ -9,7 +9,7 @@
 | Ветка | `lx` |
 | Связанные | [060](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) — авто-`record_fragment` под `detour`, чей дефолт до 088 до REALITY не доходил; [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) — гибридный key share, из-за которого ClientHello вырос до двух TCP-сегментов; [089](../089-REALITY_KEY_SHARE_OPTION/SPEC.md) — вторая половина ответа на ту же жалобу (`reality.key_share`); LxBox [#142](https://github.com/Leadaxe/LxBox/issues/142) (репортёр нашёл обход сам, по коду) |
 
-**Touches:** `common/tls/utls_client.go` (helper `wrapClientConn`, `Client()` через него), `common/tls/reality_client.go` (`prepareClientHello` — обёртка перед `utls.UClient`; `ClientHandshake` = prepare + handshake), `common/tls/reality_client_lx_test.go` (стражи, общий файл с 089), реестр HOTFIXES, `SPECS/README.md`, [060 §3](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) (примечание), `docs-lx/lx-config.{ru.,}md` §8, `docs-lx/lx-changelog.md`.
+**Touches:** `common/tls/utls_client.go` (helper `wrapClientConn`, `Client()` через него), `common/tls/reality_client.go` (`prepareClientHello` — обёртка перед `utls.UClient`; `ClientHandshake` = prepare + handshake), `common/tls/reality_client_lx_test.go` (стражи, общий файл с 089), реестр HOTFIXES, `SPECS/README.md`, [060 §3](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) (примечание), `docs-lx/lx-config.{ru.,}md` §9, `docs-lx/lx-changelog.md`.
 
 ## Why
 

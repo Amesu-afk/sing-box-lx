@@ -41,6 +41,33 @@ timelines and the recommended mobile configuration live in
 
 > ⚠️ All keys/UUIDs below are **placeholders**. Never commit real private keys / pre-shared keys to a repository.
 
+## Table of contents
+
+- [0. Every field at a glance (exhaustive example)](#0-every-field-at-a-glance-exhaustive-example)
+- [1. XHTTP transport](#1-xhttp-transport)
+  - [Example — VLESS + XHTTP + Reality](#example--vless--xhttp--reality)
+- [2. AmneziaWG 2.0/3.x (AWG2, AWG3)](#2-amneziawg-203x-awg2-awg3)
+  - [Example — AmneziaWG 3.1 endpoint (Amnezia `amnezia-awg2` export)](#example--amneziawg-31-endpoint-amnezia-amnezia-awg2-export)
+  - [Example — AmneziaWG 2.0 endpoint](#example--amneziawg-20-endpoint)
+- [3. round_robin load balancing (SPEC 019)](#3-round_robin-load-balancing-spec-019)
+  - [Fields (on a `urltest` outbound)](#fields-on-a-urltest-outbound)
+  - [Slot-hash binding](#slot-hash-binding)
+  - [Example — urltest with round_robin](#example--urltest-with-round_robin)
+- [4. MASQUE outbound — Cloudflare WARP (SPEC 021)](#4-masque-outbound--cloudflare-warp-spec-021)
+  - [Example — WARP (defaults: `vhttp: auto`)](#example--warp-defaults-vhttp-auto)
+- [5. DNS server group (SPEC 033/035)](#5-dns-server-group-spec-033035)
+  - [Fields (a `dns.servers[]` entry)](#fields-a-dnsservers-entry)
+  - [Example — resilient public DNS as the default](#example--resilient-public-dns-as-the-default)
+- [6. VLESS `encryption` — post-quantum layer (SPEC 032)](#6-vless-encryption--post-quantum-layer-spec-032)
+  - [Field (on a `vless` outbound)](#field-on-a-vless-outbound)
+  - [Example](#example)
+- [7. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)](#7-reality-key_share--hybrid-or-classical-clienthello-spec-089)
+- [8. Observability (CommandClient extensions)](#8-observability-commandclient-extensions)
+- [9. Automatic ClientHello fragmentation under `detour` (SPEC 060)](#9-automatic-clienthello-fragmentation-under-detour-spec-060)
+- [10. `chain` outbound — a virtual multi-hop path of groups and nodes (SPEC 073)](#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)
+- [11. Protocol sniffers for LAN traffic (SPEC 078 / 080)](#11-protocol-sniffers-for-lan-traffic-spec-078--080)
+- [12. Validate & build](#12-validate--build)
+
 ---
 
 ## 0. Every field at a glance (exhaustive example)
@@ -75,7 +102,7 @@ you need and read its section below. Each comment shows the **default** and the 
         "utls": { "enabled": true, "fingerprint": "chrome" },
         "reality": {
           "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd",
-          "key_share": ""                       // default: "" (as the fingerprint carries it). §12:
+          "key_share": ""                       // default: "" (as the fingerprint carries it). §7:
                                                 //   "classical" = strip X25519MLKEM768 (Xray < v26.9.8 only)
                                                 //   "hybrid"    = require it (error on edge/ios/…)
         }
@@ -364,7 +391,7 @@ scale to large node lists (only the pool is health-checked, not every node). Sel
 happens once per connection; a UDP/QUIC session stays on its node. With `mode` omitted (or
 `least_test`) the outbound behaves exactly like upstream and `balancer` must not be set.
 
-The `GetPool` CommandClient method (see [§7](#7-observability-commandclient-extensions)) is
+The `GetPool` CommandClient method (see [§8](#8-observability-commandclient-extensions)) is
 behind `with_lx_command`; the `mode`/`balancer` config fields themselves are always available.
 
 ### Fields (on a `urltest` outbound)
@@ -491,7 +518,7 @@ QUIC (SPEC 074). On the `standard` profile there is no h2 leg, so `auto` quietly
 For `h2` (CONNECT-IP over TCP:443), change one field: `"vhttp": "h2"`. The `h2` path runs its
 TLS through the shared `common/tls` layer, so it gets ClientHello fragmentation like any other
 TLS outbound — including the automatic one under `detour`
-([§8](#8-automatic-clienthello-fragmentation-under-detour-spec-060)). `h3` is untouched by that:
+([§9](#9-automatic-clienthello-fragmentation-under-detour-spec-060)). `h3` is untouched by that:
 QUIC does not carry TLS over TCP at all.
 
 > A top-level `dns` block is required — the userspace stack works at L3 and does not resolve
@@ -571,7 +598,7 @@ nowhere.
 answered (cache hits and total failures keep the group tag), the probe
 trace (group path inside-out, attempts with outcome
 `answered`/`timeout`/`network_error`/`servfail` and rtt), and the `fanned`
-/ `survival` flags. `GetDNSGroups` (§7, `with_lx_command`) returns the live
+/ `survival` flags. `GetDNSGroups` (§8, `with_lx_command`) returns the live
 records: per member — clean, live errors (count + age of newest), live
 wins, last rtt, current flag.
 
@@ -654,7 +681,34 @@ mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>[.<padding>…].<key>[.<key
 > `encryption` field beside `uuid`; a config builder that drops it leaves the
 > core with nothing to act on.
 
-## 7. Observability (CommandClient extensions)
+---
+
+## 7. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)
+
+A string on `tls.reality`, per node:
+
+```json
+"reality": { "enabled": true, "public_key": "…", "short_id": "0123abcd", "key_share": "classical" }
+```
+
+| Value | ClientHello | Works against |
+|---|---|---|
+| `""` (unset) | Whatever the fingerprint carries: `chrome` / `firefox` / `safari` send the `X25519MLKEM768` hybrid share, `edge` / `ios` / `android` / `360` / `qq` send X25519 only. Unchanged behaviour. | as before |
+| `"classical"` | `X25519MLKEM768` removed from `key_share` and `supported_groups` — the pre-SPEC-083 (upstream) hello, ~1.2 KB shorter (`chrome`: 594 B instead of 1720 B, one TCP segment instead of two). | **Xray < v26.9.8 only** — newer servers reject a hello without the hybrid share, silently (`reality verification failed`). |
+| `"hybrid"` | Requires the hybrid share. On a fingerprint that has none the handshake fails at once with `reality key_share "hybrid": fingerprint Edge 85 carries no X25519MLKEM768 key share` — instead of the server's silent rejection, which looks exactly like a wrong key. On `chrome` / `firefox` / `safari` it changes nothing. | as `""` |
+
+Any other value is a config error at load time (a typo must not silently become the default).
+
+Why it exists: some networks drop the two-segment hybrid first flight while the one-segment
+classical one passes (LxBox #142; Xray's own client hits the same wall, XTLS#6256). Newer Xray
+servers require the hybrid share. The core cannot pick for you between "the server rejects it" and
+"the network loses it", so the choice is per node. `classical` reduces post-quantum protection
+and only fits older servers; for a new server on such a network the remaining levers are
+`record_fragment` (§9) and a `detour`.
+
+---
+
+## 8. Observability (CommandClient extensions)
 
 These are **client-API additions, not config** — extra methods on libbox's `CommandClient`
 (the native gRPC management channel), all gated behind `with_lx_command` and consumed by
@@ -684,7 +738,7 @@ The added `CommandClient` methods:
   first-class state), the CNAME chain / answers (when `includeAnswers`), process attribution,
   and `dnsServer` / `dnsServerType` / `outbound` (an empty `outbound` means direct/system —
   a valid state, not a bug).
-- **`GetChains()`** — the state of every `chain` outbound (SPEC 073; see [§9](#9-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)):
+- **`GetChains()`** — the state of every `chain` outbound (SPEC 073; see [§10](#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)):
   per position the resolved node and, for positions ≥ 1, the link instance (`starting|active|idle`,
   live connections, effective MTU and why, what `strip` removed, `rewrite` applied, last error),
   plus dial/error/link counters.
@@ -701,7 +755,7 @@ make -f Makefile.lx lx-build   # includes with_lx_command (and with_xhttp/with_a
 
 ---
 
-## 8. Automatic ClientHello fragmentation under `detour` (SPEC 060)
+## 9. Automatic ClientHello fragmentation under `detour` (SPEC 060)
 
 **Not a config key — a changed default.** When a TLS-over-TCP outbound (VLESS, trojan, vmess,
 anytls, shadowtls, http, masque `h2`, …) dials **through `detour`**, `record_fragment` now
@@ -727,7 +781,7 @@ Rules:
   default were accepted by the config and silently ignored there. The hybrid ClientHello after
   [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) is 1.5–1.9 KB (two TCP segments),
   so this matters more than it used to. Whether fragmentation helps on a network that drops that
-  first flight is a property of that network — see §12 for the other lever.
+  first flight is a property of that network — see §7 for the other lever.
 
 > ⚠️ **Known limit:** an explicit `"record_fragment": false` is indistinguishable from "unset",
 > so auto still turns it on under `detour`. To dial through a detour with a different mode, set
@@ -735,7 +789,7 @@ Rules:
 
 ---
 
-## 9. `chain` outbound — a virtual multi-hop path of groups and nodes (SPEC 073)
+## 10. `chain` outbound — a virtual multi-hop path of groups and nodes (SPEC 073)
 
 Build tag `with_lx_chain` (in the desktop `LX_TAGS` and the AAR). Without it
 `"type": "chain"` is rejected at load time.
@@ -801,7 +855,7 @@ endpoint.
   (vless/trojan/ss over TCP, mux) and datagram proxies the MTU is left as configured.
 - **`strip` catalog** (one-sided, the server never sees them): `tls.fragment` (packet-level
   ClientHello fragmentation + `fragment_fallback_delay`; **`record_fragment` is not
-  touched** — under `detour` it switches on automatically as a path fix, see §8),
+  touched** — under `detour` it switches on automatically as a path fix, see §9),
   `multiplex.padding`, `xhttp.padding` (minimal range, obfs mode off). `tls.utls` is
   available via `"tls.utls": true` (start error on a node that uses `reality`). Server
   contracts — `flow`, `obfs`, `shadowtls`, `plugin`, `udp_over_tcp`, `ech`, transport
@@ -815,7 +869,7 @@ endpoint.
 > position 0 and the DPI at the border (`["relay", "foreign-node"]`) the fragmentation is
 > needed at position 1 — set `"strip": {"tls.fragment": false}`.
 
-Observability: a connection's `detourList` (§7) shows the resolved path; `GetChains`
+Observability: a connection's `detourList` (§8) shows the resolved path; `GetChains`
 (CommandClient) / Clash API `/proxies/<tag>` → `chain` give the per-position state (picked
 node, link state `starting|active|idle`, live connections, effective MTU and why, what was
 stripped/rewritten, last error) and counters. Dial errors name the position and the hop
@@ -827,11 +881,11 @@ named; nested `chain` is allowed only at position 0.
 
 ---
 
-## 10. Protocol sniffers for LAN traffic (SPEC 078 / 080)
+## 11. Protocol sniffers for LAN traffic (SPEC 078 / 080)
 
 New protocol names for the `sniffer` list of a `sniff` action and the `protocol` rule matcher: `wireguard`, `openvpn`, `ike`, `tailscale`, `sip` (the last one also sets `domain` from the Request-URI). They recognise VPN tunnels and calls from other devices behind a router by the shape of the first packet, and sit before upstream's uTP sniffer, which used to label plain WireGuard as `bittorrent`. Order, limits (only the first packet of a flow counts — junk and decoys are not seen through) and a router example — **[lx-sniff.md](lx-sniff.md)**.
 
-## 11. Validate & build
+## 12. Validate & build
 
 ```sh
 git clone --recurse-submodules <repo>           # with_awg needs the submodule
@@ -845,28 +899,3 @@ make lib_install && make lib_android             # → libbox.aar (SDK23) + libb
 ```
 
 The CI (`.github/workflows/lx-ci.yml`) builds the feature matrix (`baseline` / `xhttp` / `awg` / `full`), a cross-platform matrix, **and the Android `libbox.aar`** (gomobile), running `check` on the matching sample configs. Pushing a `v*-lx.*` tag runs `lx-release.yml`, which publishes the desktop binaries **and** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` as GitHub Release assets. A **Windows 7 (32-bit)** legacy binary (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) is also published — built with a Win7-patched Go and **without `with_naive_outbound`** (`cronet-go` has no windows/386 build; every other feature is unchanged).
-
----
-
-## 12. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)
-
-A string on `tls.reality`, per node:
-
-```json
-"reality": { "enabled": true, "public_key": "…", "short_id": "0123abcd", "key_share": "classical" }
-```
-
-| Value | ClientHello | Works against |
-|---|---|---|
-| `""` (unset) | Whatever the fingerprint carries: `chrome` / `firefox` / `safari` send the `X25519MLKEM768` hybrid share, `edge` / `ios` / `android` / `360` / `qq` send X25519 only. Unchanged behaviour. | as before |
-| `"classical"` | `X25519MLKEM768` removed from `key_share` and `supported_groups` — the pre-SPEC-083 (upstream) hello, ~1.2 KB shorter (`chrome`: 594 B instead of 1720 B, one TCP segment instead of two). | **Xray < v26.9.8 only** — newer servers reject a hello without the hybrid share, silently (`reality verification failed`). |
-| `"hybrid"` | Requires the hybrid share. On a fingerprint that has none the handshake fails at once with `reality key_share "hybrid": fingerprint Edge 85 carries no X25519MLKEM768 key share` — instead of the server's silent rejection, which looks exactly like a wrong key. On `chrome` / `firefox` / `safari` it changes nothing. | as `""` |
-
-Any other value is a config error at load time (a typo must not silently become the default).
-
-Why it exists: some networks drop the two-segment hybrid first flight while the one-segment
-classical one passes (LxBox #142; Xray's own client hits the same wall, XTLS#6256). Newer Xray
-servers require the hybrid share. The core cannot pick for you between "the server rejects it" and
-"the network loses it", so the choice is per node. `classical` reduces post-quantum protection
-and only fits older servers; for a new server on such a network the remaining levers are
-`record_fragment` (§8) and a `detour`.

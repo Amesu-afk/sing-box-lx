@@ -18,6 +18,30 @@ For connecting to the daemon (mTLS, client certificates, admin REST) see
 > same `StartedService` the Android line speaks, which is why anything added for
 > mobile observability reaches a server for free, and vice versa.
 
+## Table of contents
+
+- [One contract, two transports](#one-contract-two-transports)
+- [Scope](#scope)
+- [Build-tag gating](#build-tag-gating)
+- [Rules that apply to every stream](#rules-that-apply-to-every-stream)
+- [Connection plane](#connection-plane)
+  - [`SubscribeConnections(SubscribeConnectionsRequest) → stream ConnectionEvents`](#subscribeconnectionssubscribeconnectionsrequest--stream-connectionevents)
+  - [Which fields are populated](#which-fields-are-populated)
+  - [`Connection`](#connection)
+  - [Closing connections](#closing-connections)
+- [DNS plane](#dns-plane)
+  - [`SubscribeDNSQueries(SubscribeDNSQueriesRequest) → stream DnsQueryEvent`](#subscribednsqueriessubscribednsqueriesrequest--stream-dnsqueryevent)
+- [Supporting RPCs](#supporting-rpcs)
+  - [Message field reference](#message-field-reference)
+- [observability-api-lx](#observability-api-lx)
+  - [Added](#added)
+  - [Extended](#extended)
+  - [Changed](#changed)
+- [Recipe: profiling a remote machine](#recipe-profiling-a-remote-machine)
+- [Sources](#sources)
+
+---
+
 ## One contract, two transports
 
 This observability surface is **not lxd-specific**. The exact same set of RPCs and

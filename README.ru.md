@@ -242,7 +242,7 @@ endpoint или группа любой вложенности. Группы н�
 Туннельным звеньям (WireGuard, MASQUE) MTU понижается автоматически на точные накладные
 IP-туннелей под ними. Наблюдаемость: путь в `detourList`, RPC `GetChains` / поле `chain` в
 Clash API, задержка по слоям — URLTest по внутренним тегам хопов `<tag>#0`, `<tag>#1`, ….
-См. [docs-lx/lx-config.ru.md §9](docs-lx/lx-config.ru.md) и
+См. [docs-lx/lx-config.ru.md §10](docs-lx/lx-config.ru.md) и
 [фичу CHAIN](SPECS/FEATURES/015-CHAIN/FEATURE.md).
 
 ## Демон `lxd`

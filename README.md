@@ -243,7 +243,7 @@ connections. `direct` at position ≥ 1 is transparent (a runtime off-switch for
 Tunnel links (WireGuard, MASQUE) get their MTU lowered automatically by the exact overhead
 of IP tunnels below them. Observability: path in `detourList`, `GetChains` RPC / Clash API
 `chain` field, per-layer latency via URLTest on the internal hop tags `<tag>#0`, `<tag>#1`, ….
-See [docs-lx/lx-config.md §9](docs-lx/lx-config.md) and the
+See [docs-lx/lx-config.md §10](docs-lx/lx-config.md) and the
 [CHAIN feature](SPECS/FEATURES/015-CHAIN/FEATURE.md).
 
 ## The `lxd` daemon

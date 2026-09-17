@@ -5,6 +5,28 @@
 Operator's guide: what `sing-box lxd` is, why it exists, how it is installed on
 macOS, and the setup approaches on Linux.
 
+## Table of contents
+
+- [1. What it is and why](#1-what-it-is-and-why)
+- [2. Quick start (dev, no installation)](#2-quick-start-dev-no-installation)
+- [3. daemon.json — the daemon's settings](#3-daemonjson--the-daemons-settings)
+  - [3.1. listen: one address or several](#31-listen-one-address-or-several)
+- [4. Command-line keys](#4-command-line-keys)
+- [5. Security: who authenticates with what](#5-security-who-authenticates-with-what)
+- [6. Logs](#6-logs)
+- [7. macOS — automatic installation](#7-macos--automatic-installation)
+- [8. Linux — setup approaches](#8-linux--setup-approaches)
+  - [8.1. Common part (any init)](#81-common-part-any-init)
+  - [8.2. systemd (a regular server/desktop)](#82-systemd-a-regular-serverdesktop)
+  - [8.3. OpenWrt / procd (routers)](#83-openwrt--procd-routers)
+  - [8.4. What Linux does not have](#84-what-linux-does-not-have)
+- [9. Pairing a client (the same on every OS)](#9-pairing-a-client-the-same-on-every-os)
+  - [9.1 Enrollment on the wire — building your own client](#91-enrollment-on-the-wire--building-your-own-client)
+- [10. Admin REST (reference)](#10-admin-rest-reference)
+- [10a. Naming the devices on the LAN](#10a-naming-the-devices-on-the-lan)
+- [10b. Host telemetry](#10b-host-telemetry)
+- [11. Diagnosing a misbehaving daemon](#11-diagnosing-a-misbehaving-daemon)
+
 ---
 
 ## 1. What it is and why

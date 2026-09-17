@@ -9,7 +9,7 @@
 | Ветка | `lx` |
 | Связанные | [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (что и почему было снято), [086](../086-UTLS_FORK_FIREFOX148/SPEC.md)/[087](../087-UTLS_SAFARI_26_3/SPEC.md) (какие отпечатки несут гибрид), [088](../088-REALITY_FRAGMENT_BYPASS/SPEC.md) (вторая половина ответа — фрагментация); LxBox [#142](https://github.com/Leadaxe/LxBox/issues/142); Xray [#6256](https://github.com/XTLS/Xray-core/issues/6256) (тот же симптом у Xray-клиента, закрыт RPRX «not planned» без комментариев) |
 
-**Touches:** `option/tls.go` (`OutboundRealityOptions.KeyShare`), `constant/tls.go` (`RealityKeyShare*`), `common/tls/reality_client.go` (валидация значения в `newRealityClient`, применение в `prepareClientHello`, `Clone()`), `common/tls/reality_client_lx_test.go` (стражи, общий файл с 088), [083 §6](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#6-условие-снятия) (условие «grep даёт ноль» заменено), реестр HOTFIXES, `SPECS/README.md`, `README.{ru.,}md`, `docs-lx/lx-config.{ru.,}md` (§0, §12), `docs-lx/lx-changelog.md`.
+**Touches:** `option/tls.go` (`OutboundRealityOptions.KeyShare`), `constant/tls.go` (`RealityKeyShare*`), `common/tls/reality_client.go` (валидация значения в `newRealityClient`, применение в `prepareClientHello`, `Clone()`), `common/tls/reality_client_lx_test.go` (стражи, общий файл с 088), [083 §6](../083-REALITY_MLKEM_KEYSHARE/SPEC.md#6-условие-снятия) (условие «grep даёт ноль» заменено), реестр HOTFIXES, `SPECS/README.md`, `README.{ru.,}md`, `docs-lx/lx-config.{ru.,}md` (§0, §7), `docs-lx/lx-changelog.md`.
 
 ## Why
 
