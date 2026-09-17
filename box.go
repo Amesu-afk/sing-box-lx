@@ -291,7 +291,10 @@ func New(options Options) (*Box, error) {
 			transportOptions.Options,
 		)
 		if err != nil {
-			return nil, E.Cause(err, "initialize DNS server[", i, "]")
+			// lx: SPEC 092 — the index alone does not identify the element for a
+			// user with a hundred tagged nodes. The tail repeats the logger name
+			// (<type>[<tag>]); the upstream prefix stays byte-for-byte.
+			return nil, E.Cause(err, "initialize DNS server[", i, "] ", transportOptions.Type, "[", tag, "]")
 		}
 	}
 	err = dnsRouter.Initialize(dnsOptions.Rules)
@@ -321,7 +324,8 @@ func New(options Options) (*Box, error) {
 			endpointOptions.Options,
 		)
 		if err != nil {
-			return nil, E.Cause(err, "initialize endpoint[", i, "]")
+			// lx: SPEC 092
+			return nil, E.Cause(err, "initialize endpoint[", i, "] ", endpointOptions.Type, "[", tag, "]")
 		}
 	}
 	for i, inboundOptions := range options.Inbounds {
@@ -340,7 +344,8 @@ func New(options Options) (*Box, error) {
 			inboundOptions.Options,
 		)
 		if err != nil {
-			return nil, E.Cause(err, "initialize inbound[", i, "]")
+			// lx: SPEC 092
+			return nil, E.Cause(err, "initialize inbound[", i, "] ", inboundOptions.Type, "[", tag, "]")
 		}
 	}
 	for i, serviceOptions := range options.Services {
@@ -358,7 +363,8 @@ func New(options Options) (*Box, error) {
 			serviceOptions.Options,
 		)
 		if err != nil {
-			return nil, E.Cause(err, "initialize service[", i, "]")
+			// lx: SPEC 092
+			return nil, E.Cause(err, "initialize service[", i, "] ", serviceOptions.Type, "[", tag, "]")
 		}
 	}
 	for i, outboundOptions := range options.Outbounds {
@@ -384,7 +390,8 @@ func New(options Options) (*Box, error) {
 			outboundOptions.Options,
 		)
 		if err != nil {
-			return nil, E.Cause(err, "initialize outbound[", i, "]")
+			// lx: SPEC 092
+			return nil, E.Cause(err, "initialize outbound[", i, "] ", outboundOptions.Type, "[", tag, "]")
 		}
 	}
 	for i, certificateProviderOptions := range options.CertificateProviders {
@@ -402,7 +409,8 @@ func New(options Options) (*Box, error) {
 			certificateProviderOptions.Options,
 		)
 		if err != nil {
-			return nil, E.Cause(err, "initialize certificate provider[", i, "]")
+			// lx: SPEC 092
+			return nil, E.Cause(err, "initialize certificate provider[", i, "] ", certificateProviderOptions.Type, "[", tag, "]")
 		}
 	}
 	outboundManager.Initialize(func() (adapter.Outbound, error) {
