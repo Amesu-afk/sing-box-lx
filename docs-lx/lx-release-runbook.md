@@ -19,8 +19,8 @@ Repository context:
 - Our working branch is **`lx`** (also the GitHub default); upstream integration is a manual
   **`git merge upstream/stable`** (NOT rebase; see `wg-1.14-migration` in memory and
   [BUILD_CI_CD](../SPECS/FEATURES/001-BUILD_CI_CD/FEATURE.md)).
-  `lx-rebase.yml` describes the old auto-rebase onto stable upstream tags; it never force-pushes
-  `lx` — it only opens a PR/issue.
+  `lx-rebase.yml` from [BUILD_CI_CD](../SPECS/FEATURES/001-BUILD_CI_CD/FEATURE.md) describes the
+  old auto-rebase onto stable upstream tags; it never force-pushes `lx` — it only opens a PR/issue.
 - **`lx-1.14` is the historical 1.14 migration branch.** The migration is finished, the branch was
   merged into `lx` (both pointed at the same commit at `v1.14.0-lx.16`) and is kept in origin only
   as an anchor. New work and releases happen on `lx`.

@@ -112,7 +112,7 @@ make -f Makefile.lx lx-check        # validate the sample configs in lx-test/con
 
 ## Configuration — a quick tour
 
-One snippet per feature. Field tables, defaults and every option — **[docs-lx/lx-config.md](docs-lx/lx-config.md)**; wire-level detail for XHTTP, AmneziaWG and MASQUE — **[docs-lx/lx-protocols-transports.md](docs-lx/lx-protocols-transports.md)**.
+One snippet per feature. Field tables, defaults and every option — **[docs-lx/lx-config.md](docs-lx/lx-config.md)** ([RU](docs-lx/lx-config.ru.md)); wire-level detail for XHTTP, AmneziaWG and MASQUE — **[docs-lx/lx-protocols-transports.md](docs-lx/lx-protocols-transports.md)** ([RU](docs-lx/lx-protocols-transports.ru.md)).
 
 ### XHTTP transport
 
@@ -133,7 +133,7 @@ One snippet per feature. Field tables, defaults and every option — **[docs-lx/
 }
 ```
 
-`id`/`ip`/`ib` and an explicit `i1` are mutually exclusive. `ip=quic` sends two out-of-order fragmented QUIC Initials and is the profile proven against a live DPI; `dns`/`stun`/`sip` are correct requests kept for providers whose DPI only checks well-formedness. Reference — [lx-protocols-transports.md §2](docs-lx/lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3) · [masquerade examples](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
+`id`/`ip`/`ib` and an explicit `i1` are mutually exclusive. `ip=quic` sends two out-of-order fragmented QUIC Initials and is the profile proven against a live DPI; `dns`/`stun`/`sip` are correct requests kept for providers whose DPI only checks well-formedness. Reference — [lx-protocols-transports.md §2](docs-lx/lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3) ([RU](docs-lx/lx-protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)) · [masquerade examples](SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md).
 
 ### MASQUE outbound (Cloudflare WARP)
 
@@ -149,7 +149,7 @@ One snippet per feature. Field tables, defaults and every option — **[docs-lx/
 }
 ```
 
-Key material comes from the WARP device registration done by the client. Not to be confused with the AWG *masquerade* sugar above — same word, different feature. Reference — [lx-protocols-transports.md §3](docs-lx/lx-protocols-transports.md#3-masque-outbound-connect-ip--warp).
+Key material comes from the WARP device registration done by the client. Not to be confused with the AWG *masquerade* sugar above — same word, different feature. Reference — [lx-protocols-transports.md §3](docs-lx/lx-protocols-transports.md#3-masque-outbound-connect-ip--warp) ([RU](docs-lx/lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)).
 
 ### REALITY: fingerprint and `key_share`
 
@@ -164,7 +164,7 @@ Key material comes from the WARP device registration done by the client. Not to 
 }
 ```
 
-`classical` exists for networks that drop the two-segment hybrid ClientHello; on a newer server the remaining levers are `record_fragment` (now effective on REALITY) and a `detour`. Reference — [lx-config.md §7](docs-lx/lx-config.md#7-reality-key_share--hybrid-or-classical-clienthello-spec-089).
+`classical` exists for networks that drop the two-segment hybrid ClientHello; on a newer server the remaining levers are `record_fragment` (now effective on REALITY) and a `detour`. Reference — [lx-config.md §7](docs-lx/lx-config.md#7-reality-key_share--hybrid-or-classical-clienthello-spec-089) ([RU](docs-lx/lx-config.ru.md#7-reality-key_share--гибридный-или-классический-clienthello-spec-089)).
 
 ### VLESS `encryption`
 
@@ -172,7 +172,7 @@ Key material comes from the WARP device registration done by the client. Not to 
 { "type": "vless", "uuid": "…", "encryption": "mlkem768x25519plus.native.0rtt.<ML-KEM-768 key>" }   // absent or "none" = off
 ```
 
-Client half only; `decryption` is server-side and deliberately not ported. Reference — [lx-config.md §6](docs-lx/lx-config.md#6-vless-encryption--post-quantum-layer-spec-032).
+Client half only; `decryption` is server-side and deliberately not ported. Reference — [lx-config.md §6](docs-lx/lx-config.md#6-vless-encryption--post-quantum-layer-spec-032) ([RU](docs-lx/lx-config.ru.md#6-vless-encryption--пост-квантовый-слой-spec-032)).
 
 ### DNS server group
 
@@ -180,7 +180,7 @@ Client half only; `decryption` is server-side and deliberately not ported. Refer
 { "type": "group", "tag": "dns-public", "mode": "stable", "servers": ["dns-cf", "dns-google", "dns-quad9"] }   // stable | fastest | parallel
 ```
 
-Reference — [lx-config.md §5](docs-lx/lx-config.md#5-dns-server-group-spec-033035).
+Reference — [lx-config.md §5](docs-lx/lx-config.md#5-dns-server-group-spec-033035) ([RU](docs-lx/lx-config.ru.md#5-группа-dns-серверов-spec-033035)).
 
 ### `chain` outbound
 
@@ -194,11 +194,11 @@ Reference — [lx-config.md §5](docs-lx/lx-config.md#5-dns-server-group-spec-03
 }
 ```
 
-Tunnel links get their MTU lowered automatically; the path shows in `detourList` and `GetChains`, per-layer latency via URLTest on the hop tags `<tag>#0`, `<tag>#1`, …. Reference — [lx-config.md §10](docs-lx/lx-config.md#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073).
+Tunnel links get their MTU lowered automatically; the path shows in `detourList` and `GetChains`, per-layer latency via URLTest on the hop tags `<tag>#0`, `<tag>#1`, …. Reference — [lx-config.md §10](docs-lx/lx-config.md#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073) ([RU](docs-lx/lx-config.ru.md#10-outbound-chain--виртуальная-цепочка-хопов-из-групп-и-узлов-spec-073)).
 
 ### Balancing, energy, sniffers
 
-No new types — a few fields on existing ones: `urltest` `mode: round_robin` + `balancer{…}` and `passive_check` ([lx-config.md §3](docs-lx/lx-config.md#3-round_robin-load-balancing-spec-019)); `route.lx_idle_*` sleep levels ([lx-energy.md](docs-lx/lx-energy.md)); protocol names in the `sniff` action and `protocol` rules ([lx-sniff.md](docs-lx/lx-sniff.md)).
+No new types — a few fields on existing ones: `urltest` `mode: round_robin` + `balancer{…}` and `passive_check` ([lx-config.md §3](docs-lx/lx-config.md#3-round_robin-load-balancing-spec-019), [RU](docs-lx/lx-config.ru.md#3-балансировка-нагрузки-round_robin-spec-019)); `route.lx_idle_*` sleep levels ([lx-energy.md](docs-lx/lx-energy.md), [RU](docs-lx/lx-energy.ru.md)); protocol names in the `sniff` action and `protocol` rules ([lx-sniff.md](docs-lx/lx-sniff.md), [RU](docs-lx/lx-sniff.ru.md)).
 
 ---
 
@@ -216,7 +216,7 @@ sing-box lxd --state-dir ./lxd-state -c config.json
 - **Observability without a second port** — memory, stats, logs, pprof, host telemetry (CPU per core, memory, thermal, disks, interfaces) and an IP → device directory.
 - **Service install** on macOS; on Linux (systemd, OpenWrt/procd) the daemon prints the recipe instead of touching the disk.
 
-📖 Operator's guide — **[docs-lx/lxd-daemon.md](docs-lx/lxd-daemon.md)**; the client-facing observability contract — [docs-lx/lxd-grpc-api.md](docs-lx/lxd-grpc-api.md); OpenWrt walkthrough (VPN on a dedicated SSID) — [docs-lx/openwrt-vpn-ssid.md](docs-lx/openwrt-vpn-ssid.md) with installer scripts in [`scripts-lx/openwrt/`](scripts-lx/openwrt/README.md).
+📖 Operator's guide — **[docs-lx/lxd-daemon.md](docs-lx/lxd-daemon.md)** ([RU](docs-lx/lxd-daemon.ru.md)); the client-facing observability contract — [docs-lx/lxd-grpc-api.md](docs-lx/lxd-grpc-api.md) ([RU](docs-lx/lxd-grpc-api.ru.md)); OpenWrt walkthrough (VPN on a dedicated SSID) — [docs-lx/openwrt-vpn-ssid.md](docs-lx/openwrt-vpn-ssid.md) ([RU](docs-lx/openwrt-vpn-ssid.ru.md)) with installer scripts in [`scripts-lx/openwrt/`](scripts-lx/openwrt/README.md).
 
 ---
 
@@ -231,7 +231,7 @@ upstream/stable  ──merge──►  lx  =  upstream  +  // lx seams  +  lx-ow
 - **Manual merge of `upstream/stable`, never a rebase.** `lx` is both the working and the release branch and is never force-pushed. Drift is measured only by merge-base against `upstream/stable`; the GitHub "N commits behind testing" banner is not drift.
 - **Fork submodules are part of the delta**: [wireguard-go-awg2-lx](https://github.com/Leadaxe/wireguard-go-awg2-lx) (AmneziaWG runtime), [sing-tun-lx](https://github.com/Leadaxe/sing-tun-lx) (accept-loop self-heal), [gvisor-lx](https://github.com/Leadaxe/gvisor-lx) (handshake nil-guard), [utls-lx](https://github.com/Leadaxe/utls-lx) (Firefox 148 and Safari 26.3 presets). Each is its upstream plus a few commits; submodule drift is closed **before** the core merge.
 - **Hotfixes for upstream bugs carry an expiry**: every patch in the [HOTFIXES registry](SPECS/FEATURES/004-HOTFIXES/FEATURE.md) names the condition under which it is removed.
-- **Releases**: tags `vX.Y.Z-lx.N` are stable, `-rc.N` / `-alpha.N` / `-beta.N` are pre-releases; the procedure is the [release runbook](docs-lx/lx-release-runbook.md); the engineering log is [lx-changelog.md](docs-lx/lx-changelog.md), user-facing notes are in [`docs-lx/releases/`](docs-lx/releases/).
+- **Releases**: tags `vX.Y.Z-lx.N` are stable, `-rc.N` / `-alpha.N` / `-beta.N` are pre-releases; the procedure is the [release runbook](docs-lx/lx-release-runbook.md) ([RU](docs-lx/lx-release-runbook.ru.md)); the engineering log is [lx-changelog.md](docs-lx/lx-changelog.md), user-facing notes are in [`docs-lx/releases/`](docs-lx/releases/).
 - **Spec Kit**: [`SPECS/FEATURES`](SPECS/FEATURES/README.md) describes each feature's current state as a black box; [`SPECS/TASKS`](SPECS/README.md) holds one folder per unit of work (`SPEC → PLAN → TASKS → report`), with a roadmap and status codes; [CONSTITUTION](SPECS/CONSTITUTION.md) holds the rules.
 - **Remotes**: `origin` = `Leadaxe/sing-box-lx` (default branch `lx`), `upstream` = `SagerNet/sing-box`.
 
@@ -288,7 +288,7 @@ Everything downstream is either a new file or a seam marked `// lx`; `grep -rn "
 | OpenWrt walkthrough | [docs-lx/openwrt-vpn-ssid.md](docs-lx/openwrt-vpn-ssid.md) ([RU](docs-lx/openwrt-vpn-ssid.ru.md)) |
 | Release runbook | [docs-lx/lx-release-runbook.md](docs-lx/lx-release-runbook.md) ([RU](docs-lx/lx-release-runbook.ru.md)) |
 | Changelog & release notes | [docs-lx/lx-changelog.md](docs-lx/lx-changelog.md) · [docs-lx/releases/](docs-lx/releases/) |
-| Reference cores | [docs-lx/lx-reference-cores.md](docs-lx/lx-reference-cores.md) — where to look for wire-protocol answers |
+| Reference cores | [docs-lx/lx-reference-cores.md](docs-lx/lx-reference-cores.md) ([RU](docs-lx/lx-reference-cores.ru.md)) — where to look for wire-protocol answers |
 | Spec Kit | [SPECS/FEATURES](SPECS/FEATURES/README.md) · [SPECS/TASKS](SPECS/README.md) · [CONSTITUTION](SPECS/CONSTITUTION.md) |
 | Protocol origins | [XTLS/Xray-core](https://github.com/XTLS/Xray-core) (XHTTP, REALITY, VLESS encryption) · [amnezia-vpn/amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go) · [Cloudflare WARP / MASQUE](https://developers.cloudflare.com/warp-client/) |
 
