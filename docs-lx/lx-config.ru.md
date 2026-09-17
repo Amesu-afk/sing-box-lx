@@ -521,6 +521,15 @@ VLESS/Trojan в цепочке) **молча игнорирует QUIC** — о�
 профиле `standard` ноги h2 нет, поэтому дефолт там тихо означает h3 (явный `"vhttp": "auto"`
 на `standard` даёт предупреждение).
 
+> **Профиль `"standard"` требует `uri`** — у `cloudflare` есть дефолт
+> (`https://cloudflareaccess.com`), у `standard` его нет, поэтому без него outbound не поднимется
+> вовсе: `masque: uri is required for the standard profile — set it to the server's CONNECT-IP
+> request URI, e.g. https://<host>/.well-known/masque/ip/*/*/`. Значение уходит в запрос
+> Extended CONNECT как есть (ядро ничего в нём не подставляет), поэтому пишется тот шаблон,
+> который публикует сервер, — RFC 9484 описывает форму полного туннеля с `*` на местах
+> хоста и порта.
+
+
 Для `h2` (CONNECT-IP over TCP:443) меняется одно поле: `"vhttp": "h2"`. Путь `h2` гонит свой
 TLS через общий слой `common/tls`, поэтому получает фрагментацию ClientHello наравне с любым
 другим TLS-outbound — включая автоматическую под `detour`

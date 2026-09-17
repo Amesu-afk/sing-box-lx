@@ -897,7 +897,7 @@ device-проверено, что там работает.
 - `vhttp=h2` и `mtu > 16000` → `masque: mtu … too large for h2 (max 16000)`;
 - `vhttp=h2` и `profile=standard` →
   `masque: vhttp h2 is not implemented for the standard profile`;
-- `profile=standard` без `uri` → `masque: uri is required for the standard profile`;
+- `profile=standard` без `uri` → `masque: uri is required for the standard profile — set it to the server's CONNECT-IP request URI, e.g. https://<host>/.well-known/masque/ip/*/*/` (проверяется раньше `vhttp`, поэтому текст один для h2/h3/auto — SPEC 091);
 - `public_key` не ECDSA-ключ → `public_key is not an ECDSA key`.
 
 ## 3.10 Миграция со схемы до SPEC 062

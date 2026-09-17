@@ -515,6 +515,14 @@ measured in the field through a proxied hop where Cloudflare answered TCP:443 bu
 QUIC (SPEC 074). On the `standard` profile there is no h2 leg, so `auto` quietly means h3 there
 (an explicit `"vhttp": "auto"` on `standard` logs a warning).
 
+> **`profile: "standard"` requires `uri`** — the `cloudflare` profile has a default
+> (`https://cloudflareaccess.com`), `standard` has none, so without it the outbound does not come
+> up at all: `masque: uri is required for the standard profile — set it to the server's CONNECT-IP
+> request URI, e.g. https://<host>/.well-known/masque/ip/*/*/`. The value is sent verbatim as the
+> Extended CONNECT request URI (the core substitutes nothing in it), so write the template your
+> server publishes — RFC 9484 spells the full-tunnel form with `*` in the host/port positions.
+
+
 For `h2` (CONNECT-IP over TCP:443), change one field: `"vhttp": "h2"`. The `h2` path runs its
 TLS through the shared `common/tls` layer, so it gets ClientHello fragmentation like any other
 TLS outbound — including the automatic one under `detour`

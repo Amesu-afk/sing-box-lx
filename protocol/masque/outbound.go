@@ -174,6 +174,22 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, err
 	}
 
+	// lx: SPEC 091 — the `uri` check runs BEFORE resolveVHTTP. It used to run
+	// after, so a `standard` profile missing `uri` was reported as
+	// "vhttp h2 is not implemented for the standard profile" whenever `vhttp`
+	// was h2 — a true statement about the wrong field, which sent the user to
+	// fix `vhttp` only to hit the real cause afterwards. Legacy folding stays
+	// above it, because a deprecated flat field can be what fills `uri`.
+	uri := options.URI
+	if uri == "" {
+		uri = profile.DefaultURI
+	}
+	if uri == "" {
+		return nil, E.New("masque: uri is required for the standard profile" +
+			" — set it to the server's CONNECT-IP request URI," +
+			" e.g. https://<host>/.well-known/masque/ip/*/*/")
+	}
+
 	network, autoMode, err := resolveVHTTP(options.VHTTP, options.Profile, logger)
 	if err != nil {
 		return nil, err
@@ -209,14 +225,6 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if err != nil {
 			return nil, E.Cause(err, "parse public_key")
 		}
-	}
-
-	uri := options.URI
-	if uri == "" {
-		uri = profile.DefaultURI
-	}
-	if uri == "" {
-		return nil, E.New("masque: uri is required for the standard profile")
 	}
 
 	// lx: SPEC 062 — `tls.disable_sni` sends no SNI at all, which an empty

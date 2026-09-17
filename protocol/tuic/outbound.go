@@ -57,9 +57,15 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, E.New("udp_over_stream is conflict with udp_relay_mode")
 	}
 	switch options.UDPRelayMode {
-	case "native":
+	case "", "native":
 	case "quic":
 		tuicUDPStream = true
+	default:
+		// lx: SPEC 091 — upstream has no `default` here, so "qiuc", "Native" and
+		// any other typo silently meant `native`, while the neighbouring
+		// `congestion_control` rejects its own typos. Empty stays `native`, the
+		// documented default.
+		return nil, E.New("unknown udp_relay_mode: ", options.UDPRelayMode, " (expected native or quic)")
 	}
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {

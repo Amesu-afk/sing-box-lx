@@ -28,6 +28,52 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.6
+
+- 🧹 **`tuic.udp_relay_mode`: опечатка теперь ошибка конфигурации, а не тихий `native`**
+  ([SPEC 091](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) §1).
+  Было: в апстримном `switch` по `options.UDPRelayMode` нет ветки `default`, поэтому `"qiuc"`, `"Native"`,
+  `"udp"` и любое другое значение молча означали `native` — пользователь, написавший `quic` с опечаткой,
+  получал не тот режим UDP-релея и никакого сигнала об этом. Соседняя опция `congestion_control` при
+  опечатке даёт честную ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`), то есть
+  поведение расходилось внутри одного outbound'а; документация апстрима знает ровно два значения —
+  `native` и `quic`. Стало: `unknown udp_relay_mode: <value> (expected native or quic)` при загрузке
+  конфига. Правка в `protocol/tuic/outbound.go`, маркер `// lx: SPEC 091`. Границы не меняются: пустая
+  строка по-прежнему = `native` (документированный дефолт), а проверка конфликта `udp_over_stream` +
+  `udp_relay_mode` осталась **выше** новой ветки — конфликт двух заданных опций важнее опечатки в одной.
+  Стражи `TestLxTUICUnknownUDPRelayModeRejected`, `TestLxTUICKnownUDPRelayModesAccepted`,
+  `TestLxTUICUDPOverStreamConflictStillWinsOverTypo` в `protocol/tuic/udp_relay_mode_lx_test.go`, red-check
+  пройден — до фикса `"qiuc"` конструировал outbound без единой ошибки. Код апстримный, `switch` без
+  `default` там с появления tuic-outbound'а; реестр
+  [HOTFIXES](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/004-HOTFIXES/FEATURE.md)
+  дополнен: условие снятия — апстрим добавит `default` (или валидацию в `option`), файл апстримный,
+  маркер проверять на каждом мерже.
+- 🧹 **`masque`, `profile: "standard"` без `uri`: один текст ошибки вместо двух разных**
+  ([SPEC 091](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) §2).
+  Было: `resolveVHTTP` вызывался **раньше** проверки `uri`, поэтому забывший `uri` видел разное в
+  зависимости от `vhttp`: при `h2` — `masque: vhttp h2 is not implemented for the standard profile`
+  (честно, но не про то — уводило чинить `vhttp`, после чего человек упирался во вторую ошибку), при
+  `h3`/`auto`/не задано — `masque: uri is required for the standard profile`, которая не говорила, **что**
+  туда писать. Стало: проверка `uri` поднята сразу за `resolveLegacyOptions` (legacy-поля могут его
+  заполнять — поэтому не выше), и её текст самодостаточен:
+  `masque: uri is required for the standard profile — set it to the server's CONNECT-IP request URI, e.g. https://<host>/.well-known/masque/ip/*/*/`.
+  Значение уходит в запрос Extended CONNECT как есть — ядро в нём ничего не подставляет, поэтому в тексте
+  форма полного туннеля RFC 9484 со звёздочками, а не выдуманные плейсхолдеры. Ошибка про h2 на `standard`
+  осталась прежней, но теперь до неё доходят только конфиги, у которых `uri` есть. Профиль `cloudflare`
+  (`uri` по умолчанию из профиля) не тронут. Правка в форк-нативном `protocol/masque/outbound.go`, маркер
+  `// lx: SPEC 091`; стражи `TestLxMASQUEStandardWithoutURIIsOneError`,
+  `TestLxMASQUEStandardH2StillRejectedWhenURIIsSet`, `TestLxMASQUECloudflareNeedsNoURI` в
+  `protocol/masque/standard_uri_lx_test.go`, red-check пройден — до фикса `vhttp: h2` без `uri` давал
+  ошибку про h2. Фраза про обязательность `uri` на `standard` добавлена в `docs-lx/lx-config.md` §4 и
+  русскую пару.
+- 📎 **Кто нашёл.** Обе заявки — от DRIFT-инвентаря контракта лаунчера (DRIFT 131 §8.3), 2026-09-18: ядро
+  молча или невнятно реагировало на неверный конфиг. В лаунчере и LxBox свои гарды на оба поля остаются —
+  UX-защита до текста ядра.
+- 📌 **Не меняются:** конфигурация (новых ключей нет), провод tuic и masque, дефолты (`udp_relay_mode: ""`
+  = `native`, `masque.uri` по профилю), наборы тегов desktop/router/AAR, Go-тулчейн 1.26.8, четыре
+  сабмодуля. База апстрима `v1.14.1` без изменений; известный дрейф `upstream/stable` — **10** коммитов
+  (с бампом `wireguard-go` v0.0.7) — по-прежнему намеренно отложен на отдельный синк, см. ноты lx.4.
+
 #### v1.14.1-lx.5
 
 - 💥 **REALITY `short_id` длиннее 16 hex-символов больше не роняет процесс**

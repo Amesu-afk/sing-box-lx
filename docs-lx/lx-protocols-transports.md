@@ -901,7 +901,7 @@ The config is rejected at load if:
 - `vhttp=h2` and `mtu > 16000` → `masque: mtu … too large for h2 (max 16000)`;
 - `vhttp=h2` and `profile=standard` →
   `masque: vhttp h2 is not implemented for the standard profile`;
-- `profile=standard` without `uri` → `masque: uri is required for the standard profile`;
+- `profile=standard` without `uri` → `masque: uri is required for the standard profile — set it to the server's CONNECT-IP request URI, e.g. https://<host>/.well-known/masque/ip/*/*/` (checked before `vhttp`, so the text is the same for h2/h3/auto — SPEC 091);
 - `public_key` is not an ECDSA key → `public_key is not an ECDSA key`.
 
 ## 3.10 Migrating from the pre-SPEC-062 shape
