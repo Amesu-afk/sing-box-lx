@@ -260,13 +260,12 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
 
 ## 1. XHTTP-транспорт
 
-XHTTP (Xray «splithttp»/«xhttp») — это v2ray-транспорт, туннелирующий прокси поверх обычных HTTP/2-запросов. Крепится к VLESS / VMess / Trojan через общий блок `transport` и сочетается с TLS, включая **Reality**. (XHTTP несовместим с XTLS-Vision — это ограничение протокола, не наше.)
-
-XHTTP (Xray «splithttp»/«xhttp») крепится к VLESS / VMess / Trojan через общий блок
-`transport` и сочетается с TLS, включая **Reality**. Дефолтная форма на проводе
-**байт-в-байт совпадает с лайв-проверенным v1-клиентом** — каждое v2-поле (размещение
-session/seq, обфускация uplink, семейство `x_padding_*`, переиспользование соединений
-`xmux`) включается явно (opt-in).
+XHTTP (Xray «splithttp»/«xhttp») — это v2ray-транспорт, туннелирующий прокси поверх обычных
+HTTP/2-запросов. Крепится к VLESS / VMess / Trojan через общий блок `transport` и сочетается
+с TLS, включая **Reality**. (XHTTP несовместим с XTLS-Vision — это ограничение протокола,
+не наше.) Дефолтная форма на проводе **байт-в-байт совпадает с лайв-проверенным
+v1-клиентом** — каждое v2-поле (размещение session/seq, обфускация uplink, семейство
+`x_padding_*`, переиспользование соединений `xmux`) включается явно (opt-in).
 
 Минимальный блок `transport` — это просто `"type": "xhttp"` (режим `auto`); [пример
 ниже](#пример--vless--xhttp--reality) добавляет Reality-узел с `stream-one`.
