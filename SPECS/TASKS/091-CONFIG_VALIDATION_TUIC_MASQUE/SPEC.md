@@ -1,7 +1,7 @@
 # SPEC: 091 — CONFIG_VALIDATION_TUIC_MASQUE
 
 **Фича:** [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md) (§1, апстримный файл) ·
-[MASQUE](../021-MASQUE_CONNECT_IP_OUTBOUND/SPEC.md) (§2, форк-нативный пакет)
+[MASQUE_WARP](../../FEATURES/009-MASQUE_WARP/FEATURE.md) (§2, форк-нативный пакет)
 
 | Поле | Значение |
 |------|----------|

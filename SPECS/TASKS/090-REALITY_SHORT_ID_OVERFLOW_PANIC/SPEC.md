@@ -1,6 +1,6 @@
 # SPEC: 090 — REALITY_SHORT_ID_OVERFLOW_PANIC
 
-**Фича:** [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md)
+**Фича:** [REALITY](../../FEATURES/017-REALITY/FEATURE.md) · [HOTFIXES](../../FEATURES/004-HOTFIXES/FEATURE.md) (условие снятия)
 
 | Поле | Значение |
 |------|----------|
