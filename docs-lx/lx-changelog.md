@@ -28,6 +28,24 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.1-lx.8
+
+- 🔗 **gRPC `service_name` с ведущим `/` = custom path в конвенции Xray**
+  ([SPEC 093](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/093-GRPC_SERVICE_NAME_CUSTOM_PATH/SPEC.md),
+  [singbox-launcher#130](https://github.com/Leadaxe/singbox-launcher/issues/130)).
+  Симптом: сервер Xray с `serviceName: "/xxx/something/Tun"` (обычно за nginx с таким же `location`)
+  недостижим — `v2ray-grpc: unexpected status: 404 Not Found`. Причина: lite-клиент экранировал всё
+  значение целиком и слал `/%2Fxxx%2Fsomething%2FTun/Tun`. Теперь ведущий `/` включает форму Xray:
+  сегменты экранируются по отдельности, последний сегмент — имя стрима, хвост `|…` отбрасывается;
+  `/a/b/Tun` уходит на провод как `/a/b/Tun`. Без ведущего `/` всё байт в байт как было
+  (`a/b` → `/a%2Fb/Tun`, = старая форма Xray) — страж `TestOldFormUnchanged`. Логика — форк-нативный
+  пакет `common/grpcname` (порт `getServiceName`/`getTunStreamName`), правки с маркером
+  `// lx: SPEC 093` в `transport/v2raygrpclite/{client,server}.go` и `transport/v2raygrpc/custom_name.go`.
+  lite-сервер по-прежнему сравнивает декодированный путь (мягче Xray). Проверка: `:path` клиента
+  снят голым h2c-листенером и сверен с тем, что вычисляет Xray; сверка с исходниками Xray и grpc-go
+  (`:path` сырой, разрез по последнему `/`). ⚠️ Против живого Xray **не прогонялось** — ждём
+  подтверждения репортёра. Дока: [lx-protocols-transports §4.1](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/lx-protocols-transports.ru.md).
+
 #### v1.14.1-lx.7
 
 - 🏷️ **Ошибка конфигурации называет элемент: тип и тег, а не только индекс**

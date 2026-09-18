@@ -1046,7 +1046,8 @@ There is no new option and no validation: the form is chosen by the content of
    and is rejected on the path.
 
 **📖 Status.** Implemented and covered by unit and client↔server tests; **not yet
-verified against a live Xray** — that run is planned before the release.
+run against a live Xray** — the wire path was checked against the Xray and grpc-go
+source. Available since `v1.14.1-lx.8`.
 
 ---
 
