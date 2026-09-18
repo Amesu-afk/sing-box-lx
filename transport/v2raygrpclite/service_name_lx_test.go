@@ -162,6 +162,7 @@ func TestWirePath(t *testing.T) {
 		"/a/b/Stream":       "/a/b/Stream",
 		"/a b/Tun":          "/a%20b/Tun",
 		"/a/b/Tun|TunMulti": "/a/b/Tun",
+		"/Tun":              "//Tun", // Xray edge case: empty service name
 	}
 	for serviceName, want := range testCases {
 		t.Run(serviceName, func(t *testing.T) {

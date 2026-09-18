@@ -58,6 +58,31 @@ Build-tag: нет. Scope: клиент (outbound) **и** сервер (inbound, 
   экранирования — расходится с Xray для старой формы со слэшем; это апстримное поведение
   под `with_grpc`, **в этой задаче не меняем**).
 
+### 1.0 Сверка с кодом Xray и grpc-go (2026-09-18, по исходникам, без живого прогона)
+
+| Сторона | Что делает | Где |
+|---|---|---|
+| Xray-клиент | `NewStream(…, "/"+getServiceName()+"/"+getTunStreamName())` — в `:path` уходят уже экранированные части, без повторного кодирования | `transport/internet/grpc/encoding/customSeviceName.go`, `TunCustomName` |
+| Xray-сервер | `RegisterGRPCServiceServerX(s, l, getServiceName(), getTunStreamName(), …)` → `grpc.ServiceDesc{ServiceName: <escaped>, StreamName: <stream>}` | `hub.go`, `customSeviceName.go` |
+| grpc-go сервер | `:path` берётся **сырым** (`s.method = hf.Value`), режется по **последнему** `/`: до него — имя сервиса, после — метод; поиск в карте по строке, без декодирования | `internal/transport/http2_server.go`, `server.go` `handleStream` |
+
+Следствия:
+
+- совпадение решает **побайтовое** равенство `:path` клиента и `"/"+service+"/"+stream` сервера —
+  ровно то, что пинит `TestWirePath` / `TestXrayPathInterop` (провод снимается голым h2c-листенером);
+- для `/a/b/Tun` grpc-go получает сервис `a/b`, метод `Tun` — совпадает с регистрацией Xray;
+  краевой `/Tun` даёт `//Tun` → сервис пустой, метод `Tun` — тоже совпадает;
+- голый grpc-go на неизвестный путь отвечает HTTP 200 + `grpc-status: 12 (Unimplemented)`, **не 404**.
+  Значит `404 Not Found` из issue #130 отдаёт фронт перед Xray (nginx `location /xxx/something/Tun`
+  или fallback): nginx сопоставляет location по декодированному URI, и наш прежний
+  `/%2Fxxx%2Fsomething%2FTun/Tun` превращался в `/xxx/something/Tun/Tun` — мимо location. После
+  фикса путь равен location дословно;
+- multi-режим Xray-клиента (`TunMulti`) ходит на другой метод — наш сервер его не обслуживал и
+  не обслуживает (границы §5).
+
+Чего сверка по коду **не** даёт: поведение конкретного фронта (nginx/caddy/CDN) и TLS/ALPN-обвязку —
+это закрывает только живой прогон (§3).
+
 ### 1.1 Таблица форм (после фикса)
 
 | `service_name` | Путь на проводе | Сервис / стрим | Примечание |
