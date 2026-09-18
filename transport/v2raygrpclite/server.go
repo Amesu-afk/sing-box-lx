@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/grpcname"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -42,7 +43,11 @@ func NewServer(ctx context.Context, logger logger.ContextLogger, options option.
 		tlsConfig: tlsConfig,
 		logger:    logger,
 		handler:   handler,
-		path:      "/" + options.ServiceName + "/Tun",
+		// lx: SPEC 093 — a leading "/" in service_name is Xray's custom-path
+		// form. The comparison in ServeHTTP stays on the decoded Path, as
+		// before: a client that sends the old form unescaped ("/a/b/Tun" for
+		// "a/b", the with_grpc client does) must keep working.
+		path: grpcname.Path(options.ServiceName),
 		h2Server: &http2.Server{
 			IdleTimeout: time.Duration(options.IdleTimeout),
 		},

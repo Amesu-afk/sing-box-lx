@@ -11,6 +11,10 @@ features of `sing-box-lx`:
 | **AmneziaWG 2.0/3.x** (AWG2, AWG3) obfuscation | `with_awg` | promoted fields on a `wireguard` **endpoint** | [§2](#2-amneziawg-203x-awg2-awg3) |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic` + `with_gvisor` | `outbounds[].type: "masque"` | [§3](#3-masque-outbound-connect-ip--warp) |
 
+Plus [§4](#4-grpc-transport) — the **gRPC** transport, which is upstream's, not
+ours, and appears here only for the one place our behaviour has downstream
+interop notes: the forms of `service_name`.
+
 For a high-level tour of every downstream feature (idle-suspend, DNS group, VLESS
 `encryption`, `lxd`, observability), and short "getting started" examples, see
 **[lx-config.md](lx-config.md)**. This document is the deep reference the config
@@ -78,6 +82,8 @@ transport (which would defeat the obfuscation). The exact messages:
   - [3.10 Migrating from the pre-SPEC-062 shape](#310-migrating-from-the-pre-spec-062-shape)
   - [3.11 Examples](#311-examples)
   - [3.12 Common footguns](#312-common-footguns)
+- [§4 gRPC transport](#4-grpc-transport)
+  - [4.1 `service_name`: the Xray forms](#41-service_name-the-xray-forms)
 
 ---
 
@@ -991,6 +997,56 @@ keep_alive_period=30s, network_list=tcp+udp — all default. Remember the top-le
 **📖 Status.** Device-verified end-to-end on real Wi-Fi and LTE — `warp=on`, real
 traffic on both `h3` and `h2`, idle-suspend + self-healing reconnect confirmed
 on-device.
+
+---
+
+# 4. gRPC transport
+
+The gRPC transport (`"transport": { "type": "grpc" }`) needs no build tag — the
+lite implementation (`v2raygrpclite`) is what ships in our builds; the full
+`grpc-go` one is behind `with_grpc` and is not in the desktop/CLI binary.
+
+## 4.1 `service_name`: the Xray forms
+
+`service_name` carries **two** forms, exactly as in Xray. Which one you get is
+decided by a single character: a leading `/`.
+
+- **No leading `/`** — the whole value is one service segment: it is escaped as a
+  whole (`/` inside it becomes `%2F`) and the stream name is always `Tun`. This
+  is the historical form and is byte-for-byte unchanged.
+- **Leading `/`** — the value is a **custom path** in Xray's convention: every
+  segment is escaped **separately** (so `/` stays a real path separator), the
+  **last** segment is the stream name, and a `|…` tail on the stream name (Xray's
+  multi-stream name) is dropped.
+
+| `service_name` | Path on the wire | Service / stream | Note |
+|---|---|---|---|
+| `TunService` | `/TunService/Tun` | `TunService` / `Tun` | historical form |
+| `a/b` | `/a%2Fb/Tun` | `a%2Fb` / `Tun` | historical form, = Xray's old form |
+| `/a/b/Tun` | `/a/b/Tun` | `a/b` / `Tun` | custom path, = Xray |
+| `/a/b/Stream` | `/a/b/Stream` | `a/b` / `Stream` | stream name comes from the config |
+| `/a b/Tun` | `/a%20b/Tun` | `a%20b` / `Tun` | per-segment `PathEscape` |
+| `/a/b/Tun\|TunMulti` | `/a/b/Tun` | `a/b` / `Tun` | multi tail dropped, as Xray does |
+
+There is no new option and no validation: the form is chosen by the content of
+`service_name`, the way Xray does it.
+
+**Notes.**
+
+1. The **`with_grpc`** client does **not** escape the path for the historical
+   form (it sends `"/" + name + "/Tun"` raw, so `a/b` goes out as `/a/b/Tun`).
+   That is upstream behaviour and we did not change it — the difference only
+   shows up for a historical-form name that itself contains `/`.
+2. Our **lite server** compares the **decoded** path, so it is more lenient than
+   Xray: a server configured with `service_name: "a/b"` accepts both
+   `/a%2Fb/Tun` and `/a/b/Tun`. An Xray server compares strictly, so pick the
+   same form on both ends.
+3. **Symptom of a form mismatch** against an Xray server:
+   `v2ray-grpc: unexpected status: 404 Not Found` — the dial reaches the server
+   and is rejected on the path.
+
+**📖 Status.** Implemented and covered by unit and client↔server tests; **not yet
+verified against a live Xray** — that run is planned before the release.
 
 ---
 
