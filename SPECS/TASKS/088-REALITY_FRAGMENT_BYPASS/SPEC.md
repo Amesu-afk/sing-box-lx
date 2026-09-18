@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — апстримный: `RealityClientConfig.ClientHandshake` строит `utls.UClient` на голом соединении, минуя обёртку `tlsfragment`, которую получают STD- и uTLS-клиенты; `fragment` / `record_fragment` на REALITY-узлах пишутся в конфиг и молча не действуют |
-| Статус | I (implemented) — код, стражи и сборка в дереве 2026-09-17; выпущено в `v1.14.1-lx.4`; полевого прогона на сети, где теряется гибридный ClientHello, не было (см. «Остаток») |
+| Статус | D (done, device-verified) — выпущено в `v1.14.1-lx.4`; полевой прогон репортёра LxBox #142 2026-09-18 (Android, мобильная сеть, серверные pcap): с `record_fragment` на сервер приходит целая TLS-запись 131 байт + начало следующей, с `fragment` — первые сегменты 133/164 байт; REALITY-рукопожатие проходит во всех режимах. ⚠️ Лечит ли фрагментация исходную жалобу — не доказано: причина зависаний оказалась состоянием сети, не формой ClientHello |
 | Ветка | `lx` |
 | Связанные | [060](../060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) — авто-`record_fragment` под `detour`, чей дефолт до 088 до REALITY не доходил; [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) — гибридный key share, из-за которого ClientHello вырос до двух TCP-сегментов; [089](../089-REALITY_KEY_SHARE_OPTION/SPEC.md) — вторая половина ответа на ту же жалобу (`reality.key_share`); LxBox [#142](https://github.com/Leadaxe/LxBox/issues/142) (репортёр нашёл обход сам, по коду) |
 

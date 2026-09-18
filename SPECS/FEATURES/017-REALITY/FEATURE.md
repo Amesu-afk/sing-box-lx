@@ -96,9 +96,9 @@ REALITY — TLS-слой, в котором клиент выглядит как
 | [083 — REALITY_MLKEM_KEYSHARE](../../TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) | Апстримный фильтр `X25519MLKEM768` снят; `AuthKey` по ключу, который выбирает сервер; `chrome` проходит Xray ≥ v26.9.8 | V |
 | [086 — UTLS_FORK_FIREFOX148](../../TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md) | Форк-сабмодуль utls: пресет Firefox 148 + reuse одного X25519-ключа в обеих записях; `firefox` проходит | C |
 | [087 — UTLS_SAFARI_26_3](../../TASKS/087-UTLS_SAFARI_26_3/SPEC.md) | Пресет Safari 26.3 в том же форке; `safari` проходит; решение по `edge`/`ios`/`android`/`360`/`qq` | C |
-| [088 — REALITY_FRAGMENT_BYPASS](../../TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md) | `fragment` / `record_fragment` (и дефолт 060) доходят до REALITY-рукопожатия | I |
-| [089 — REALITY_KEY_SHARE_OPTION](../../TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md) | `tls.reality.key_share`: `classical` / `hybrid` по узлу; противовес 083 для сетей, теряющих длинный ClientHello | I |
-| [090 — REALITY_SHORT_ID_OVERFLOW_PANIC](../../TASKS/090-REALITY_SHORT_ID_OVERFLOW_PANIC/SPEC.md) | `short_id` длиннее 16 hex — ошибка конфигурации `invalid short_id` вместо паники процесса в `hex.Decode`; клиент и сервер | I |
+| [088 — REALITY_FRAGMENT_BYPASS](../../TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md) | `fragment` / `record_fragment` (и дефолт 060) доходят до REALITY-рукопожатия | D |
+| [089 — REALITY_KEY_SHARE_OPTION](../../TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md) | `tls.reality.key_share`: `classical` / `hybrid` по узлу; противовес 083 для сетей, теряющих длинный ClientHello | D |
+| [090 — REALITY_SHORT_ID_OVERFLOW_PANIC](../../TASKS/090-REALITY_SHORT_ID_OVERFLOW_PANIC/SPEC.md) | `short_id` длиннее 16 hex — ошибка конфигурации `invalid short_id` вместо паники процесса в `hex.Decode`; клиент и сервер | C |
 
 Задачи 053, 083, 086, 087, 088, 090 одновременно числятся хотфиксами в [HOTFIXES](../004-HOTFIXES/FEATURE.md) — там их условия снятия и что сторожить на мерже. Здесь — состояние фичи целиком.
 

@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | F (feature) — опция `tls.reality.key_share` (`hybrid` / `classical`): по-узловой выбор, нести ли в REALITY ClientHello гибридный key share `X25519MLKEM768`. [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) сняла апстримный фильтр целиком, а сети, где двухсегментный ClientHello теряется, требуют способа вернуть классическое приветствие на конкретном узле |
-| Статус | I (implemented) — код, стражи и сборка в дереве 2026-09-17; выпущено в `v1.14.1-lx.4`; `classical` в поле эквивалентен `fp=edge`, которым репортёр #142 уже прошёл свою сеть; прогон самой опции через приложение — после её проводки в LxBox/лаунчер (см. «Остаток») |
+| Статус | D (done, device-verified) — выпущено в `v1.14.1-lx.4`; полевой прогон репортёра LxBox #142 2026-09-18 (Android, мобильная сеть, серверные pcap): `classical` 24/24 и 20/20, `hybrid` 50/50 |
 | Ветка | `lx` |
 | Связанные | [083](../083-REALITY_MLKEM_KEYSHARE/SPEC.md) (что и почему было снято), [086](../086-UTLS_FORK_FIREFOX148/SPEC.md)/[087](../087-UTLS_SAFARI_26_3/SPEC.md) (какие отпечатки несут гибрид), [088](../088-REALITY_FRAGMENT_BYPASS/SPEC.md) (вторая половина ответа — фрагментация); LxBox [#142](https://github.com/Leadaxe/LxBox/issues/142); Xray [#6256](https://github.com/XTLS/Xray-core/issues/6256) (тот же симптом у Xray-клиента, закрыт RPRX «not planned» без комментариев) |
 
