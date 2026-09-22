@@ -6,7 +6,7 @@ name: lx-rebase
 # (see the "Merge upstream/testing ... into lx-*" commits), so this workflow does the same:
 #   * upstream ref already merged          → no-op.
 #   * clean merge + build + `sing-box check` → push lx-sync/<ref>-<sha> and open a PR.
-#   * merge conflict OR build/check fails  → create/update ONE tracking issue (label: lx-sync).
+#   * merge conflict OR build/check fails  → create/update ONE tracking issue (title starts with "lx-sync:").
 # The job itself stays green in the "needs attention" case — the issue is the report.
 # It never pushes to the integration branch directly.
 #
@@ -38,7 +38,6 @@ env:
   # Integration branch = the branch the workflow runs from (default branch for cron: lx-1.15-integration).
   LX_BRANCH: ${{ github.ref_name }}
   UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'testing' }}
-  ISSUE_LABEL: lx-sync
 
 jobs:
   sync:
@@ -162,11 +161,13 @@ jobs:
             echo "git merge $TARGET   # fix // lx: seams, build, then PR into $LX_BRANCH"
             echo '```'
           } > /tmp/issue.md
-          gh label create "$ISSUE_LABEL" --color FBCA04 --description "lx upstream sync" 2>/dev/null || true
-          NUM=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')
+          TITLE="lx-sync: upstream $UPSTREAM_REF needs manual merge"
+          # Find the open tracking issue by title (labels are optional — creating them may be denied).
+          NUM=$(gh issue list --state open --limit 100 --json number,title \
+                  --jq "[.[] | select(.title | startswith(\"lx-sync:\"))][0].number // empty")
           if [ -n "$NUM" ]; then
-            gh issue edit "$NUM" --title "lx-sync: upstream $UPSTREAM_REF needs manual merge" --body-file /tmp/issue.md
+            gh issue edit "$NUM" --title "$TITLE" --body-file /tmp/issue.md
             echo "::notice::Updated issue #$NUM"
           else
-            gh issue create --label "$ISSUE_LABEL" --title "lx-sync: upstream $UPSTREAM_REF needs manual merge" --body-file /tmp/issue.md
+            gh issue create --title "$TITLE" --body-file /tmp/issue.md
           fi
