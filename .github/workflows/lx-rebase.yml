@@ -38,6 +38,8 @@ env:
   # Integration branch = the branch the workflow runs from (default branch for cron: lx-1.15-integration).
   LX_BRANCH: ${{ github.ref_name }}
   UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'testing' }}
+  # gh must target THIS repo — otherwise it resolves the `upstream` remote (SagerNet/sing-box).
+  GH_REPO: ${{ github.repository }}
 
 jobs:
   sync:
