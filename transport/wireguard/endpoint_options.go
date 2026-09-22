@@ -28,12 +28,13 @@ type EndpointOptions struct {
 	EgressPoolOptions tun.UDPEgressPoolOptions
 	Dialer            N.Dialer
 	CreateDialer      func(interfaceName string) N.Dialer
+	Tag               string
 	Name              string
 	MTU               uint32
 	Address           []netip.Prefix
 	PrivateKey        string
 	ListenPort        uint16
-	ResolvePeer       func(domain string) (netip.Addr, error)
+	ResolvePeer       func(domain string) ([]netip.Addr, error)
 	Peers             []PeerOptions
 	Workers           int
 	// lx:begin awg
@@ -49,6 +50,6 @@ type PeerOptions struct {
 	PublicKey                   string
 	PreSharedKey                string
 	AllowedIPs                  []netip.Prefix
-	PersistentKeepaliveInterval uint16
+	PersistentKeepaliveInterval option.AWGRange // lx: awg — "N" or "min-max" (AWG 3.x), see option.WireGuardPeer
 	Reserved                    []uint8
 }

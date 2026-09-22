@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/iponly"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -48,6 +50,7 @@ type Endpoint struct {
 	// to resolve after the dependency topo-sort has started the detour provider
 	// (see the StartStateStart case in Start).
 	outboundDialer N.Dialer
+	bindAccess     sync.Mutex
 	started        atomic.Bool
 	// lx:begin idle-suspend
 	// SPEC 020 idle-suspend state. lastActivity is the unix-nano timestamp of the
@@ -148,21 +151,20 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		Dialer: outboundDialer,
 		CreateDialer: func(interfaceName string) N.Dialer {
 			return common.Must1(dialer.NewDefault(ctx, option.DialerOptions{
-				BindInterface:      interfaceName,
-				UDPFragmentDefault: true, // lx: SPEC 028
+				AbstractDialerOptions: option.AbstractDialerOptions{
+					BindInterface:      interfaceName,
+					UDPFragmentDefault: true, // lx: SPEC 028
+				},
 			}))
 		},
+		Tag:        tag,
 		Name:       options.Name,
 		MTU:        options.MTU,
 		Address:    options.Address,
 		PrivateKey: options.PrivateKey,
 		ListenPort: options.ListenPort,
-		ResolvePeer: func(domain string) (netip.Addr, error) {
-			endpointAddresses, lookupErr := ep.dnsRouter.Lookup(ctx, domain, outboundDialer.(dialer.ResolveDialer).QueryOptions())
-			if lookupErr != nil {
-				return netip.Addr{}, lookupErr
-			}
-			return endpointAddresses[0], nil
+		ResolvePeer: func(domain string) ([]netip.Addr, error) {
+			return ep.dnsRouter.Lookup(ctx, domain, outboundDialer.(dialer.ResolveDialer).QueryOptions())
 		},
 		Peers: common.Map(options.Peers, func(it option.WireGuardPeer) wireguard.PeerOptions {
 			return wireguard.PeerOptions{
@@ -190,6 +192,22 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 }
 
 func (w *Endpoint) Start(stage adapter.StartStage) error {
+	// lx: SPEC 070 — serialise Start against Close. The daemon releases its
+	// service lock while instance.Start() runs (so a stop can interrupt a slow
+	// start), which makes Box.Close legal at ANY point during Box.Start. Close
+	// nils the transport tun device (SPEC 020 level 3); an unserialised stage
+	// then dereferences it (field crash: SIGSEGV in transport Start at
+	// SetDevice). resumeMu makes each stage atomic with respect to Close — the
+	// same discipline every runtime transition (resumeOnDial rebuild, suspend,
+	// teardown) already follows — and the closing gate refuses to start a
+	// device the pending Close would immediately tear down again. The stage is
+	// bounded work (peer domain resolution is a deferred callback), so a Close
+	// waiting here is waiting microseconds, not on the network.
+	w.resumeMu.Lock()
+	defer w.resumeMu.Unlock()
+	if w.closing.Load() {
+		return os.ErrClosed
+	}
 	switch stage {
 	case adapter.StartStateStart:
 		if err := w.endpoint.Start(false); err != nil {
@@ -402,7 +420,17 @@ func (w *Endpoint) resumeOnDial() bool {
 		w.logger.Info("lx idle: rebuild ", w.Tag(), " by=dial")
 		return true
 	}
-	w.endpoint.Resume() // device.Up(): re-open socket, re-spawn recv-workers
+	// A failed Up() leaves wireguard-go in deviceStateDown with the bind closed
+	// and every peer stopped. Keeping the idle-asleep flags in that case is what
+	// makes the next dial retry the wake: clearing them would mark the endpoint
+	// live over a down device, and nothing would ever call Up() again — the fast
+	// path above returns started, InterfaceUpdated's BindUpdate is a close-only
+	// no-op while down, and the handshake timers that drive the SPEC 041 self-heal
+	// are stopped along with the peers.
+	if err := w.endpoint.Resume(); err != nil {
+		w.logger.Error("lx idle: wake ", w.Tag(), " failed: ", err)
+		return false
+	}
 	w.started.Store(true)
 	w.idleAsleep.Store(false)
 	w.sleepSince.Store(0)
@@ -423,16 +451,27 @@ func (w *Endpoint) Close() error {
 	// device.Down()) finishes first, and clear both flags under it so any later
 	// tick short-circuits on !started instead of calling Suspend on a closed
 	// device.
+	w.bindAccess.Lock() // upstream: serialize with updateBind (InterfaceUpdated)
 	w.resumeMu.Lock()
 	w.started.Store(false)
 	w.idleAsleep.Store(false)
 	w.torndown.Store(false) // lx: SPEC 020 level 3 — Close is idempotent over a torn-down endpoint
 	w.resumeMu.Unlock()
+	w.bindAccess.Unlock()
 	return w.endpoint.Close()
 }
 
-func (w *Endpoint) InterfaceUpdated() {
+func (w *Endpoint) InterfaceUpdated(ctx context.Context) {
 	if !w.started.Load() {
+		return
+	}
+	go w.updateBind(ctx)
+}
+
+func (w *Endpoint) updateBind(ctx context.Context) {
+	w.bindAccess.Lock()
+	defer w.bindAccess.Unlock()
+	if ctx.Err() != nil || !w.started.Load() {
 		return
 	}
 	err := w.endpoint.BindUpdate()
@@ -573,7 +612,11 @@ func (w *Endpoint) ListenPacketWithDestination(ctx context.Context, destination 
 		if !w.resumeOnDial() { // lx: SPEC 020 — stamp activity + wake if idle-suspended
 			return nil, netip.Addr{}, E.New("WireGuard is not ready yet")
 		}
-		return N.ListenSerial(ctx, w.endpoint, destination, destinationAddresses)
+		packetConn, destinationAddress, err := N.ListenSerial(ctx, w.endpoint, destination, destinationAddresses)
+		if err != nil {
+			return nil, netip.Addr{}, err
+		}
+		return iponly.NewPacketConn(w.logger, packetConn), destinationAddress, nil
 	}
 	if !w.resumeOnDial() { // lx: SPEC 020 — stamp activity + wake if idle-suspended
 		return nil, netip.Addr{}, E.New("WireGuard is not ready yet")
@@ -583,9 +626,9 @@ func (w *Endpoint) ListenPacketWithDestination(ctx context.Context, destination 
 		return nil, netip.Addr{}, err
 	}
 	if destination.IsIP() {
-		return packetConn, destination.Addr, nil
+		return iponly.NewPacketConn(w.logger, packetConn), destination.Addr, nil
 	}
-	return packetConn, netip.Addr{}, nil
+	return iponly.NewPacketConn(w.logger, packetConn), netip.Addr{}, nil
 }
 
 func (w *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {

@@ -1,9 +1,10 @@
 name: lx-rebase
 
-# Weekly sync check of the lx fork against upstream sing-box.
+# Weekly sync check of this fork against its parent, Leadaxe/sing-box-lx.
 #
-# The fork is maintained by MERGING upstream/testing into the integration branch
-# (see the "Merge upstream/testing ... into lx-*" commits), so this workflow does the same:
+# This repo is a downstream copy of Leadaxe/sing-box-lx (see README); Leadaxe tracks
+# SagerNet upstream and the AmneziaWG wireguard-go fork, so we MERGE Leadaxe's `lx`
+# branch into the integration branch rather than syncing with SagerNet directly:
 #   * upstream ref already merged          → no-op.
 #   * clean merge + build + `sing-box check` → push lx-sync/<ref>-<sha> and open a PR.
 #   * merge conflict OR build/check fails  → create/update ONE tracking issue (title starts with "lx-sync:").
@@ -20,9 +21,9 @@ on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: 'Upstream branch or tag to merge (e.g. testing, stable, v1.14.1)'
+        description: 'Branch or tag of Leadaxe/sing-box-lx to merge (default: lx)'
         required: false
-        default: 'testing'
+        default: 'lx'
 
 permissions:
   contents: write
@@ -34,11 +35,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  UPSTREAM: https://github.com/SagerNet/sing-box.git
+  UPSTREAM: https://github.com/Leadaxe/sing-box-lx.git
   # Integration branch = the branch the workflow runs from (default branch for cron: lx-1.15-integration).
   LX_BRANCH: ${{ github.ref_name }}
-  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'testing' }}
-  # gh must target THIS repo — otherwise it resolves the `upstream` remote (SagerNet/sing-box).
+  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'lx' }}
+  # gh must target THIS repo — otherwise it resolves the `upstream` remote (Leadaxe/sing-box-lx).
   GH_REPO: ${{ github.repository }}
 
 jobs:
@@ -49,10 +50,14 @@ jobs:
         with:
           ref: ${{ env.LX_BRANCH }}
           fetch-depth: 0
-          submodules: false     # only wireguard-go is needed for the build; inited below
+          submodules: false     # only submodules/* (go.mod replaces) are needed; inited below
 
+      # Toolchain pin lives in go.version (as in lx-ci); go.mod's `go` line is only the floor.
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v6
-        with: { go-version-file: go.mod, check-latest: true }
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
 
       - name: Configure git + fetch upstream
         id: up
@@ -105,7 +110,7 @@ jobs:
         id: verify
         if: steps.merge.outputs.result == 'clean'
         run: |
-          git submodule update --init --recursive submodules/wireguard-go
+          git submodule update --init --recursive submodules/
           if make -f Makefile.lx lx-build 2>&1 | tee /tmp/build.log \
              && ./sing-box check -c lx-test/config/xhttp_reality.json \
              && ./sing-box check -c lx-test/config/awg2_basic.json; then

@@ -14,6 +14,9 @@ import (
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/dns/transport"
 	"github.com/sagernet/sing-box/dns/transport/fakeip"
+	// lx:begin dns-group
+	dnsgroup "github.com/sagernet/sing-box/dns/transport/group"
+	// lx:end dns-group
 	"github.com/sagernet/sing-box/dns/transport/hosts"
 	"github.com/sagernet/sing-box/dns/transport/local"
 	"github.com/sagernet/sing-box/dns/transport/mdns"
@@ -87,6 +90,9 @@ func OutboundRegistry() *outbound.Registry {
 
 	group.RegisterSelector(registry)
 	group.RegisterURLTest(registry)
+	// lx:begin chain
+	registerChainOutbound(registry)
+	// lx:end chain
 
 	socks.RegisterOutbound(registry)
 	http.RegisterOutbound(registry)
@@ -130,10 +136,15 @@ func DNSTransportRegistry() *dns.TransportRegistry {
 	mdns.RegisterTransport(registry)
 	fakeip.RegisterTransport(registry)
 	resolved.RegisterTransport(registry)
+	// lx:begin dns-group
+	dnsgroup.RegisterTransport(registry)
+	// lx:end dns-group
 
 	registerQUICTransports(registry)
 	registerDHCPTransport(registry)
 	registerTailscaleTransport(registry)
+	registerOpenConnectDNSTransport(registry)
+	registerOpenVPNDNSTransport(registry)
 
 	return registry
 }

@@ -1,15 +1,21 @@
 # sing-box-lx — configuration of the downstream features
 
+> 🌐 Русская версия: **[lx-config.ru.md](lx-config.ru.md)**.
+
 `sing-box-lx` is upstream [sing-box](https://github.com/SagerNet/sing-box) plus a small set of **client-side** features, each gated behind a build tag:
 
 | Feature | Build tag | Where it lives in config | Included in |
 |---------|-----------|--------------------------|-------------|
 | **XHTTP** transport (Xray-compatible) | `with_xhttp` | `transport.type: "xhttp"` on a VLESS / VMess / Trojan outbound | desktop + mobile |
-| **AmneziaWG 2.0** (AWG2) | `with_awg` | extra fields on a `wireguard` **endpoint** | desktop + mobile |
+| **AmneziaWG 2.0/3.x** (AWG2, AWG3) | `with_awg` | extra fields on a `wireguard` **endpoint** | desktop + mobile |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic`+`with_gvisor` | `outbounds[].type: "masque"` | desktop + mobile |
-| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `route.lx_idle_suspend` | **mobile only** (AAR) |
+| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `route.lx_idle_suspend` (+ `lx_idle_suspend_reachable`, `lx_idle_teardown`) | **mobile only** (AAR) |
+| **DNS server group** (SPEC 033/035) | — (always built) | `dns.servers[].type: "group"` | desktop + mobile |
+| **VLESS `encryption`** (SPEC 032) | — (always built) | `encryption` on a `vless` outbound | desktop + mobile |
+| **`lxd` daemon** (SPEC 055–057, 063–068) | `with_lxd` | not a config key — the `sing-box lxd` subcommand + `<state-dir>/daemon.json`; see [lxd-daemon.md](lxd-daemon.md) | desktop / server (**not** Win7, **not** AAR) |
+| **`chain` outbound** (SPEC 073) | `with_lx_chain` | `outbounds[].type: "chain"` — a multi-hop path of groups and nodes | desktop + mobile |
 
-Build the desktop/CLI binary: `make -f Makefile.lx lx-build` (output `sing-box`, version `…-lx.N`) — this bundles `with_xhttp` + `with_awg` (+ `with_lx_command`), but **not** `with_lx_idle_suspend`.
+Build the desktop/CLI binary: `make -f Makefile.lx lx-build` (output `sing-box`, version `…-lx.N`) — this bundles `with_xhttp` + `with_awg` (+ `with_lx_command`, `with_lxd`), but **not** `with_lx_idle_suspend`.
 Without a tag the feature is absent: an `xhttp` transport or an AWG field is rejected at load time with an explicit error (no silent downgrade).
 
 **`with_lx_idle_suspend` is mobile-only** and is added only to the Android/iOS AAR
@@ -21,7 +27,7 @@ on-device: 8 endpoints suspended → 134 MB freed). A desktop build has small
 mismatch, a desktop/CLI binary that is handed a config with `route.lx_idle_suspend`
 **fails fast at start**: `route.lx_idle_suspend is set but this build lacks
 idle-suspend support; rebuild with -tags with_lx_idle_suspend (mobile-only feature)`.
-See `SPECS/020-MULTI_WG_IDLE_BUFFER_HEAT/SPEC.md`.
+See the [ENERGY feature](../SPECS/FEATURES/008-ENERGY/FEATURE.md).
 
 Related keys (2026-07-15 revision): `route.lx_idle_suspend_reachable` — optional
 second, longer idle window after which even *reachable* endpoints (pool members,
@@ -35,15 +41,42 @@ timelines and the recommended mobile configuration live in
 
 > ⚠️ All keys/UUIDs below are **placeholders**. Never commit real private keys / pre-shared keys to a repository.
 
-> 🌐 Русская версия: **[lx-config.ru.md](lx-config.ru.md)**.
+## Table of contents
+
+- [0. Every field at a glance (exhaustive example)](#0-every-field-at-a-glance-exhaustive-example)
+- [1. XHTTP transport](#1-xhttp-transport)
+  - [Example — VLESS + XHTTP + Reality](#example--vless--xhttp--reality)
+- [2. AmneziaWG 2.0/3.x (AWG2, AWG3)](#2-amneziawg-203x-awg2-awg3)
+  - [Example — AmneziaWG 3.1 endpoint (Amnezia `amnezia-awg2` export)](#example--amneziawg-31-endpoint-amnezia-amnezia-awg2-export)
+  - [Example — AmneziaWG 2.0 endpoint](#example--amneziawg-20-endpoint)
+- [3. round_robin load balancing (SPEC 019)](#3-round_robin-load-balancing-spec-019)
+  - [Fields (on a `urltest` outbound)](#fields-on-a-urltest-outbound)
+  - [Slot-hash binding](#slot-hash-binding)
+  - [Example — urltest with round_robin](#example--urltest-with-round_robin)
+- [4. MASQUE outbound — Cloudflare WARP (SPEC 021)](#4-masque-outbound--cloudflare-warp-spec-021)
+  - [Example — WARP (defaults: `vhttp: auto`)](#example--warp-defaults-vhttp-auto)
+- [5. DNS server group (SPEC 033/035)](#5-dns-server-group-spec-033035)
+  - [Fields (a `dns.servers[]` entry)](#fields-a-dnsservers-entry)
+  - [Example — resilient public DNS as the default](#example--resilient-public-dns-as-the-default)
+- [6. VLESS `encryption` — post-quantum layer (SPEC 032)](#6-vless-encryption--post-quantum-layer-spec-032)
+  - [Field (on a `vless` outbound)](#field-on-a-vless-outbound)
+  - [Example](#example)
+- [7. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)](#7-reality-key_share--hybrid-or-classical-clienthello-spec-089)
+- [8. Observability (CommandClient extensions)](#8-observability-commandclient-extensions)
+- [9. Automatic ClientHello fragmentation under `detour` (SPEC 060)](#9-automatic-clienthello-fragmentation-under-detour-spec-060)
+- [10. `chain` outbound — a virtual multi-hop path of groups and nodes (SPEC 073)](#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)
+- [11. Protocol sniffers for LAN traffic (SPEC 078 / 080)](#11-protocol-sniffers-for-lan-traffic-spec-078--080)
+- [12. Validate & build](#12-validate--build)
 
 ---
 
 ## 0. Every field at a glance (exhaustive example)
 
-One config carrying **every** field sing-box-lx adds on top of upstream — XHTTP transport,
-AmneziaWG 2.0 endpoint, the `id`/`ip`/`ib` masquerade sugar, and the `urltest` `round_robin`
-balancer. This is a **kitchen-sink reference**, not a recommended config: many fields are
+One config carrying every field of the **outbound-side** features — XHTTP transport,
+AmneziaWG 2.0 endpoint, the `id`/`ip`/`ib` masquerade sugar, VLESS `encryption`, and the
+`urltest` `round_robin` balancer (MASQUE, the DNS group and the `route.lx_idle_*` keys have
+their own examples in [§4](#4-masque-outbound--cloudflare-warp-spec-021), [§5](#5-dns-server-group-spec-033035)
+and [lx-energy.md](lx-energy.md)). This is a **kitchen-sink reference**, not a recommended config: many fields are
 mutually exclusive (e.g. the `id`/`ip`/`ib` sugar vs. a hand-written `i1`) or are server-only
 and ignored by the client — those are flagged inline. For a working setup, copy only the block
 you need and read its section below. Each comment shows the **default** and the **allowed values**.
@@ -61,11 +94,18 @@ you need and read its section below. Each comment shows the **default** and the 
       "server": "example.com",
       "server_port": 443,
       "uuid": "00000000-0000-0000-0000-000000000000",
+      "encryption": "",                         // default: "" (off). VLESS post-quantum layer (§6):
+                                                //   "mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>….<key>"
       "tls": {
         "enabled": true,
         "server_name": "example.com",
         "utls": { "enabled": true, "fingerprint": "chrome" },
-        "reality": { "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd" }
+        "reality": {
+          "enabled": true, "public_key": "<reality-public-key-base64>", "short_id": "0123abcd",
+          "key_share": ""                       // default: "" (as the fingerprint carries it). §7:
+                                                //   "classical" = strip X25519MLKEM768 (Xray < v26.9.8 only)
+                                                //   "hybrid"    = require it (error on edge/ios/…)
+        }
       },
       "transport": {
         "type": "xhttp",                        // selector — must be "xhttp"
@@ -77,12 +117,15 @@ you need and read its section below. Each comment shows the **default** and the 
         "path": "/xhttp",                       // default: "" (root). Session id / seq appended as path segments
         "headers": { "X-Foo": "bar" },          // default: none. Extra headers on every request
         "x_padding_bytes": "100-1000",          // default: "100-1000". "min-max" or single int — padding length
+        "no_grpc_header": false,                // default: false. Omit Content-Type: application/grpc on stream-one/stream-up
 
         // ── session / seq placement (v2) ──
         "session_placement": "path",            // default: path. path | query | header | cookie
         "session_key": "",                      // default: X-Session (header) / x_session (query|cookie); unused for path
         "seq_placement": "path",                // default: path. path | query | header | cookie (packet-up)
         "seq_key": "",                          // default: X-Seq (header) / x_seq (query|cookie); unused for path
+        "session_table": "",                    // default: unset (dashed UUID id). Alphabet name or literal ASCII set
+        "session_length": "",                   // default: unset. "min-max" or "n"; set together with session_table
 
         // ── uplink-data placement (v2, packet-up) ──
         "uplink_data_placement": "auto",        // default: auto (== body). body | auto | header | cookie.
@@ -160,6 +203,19 @@ you need and read its section below. Each comment shows the **default** and the 
       "ip": "quic",                             // default: "". quic | dns | stun | sip
       "ib": "chrome",                           // default: "". chrome | firefox | curl. Only meaningful with ip=quic
 
+      // ── AmneziaWG 3.x (amnezia-awg2 container, protocol_version 3.x; SPEC 080) ──
+      // header_protection_key is SERVER-SIDE (must equal the server's); with it on,
+      // every s1..s4 must be >= 12 (the padding carries the header-cipher nonce).
+      "header_protection_key": "<base64-32-bytes>", // default: "" (off). `awg genkey` output; masks type/receiver/counter of every packet
+      "content_padding_addition": "10-100",     // default: "" (off). int | "min-max" extra padding inside every data packet
+      "rekey_after_time": "100-120",            // default: "" (WireGuard 120 s). int | "min-max" seconds
+      "rekey_timeout": "3-7",                   // default: "" (WireGuard 5 s)
+      "reject_after_time": "150-180",           // default: "" (WireGuard 180 s)
+      "keepalive_timeout": "5-15",              // default: "" (WireGuard 10 s)
+      "max_handshake_attempts": "15-20",        // default: "" (WireGuard 18)
+      "random_trailers": true,                  // default: false. Random-length tail on every handshake message / inside data packets
+      "disable_cookies": true,                  // default: false. Never send or demand cookie replies
+
       "peers": [
         {
           "address": "server.example.com",
@@ -167,7 +223,7 @@ you need and read its section below. Each comment shows the **default** and the 
           "public_key": "<server-public-key-base64>",
           "pre_shared_key": "<preshared-key-base64>",
           "allowed_ips": ["0.0.0.0/0", "::/0"],
-          "persistent_keepalive_interval": 25
+          "persistent_keepalive_interval": "25-35" // number (WireGuard) or "min-max" seconds (AWG 3.x)
         }
       ]
     },
@@ -182,6 +238,8 @@ you need and read its section below. Each comment shows the **default** and the 
       "outbounds": ["xhttp-out", "proxy-b", "proxy-c", "proxy-d", "proxy-e"],
       "url": "https://www.gstatic.com/generate_204",
       "interval": "15m",
+      "passive_check": false,                   // default: false. Recent successful TCP dial counts
+                                                //   as proof of life while fresh (< interval) — probes stay quiet
       "mode": "round_robin",                    // default: least_test. least_test | round_robin
       "balancer": {                             // only valid with mode: round_robin
         "pool": 3,                              // default: 3. 0/omitted → 3; effective = min(pool, #outbounds)
@@ -195,8 +253,8 @@ you need and read its section below. Each comment shows the **default** and the 
 }
 ```
 
-> **Field count:** 26 XHTTP + 21 AmneziaWG (incl. `id`/`ip`/`ib`) + 5 `urltest` (`mode` +
-> `balancer{pool,pool_tolerance,sticky_hash}`). Mutually-exclusive / ignored fields are
+> **Field count:** 26 XHTTP + 30 AmneziaWG (incl. `id`/`ip`/`ib` and the 9 AWG 3.x keys) + 1 VLESS (`encryption`) +
+> 6 `urltest` (`mode`, `passive_check` + `balancer{pool,pool_tolerance,sticky_hash}`). Mutually-exclusive / ignored fields are
 > labelled inline above; the sections below give the per-field semantics, gotchas and live
 > verification status.
 
@@ -204,62 +262,14 @@ you need and read its section below. Each comment shows the **default** and the 
 
 ## 1. XHTTP transport
 
-XHTTP (Xray "splithttp"/"xhttp") is a v2ray transport that tunnels the proxy over plain HTTP/2 requests. It attaches to VLESS / VMess / Trojan via the shared `transport` block and composes with TLS, including **Reality**. (XHTTP is incompatible with XTLS-Vision — that is a protocol limitation, not ours.)
+XHTTP (Xray "splithttp"/"xhttp") is a v2ray transport that tunnels the proxy over plain HTTP/2 requests. It attaches to VLESS / VMess / Trojan via the shared `transport` block and composes with TLS, including **Reality**. (XHTTP is incompatible with XTLS-Vision — that is a protocol limitation, not ours.) The default wire shape is **byte-identical to the live-verified v1 client** — every v2 field (session/seq placement, uplink obfs, the `x_padding_*` family, `xmux` connection reuse) is opt-in.
 
-### Fields (`transport`)
+A minimal `transport` block is just `"type": "xhttp"` (mode `auto`); the [example below](#example--vless--xhttp--reality) adds a Reality node with `stream-one`.
 
-The default wire shape (everything below at its default) is **byte-identical to the
-live-verified v1 client**, so existing configs are unaffected — the v2 fields are all opt-in.
-
-**Core (v1):**
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `type` | string | — | must be `"xhttp"` |
-| `mode` | string | `auto` | `auto` \| `packet-up` \| `stream-up` \| `stream-one`. **`auto` resolves to `stream-one` on a Reality TLS, else `packet-up`** (both live-validated). `stream-one` had a downlink-framing bug, fixed in task 011 and live-verified on Reality nodes; select it explicitly only if you know the server needs it. |
-| `host` | string | TLS SNI / server | overrides the HTTP `Host` header |
-| `path` | string | `""` (root) | request path prefix; the session id (and, for `packet-up`, the upload sequence number) are appended as path segments when their placement is `path` |
-| `headers` | object | — | extra request headers sent on every XHTTP request |
-| `x_padding_bytes` | string | `"100-1000"` | inclusive byte-length **range** of the padding value (`"min-max"` or a single int). Drives both the legacy Referer `x_padding` length and the obfs-mode padding length |
-
-**Session / seq placement (v2)** — where the per-request session id and (packet-up) upload sequence number are carried:
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `session_placement` | string | `path` | `path` \| `query` \| `header` \| `cookie` |
-| `session_key` | string | `X-Session` (header) / `x_session` (query\|cookie) | name carrying the session id when placement ≠ `path`; unused for `path` |
-| `seq_placement` | string | `path` | `path` \| `query` \| `header` \| `cookie`. For `path`, the seq is the **second** appended segment (session id first — order is load-bearing) |
-| `seq_key` | string | `X-Seq` (header) / `x_seq` (query\|cookie) | name carrying the seq when placement ≠ `path`; unused for `path` |
-
-**Uplink-data placement (v2, packet-up)** — where the upload payload goes:
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `uplink_data_placement` | string | `auto` | `body` \| `auto` (== body) \| `header` \| `cookie`. `header`/`cookie` are **only valid in `packet-up`** (else error); they carry the payload as `base64.RawURLEncoding`, chunked into `<key>-<i>` headers / `<key>_<i>` cookies |
-| `uplink_data_key` | string | `X-Data` (header) / `x_data` (cookie) | base name for the chunked header/cookie payload; `""` for body |
-| `uplink_chunk_size` | string | cookie `2048-3072`, header `3000-4000`, else `= sc_max_each_post_bytes` | `"min-max"` range (in base64 chars) of each chunk; min floored to 64 |
-| `uplink_http_method` | string | `POST` | HTTP method for **upload** requests (download is always GET); upper-cased; `GET` allowed only in `packet-up` |
-
-**X-Padding obfuscation (v2)** — only active when `x_padding_obfs_mode` is `true`; otherwise the legacy Referer padding (note below) is used:
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `x_padding_obfs_mode` | bool | `false` | master switch. `false` → legacy Referer `x_padding`. `true` → the configurable `x_padding_*` family below |
-| `x_padding_placement` | string | `queryInHeader` | `cookie` \| `header` \| `query` \| `queryInHeader` |
-| `x_padding_key` | string | `x_padding` | cookie/query param name (unused for `header` placement) |
-| `x_padding_header` | string | `X-Padding` | header name (for `header` / `queryInHeader` placement) |
-| `x_padding_method` | string | `repeat-x` | `repeat-x` (N literal `X` bytes) \| `tokenish` (base62 token whose HPACK-Huffman length is tuned to ~N) |
-
-**Packet-up tuning (v2):**
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `sc_max_each_post_bytes` | string | `"1000000-1000000"` | `"min-max"` range bounding a single upload POST (the split threshold) |
-| `sc_min_posts_interval_ms` | string | `"30-30"` | `"min-max"` anti-burst delay between successive POSTs, in ms |
-
-**Accepted but ignored by the client** (present so an inbound-shaped config or a symmetric link doesn't error — the client never acts on them): `sc_max_concurrent_posts`, `server_max_header_bytes`, `no_sse_header`, `sc_max_buffered_posts`, `sc_stream_up_server_secs`, `no_grpc_header` (the client emits no gRPC-style headers, so there is nothing to omit).
-
-> **Note (default wire format):** with `x_padding_obfs_mode` off (the default), padding is carried as `x_padding=<zeros>` inside the `Referer` header (Xray's default placement) — live-validated against a real Xray (3x-ui) server. The server validates the `x_padding` length (default 100–1000) and replies `400` without it. Client and server Xray versions should still match (XHTTP evolves quickly).
+> **📖 The full field reference — all 26 XHTTP keys, their defaults, the `xmux` pool
+> semantics, range value forms and a troubleshooting table — is in
+> [lx-protocols-transports.md §1](lx-protocols-transports.md#1-xhttp-transport)**
+> ([RU](lx-protocols-transports.ru.md#1-xhttp-транспорт)).
 
 ### Example — VLESS + XHTTP + Reality
 
@@ -288,24 +298,47 @@ live-verified v1 client**, so existing configs are unaffected — the v2 fields 
 
 ---
 
-## 2. AmneziaWG 2.0 (AWG2)
+## 2. AmneziaWG 2.0/3.x (AWG2, AWG3)
 
 AWG is WireGuard + DPI-evasion obfuscation. It is configured as a normal sing-box **`wireguard` endpoint** with extra promoted fields. With `with_awg` these are pushed to the device; a config without any AWG field is a plain WireGuard endpoint (byte-identical to upstream behavior).
 
-AWG2 = AWG1 fields **plus** the CPS packets `I1`–`I5`. Both client and server must run AmneziaWG with **matching** parameters (the I-packets are configuration, not negotiated). For a friendlier way to set the first decoy, see the WireSock-style [`id`/`ip`/`ib`](#masquerade-id--ip--ib-wiresock-style-sugar-over-i1) sugar below, which generates `i1` for you.
+AWG2 = AWG1 fields **plus** the CPS packets `I1`–`I5`. Both client and server must run AmneziaWG with **matching** parameters (the I-packets are configuration, not negotiated). For a friendlier way to set the first decoy, the WireSock-style `id`/`ip`/`ib` sugar generates `i1` for you — see the [full reference](lx-protocols-transports.md#25-masquerade-sugar-id--ip--ib).
 
-### Fields (on the `wireguard` endpoint, alongside `private_key`/`peers`/…)
+AWG3 (amneziawg-go v3.0/v3.1, Amnezia's `amnezia-awg2` container with `protocol_version` 3.x) adds header protection (`header_protection_key` — server-side, must match), content padding, random trailers, disabled cookies and ranged timing overrides, plus a ranged `persistent_keepalive_interval`. All are endpoint-root fields like the AWG2 ones — [reference §2.10](lx-protocols-transports.md#210-awg-3x-header-protection-padding-trailers-timings).
 
-| Key | Type | Meaning |
-|-----|------|---------|
-| `jc` | int | default `0` (unset). Number of junk packets sent before the handshake |
-| `jmin` / `jmax` | int | default `0`. Min / max size of those junk packets |
-| `s1` / `s2` | int | default `0`. Junk prepended to the handshake **INIT** / **RESPONSE** messages |
-| `s3` / `s4` | int | default `0`. AWG 2.0 junk-size params (companions to `s1`/`s2`). `s4`'s per-transport-packet overhead is what drives the [lower MTU](#mtu) requirement; `s3` pads only cookie replies |
-| `h1` / `h2` / `h3` / `h4` | int \| `"min-max"` string | magic header values overriding WireGuard's four message types. Either a single uint32 (`1234567890`, AWG 1.x) or an inclusive range string (`"43613244-384550127"`, AWG 2.0 ranged headers) — the device picks a random value from the range per message. `0` **or** `""` = unset (counts as the WG default `1`/`2`/`3`/`4`) |
-| `i1` … `i5` | string | default `""`. AWG 2.0 CPS decoy packets, **case-sensitive** tag-format strings, sent in order before the handshake. `i1` typically mimics a real protocol (e.g. a QUIC/STUN header) and is **mutually exclusive with the [`id`/`ip`/`ib`](#masquerade-id--ip--ib-wiresock-style-sugar-over-i1) sugar**. Tags: `<b 0xHEX>` static bytes, `<c>` counter, `<t>` timestamp, `<r N>` random bytes, `<rc N>` random chars, `<rd N>` random digits |
+The AWG fields sit at the endpoint **root** (none on a peer), mirroring an `awg-quick`
+`.conf` `[Interface]` section: junk (`jc`/`jmin`/`jmax`), handshake padding (`s1`–`s4`),
+magic headers (`h1`–`h4`, single value or `"min-max"` range), and CPS decoys (`i1`–`i5`).
+An AWG endpoint needs a **lower `mtu`** than plain WireGuard because `s4` pads every data
+packet — the core defaults to `1280` when you set `s4` and omit `mtu`.
 
-> **Ranged headers (AWG 2.0):** the four `h1`–`h4` ranges (an unset header counts as its WireGuard default — `1`/`2`/`3`/`4`) **must not overlap**, or the device rejects the config with `headers must not overlap`. Set all four together, as awg2 exports do. A plain number `N` is equivalent to the range `"N-N"`; `0` means unset.
+> **📖 The full field reference — every junk/signature/magic/CPS field with its type
+> and default, the CPS tag format, the `id`/`ip`/`ib` masquerade sugar (four profiles,
+> which to pick, what reaches the wire), the MTU budget math, the `awg.conf` 1:1 mapping
+> and the verbatim validation errors — is in
+> [lx-protocols-transports.md §2](lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3)**
+> ([RU](lx-protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)).
+
+### Example — AmneziaWG 3.1 endpoint (Amnezia `amnezia-awg2` export)
+
+```jsonc
+{
+  "type": "wireguard", "tag": "awg3-out", "system": false, "mtu": 1376,
+  "address": ["10.8.1.7/32"],
+  "private_key": "<client-private-key-base64>",
+  "jc": 4, "jmin": 10, "jmax": 50,
+  "s1": 55, "s2": 42, "s3": 40, "s4": 12,      // all >= 12 for header protection
+  "h1": 1, "h2": 2, "h3": 3, "h4": 4,
+  "header_protection_key": "<HeaderProtectionKey-base64>",
+  "content_padding_addition": "10-100",
+  "rekey_after_time": "100-120", "rekey_timeout": "3-7", "reject_after_time": "150-180",
+  "keepalive_timeout": "5-15", "max_handshake_attempts": "15-20",
+  "random_trailers": true, "disable_cookies": true,
+  "peers": [ { "address": "77.239.123.44", "port": 30565,
+    "public_key": "<server-public-key-base64>", "pre_shared_key": "<preshared-key-base64>",
+    "allowed_ips": ["0.0.0.0/0", "::/0"], "persistent_keepalive_interval": "25-35" } ]
+}
+```
 
 ### Example — AmneziaWG 2.0 endpoint
 
@@ -341,103 +374,12 @@ AWG2 = AWG1 fields **plus** the CPS packets `I1`–`I5`. Both client and server 
 }
 ```
 
-### Masquerade `id` / `ip` / `ib` (WireSock-style sugar over `i1`)
+The **`id`/`ip`/`ib` masquerade sugar** (four decoy profiles: `quic`/`dns`/`stun`/`sip`),
+the **MTU budget** (why `s4` forces a lower MTU, the `sendmsg: message too long` symptom,
+the auto-`1280` default, `udp_fragment` for nested tunnels), and the **`awg.conf` 1:1
+mapping** are all documented in the full reference — see the 📖 link above.
 
-Hand-writing an `i1` CPS string is fiddly. As a friendlier alternative — the same
-naming [WireSock Secure Connect](https://www.wiresock.net/) uses — you can declare
-a masquerade by **domain / protocol / browser** and the device generates the `i1`
-decoy for you:
-
-| Key | Type | Meaning |
-|-----|------|---------|
-| `id` | string | masquerade **domain** (a host that looks normal for your region, e.g. `www.google.com`). Strict LDH hostname (letters/digits/`-`/`_`, labels ≤63, total ≤253). It is embedded into the decoy for `ip=quic` (as the **ClientHello SNI**), `ip=dns` (as the QNAME) and `ip=sip` (as the host) — only `ip=stun` has nowhere to carry a hostname and ignores it. **Required only for `quic`; for `dns`/`sip` a pseudo name is generated when absent; `stun` ignores it.** Whenever set, it is LDH-validated (invalid/injection-y values are **rejected**) |
-| `ip` | string | masquerade **protocol**: `quic` \| `dns` \| `stun` \| `sip` |
-| `ib` | string | masquerade **browser**: `chrome` \| `firefox` \| `curl`. Only meaningful with `ip=quic`, and even then the effect is **minimal** (see note) |
-
-The decoy is sent before the handshake, exactly like a hand-written `i1`. Each
-profile is a **client-initiated** packet shaped like that protocol (the shapes are
-inspired by the open-source WireSock reference, `amneziawg-proxy/src/transform.rs`,
-but emitted as the client request a peer actually sends first, not a server
-response); `quic` is a purpose-built RFC 9001 QUIC Initial that bypasses line-rate
-DPI:
-
-- **`quic`** — a full **QUIC Initial (RFC 9001)** carrying a realistic browser-shaped
-  ClientHello (with your `id` as the SNI) **split across several out-of-order CRYPTO
-  frames**: the first frame on the wire starts mid-ClientHello (offset≠0), so a
-  line-rate DPI that grabs the first frame and assumes offset 0 parses garbage and
-  fails open, while a real QUIC server reorders the frames normally. The layout is
-  randomized per call (no fixed cross-user signature), and `ip=quic` fills **both `i1`
-  and `i2`** with two independent Initials so the flow reads as a developing QUIC
-  session. This is the device-proven DPI bypass (a plain QUIC short header was
-  empirically blocked).
-- **`dns`** — a client DNS **query** (QR=0, QTYPE HTTPS) whose QNAME is your `id`,
-  carrying random cover bytes as an opaque unknown EDNS option.
-- **`stun`** — a WebRTC STUN **Binding Request** (magic cookie + USERNAME +
-  ICE-CONTROLLING + PRIORITY + SOFTWARE + MESSAGE-INTEGRITY + FINGERPRINT).
-- **`sip`** — a body-less SIP **INVITE request** (`i1`: request-line + Via/
-  Max-Forwards/To/From/Call-ID/CSeq/Contact + `Content-Type: application/sdp` and
-  `Content-Length: 0`, no SDP body) paired with the matching **`100 Trying`**
-  provisional response of the same dialog (`i2`), using your `id` (or a generated
-  pseudo-host) as the host and pronounceable pseudo user names.
-
-```jsonc
-{
-  "type": "wireguard", "tag": "awg-out", "mtu": 1280,
-  "address": ["10.0.0.2/32"], "private_key": "<client-private-key-base64>",
-  "jc": 4, "jmin": 40, "jmax": 70,
-  "id": "www.google.com", "ip": "quic", "ib": "chrome",
-  "peers": [ { "address": "engage.cloudflareclient.com", "port": 2408,
-    "public_key": "<server-public-key-base64>", "allowed_ips": ["0.0.0.0/0", "::/0"] } ]
-}
-```
-
-> **Notes & limitations.**
-> - `id`/`ip`/`ib` are **mutually exclusive** with an explicit `i1` — set one or the
->   other, not both (a config with both is rejected).
-> - This is a **decoy** sent before the handshake, not a full protocol session — the
->   `quic` Initial never completes a TLS handshake (it only needs to make the first
->   packet of the flow look like a legitimate QUIC start). The `id` **is** placed on
->   the wire as the ClientHello SNI (a DPI that publicly decrypts the Initial can read
->   it), so pick a **plausible, allowed** domain — never a VPN/Cloudflare marker.
-> - The DPI bypass rests on **CRYPTO-frame fragmentation, not on a TLS/JA3
->   fingerprint** — we do not imitate a specific browser fingerprint. `ib` is accepted
->   for WireSock config compatibility and validated, but currently does not change the
->   generated ClientHello.
-> - `id` is carried on the wire for `quic` (SNI), `dns` (QNAME) and `sip` (host); only
->   `ip=stun` produces a hostname-less decoy regardless of `id`.
-> - The motivating use case is easing connections to **Cloudflare WARP**.
-
-**📖 [Detailed examples →](../SPECS/009-WIRESOCK_MASQUERADE_PROFILES/EXAMPLES.md)** —
-full per-profile configs (incl. a Cloudflare WARP one), the generated CPS for each,
-a "which profile to pick" guide and a troubleshooting table of the exact validation
-errors.
-
-### MTU
-
-AmneziaWG's `s4` prepends junk bytes to **every transport (data) message**, so an AWG endpoint needs a **lower `mtu` than plain WireGuard**. (`s3` pads only cookie-reply messages, not data packets, so it does not affect the MTU budget.) If the obfuscated packet exceeds the path MTU, the OS rejects it and the tunnel completes its handshake but **cannot send data**:
-
-```
-peer(…) - received handshake response
-peer(…) - failed to send data packets: write udp4 …: sendmsg: message too long
-```
-
-Budget the overhead against a 1500-byte path:
-
-```
-mtu ≤ 1500 − 28 (UDP/IP) − 32 (WireGuard) − S4 junk bytes
-```
-
-For `S4 = 60` that is `mtu ≤ 1380`. **Use `1280`** (the AmneziaWG-recommended client MTU) for headroom on smaller path MTUs (PPPoE, nested tunnels). This is unrelated to the handshake — a too-high `mtu` lets the handshake succeed but silently breaks data transfer.
-
-**What sing-box-lx does for you:** if you omit `mtu` on an endpoint that sets `s4`, the core defaults to **`1280`** (instead of the plain-WireGuard `1408`). If you set `mtu` explicitly and it is too high for the junk overhead, the core logs a startup warning — against a conservative **1492**-byte (PPPoE) budget, `mtu ≤ 1492 − 28 − 32 − S4`, so it may flag a value a few bytes below the 1500-byte Ethernet ceiling. The warning is advisory; the tunnel still loads.
-
-**Outer socket no longer forces DF (SPEC 028).** By default sing-box-lx now lets the OS IP-fragment an oversize outer datagram on a `wireguard` endpoint (and a `masque` outbound) instead of dropping it — the old default set `IP_MTU_DISCOVER=IP_PMTUDISC_DO` (Linux/Android) / `IP_DONTFRAG` (macOS), which is exactly what produced the `sendmsg: message too long` above when an AWG datagram (`mtu + 32 + s4 + 28`) exceeded the path MTU. This is what lets **nested tunnels** work: `masque`/`wireguard`/AWG chained through `detour` in any combination, where the outer datagram is routinely oversize and must fragment. To restore the old behaviour on a specific endpoint, set `"udp_fragment": false` on it. Picking a correct `mtu` (above) still avoids fragmentation entirely and is preferred — fragmentation is the safety net, not the goal.
-
-Also keep `jmax` **below** the real path MTU: amneziawg-go warns that if a junk packet's size reaches the system MTU it gets IP-fragmented, which the same constrained paths then drop. Junk/signature params (`jc`, `s1`–`s4`, `i1`–`i5`) are client-side configuration only.
-
-Map an `awg.conf` / awg-quick file 1:1: `[Interface] PrivateKey/Address/Jc/Jmin/Jmax/S1–S4/H1–H4/I1–I5` → endpoint root; `[Peer] PublicKey/PresharedKey/Endpoint/AllowedIPs/PersistentKeepalive` → `peers[0]` (`Endpoint host:port` → `address`+`port`). An `H1 = N` line maps to JSON number `N`, a ranged `H1 = N-M` line (awg2 export) maps to JSON string `"N-M"` verbatim. If the `awg.conf` omits `MTU` or sets the WireGuard-default `1420`, lower it for AWG2 (see [MTU](#mtu) above).
-
-The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG obfuscation, wired via the `submodules/wireguard-go` submodule) — see SPECS/003.
+The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + AmneziaWG obfuscation, wired via the `submodules/wireguard-go` submodule) — see the [AWG feature](../SPECS/FEATURES/003-AWG/FEATURE.md).
 
 ---
 
@@ -449,7 +391,7 @@ scale to large node lists (only the pool is health-checked, not every node). Sel
 happens once per connection; a UDP/QUIC session stays on its node. With `mode` omitted (or
 `least_test`) the outbound behaves exactly like upstream and `balancer` must not be set.
 
-The `GetPool` CommandClient method (see [§5](#5-observability-commandclient-extensions)) is
+The `GetPool` CommandClient method (see [§8](#8-observability-commandclient-extensions)) is
 behind `with_lx_command`; the `mode`/`balancer` config fields themselves are always available.
 
 ### Fields (on a `urltest` outbound)
@@ -457,6 +399,7 @@ behind `with_lx_command`; the `mode`/`balancer` config fields themselves are alw
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `mode` | string | `least_test` | `least_test` (upstream behaviour) \| `round_robin` (rotate over the pool). `least_connection` is rejected (round_robin is statistically even) |
+| `passive_check` | bool | `false` | a recent successful TCP dial counts as proof of life while fresh (< `interval`): `least_test` skips whole re-test cycles while the selected node is passively confirmed; `round_robin` (only with `pool_tolerance: 0`) treats confirmed slots as live without probing. Cost: staler delay numbers in the UI. See [lx-energy.md](lx-energy.md) |
 | `balancer` | object | — | round_robin parameters; **only valid with `mode: round_robin`** (error otherwise). The upstream `tolerance` field is ignored in round_robin — use `pool_tolerance` instead (a startup warning points this out while `pool_tolerance` is unset) |
 
 #### `balancer` fields
@@ -522,31 +465,29 @@ through it like a WireGuard endpoint. Gated on `with_quic` + `with_gvisor` (both
 `LX_TAGS`). Key material is taken ready from config — device registration (ECDSA keys, WARP
 enroll) is done by the client, not the core.
 
-> ⚠️ **`network` here means TRANSPORT, not L4.** On a `masque` outbound `network` selects
-> `h3` (QUIC) or `h2` (HTTP/2); the tcp/udp list is `network_list`. This is the opposite of
-> every other outbound — a stray `"network": "tcp"` fails fast with *invalid network*.
+> ⚠️ **The HTTP version is `vhttp`, not `network`** (SPEC 062). Older configs used `network`
+> for `h3`/`h2` — the opposite of what `network` means on every other outbound. The old shape
+> still works and reports a deprecation; see the migration table below.
 
-### Fields (on a `masque` outbound)
+The required fields are `server`/`server_port`, the key pair (`private_key`/`public_key`,
+for the default `cloudflare` profile) and at least one of `ip`/`ipv6` (your local address
+*inside* the tunnel, not the exit IP). Everything else has a default: `profile: cloudflare`,
+`vhttp: auto`, `tls.server_name: www.cloudflare.com`, `mtu: 1280`, `idle_timeout` off,
+`keep_alive_period: 30s`, `network_list: tcp+udp`. TLS goes in the standard outbound `tls`
+block.
 
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `profile` | string | `cloudflare` | `cloudflare` (WARP quirks: `cf-connect-ip`, tolerates missing Extended-CONNECT settings, ECDSA public-key pinning, WARP SNI/URI defaults) \| `standard` (strict RFC 9484, for a self-hosted CONNECT-IP server) |
-| `network` | string | `h3` | **transport**: `h3` (CONNECT-IP over QUIC) \| `h2` (CONNECT-IP over HTTP/2, TCP:443). NOT the L4 list |
-| `private_key` | string (base64) | — | client EC private key, DER (`x509.ParseECPrivateKey`). Required for `cloudflare` |
-| `public_key` | string (base64) | — | endpoint PKIX public key, DER (`x509.ParsePKIXPublicKey`, ECDSA). Required for `cloudflare` |
-| `ip` | string (CIDR) | — | local IPv4 inside the tunnel; a bare address → `/32`. At least one of `ip`/`ipv6` required |
-| `ipv6` | string (CIDR) | — | local IPv6 inside the tunnel; a bare address → `/128` |
-| `sni` | string | per profile¹ | TLS ServerName. For WARP it deliberately differs from the endpoint (domain-fronting); the endpoint is authenticated by pinning `public_key`, not by the SNI |
-| `uri` | string | per profile¹ | CONNECT-IP request URI |
-| `mtu` | int | `1280` | userspace-stack MTU. On `h2`, max `16000` (one IP packet = one HTTP/2 DATA frame) |
-| `skip_cert_verify` | bool | `false` | disable public-key pinning (debug only — removes the only auth check) |
-| `idle_timeout` | duration | `5m` | suspend the tunnel after this long with no traffic (frees the gVisor stack, pumps and QUIC keepalive); the next dial rebuilds it. Negative disables suspend |
-| `keep_alive_period` | duration | `30s` | QUIC keepalive (h3). Negative disables |
-| `network_list` | list | tcp+udp | L4 protocols routed through the tunnel |
+> **The default SNI is `www.cloudflare.com`, not the endpoint hostname** — naming the
+> MASQUE endpoint in the ClientHello is exactly what a DPI filters on. The endpoint is
+> authenticated by pinning `public_key`, so the SNI is free to differ.
 
-¹ `cloudflare` defaults: `sni` = `consumer-masque.cloudflareclient.com`, `uri` = `https://cloudflareaccess.com`. `standard` has no defaults (both required).
+> **📖 The full field reference — every field with its type and default, the profile
+> matrix (`cloudflare` vs `standard`), key-material format, `vhttp` h3-vs-h2 guidance,
+> idle-suspend/keepalive behaviour, start-time validation, the pre-SPEC-062 migration
+> table and common footguns — is in
+> [lx-protocols-transports.md §3](lx-protocols-transports.md#3-masque-outbound-connect-ip--warp)**
+> ([RU](lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)).
 
-### Example — WARP over h3 (QUIC)
+### Example — WARP (defaults: `vhttp: auto`)
 
 ```jsonc
 {
@@ -555,8 +496,9 @@ enroll) is done by the client, not the core.
   "server": "162.159.198.2",
   "server_port": 443,
   "profile": "cloudflare",
-  "network": "h3",
-  "sni": "www.microsoft.com",       // any neutral high-traffic host (domain-fronting)
+  "tls": {
+    "server_name": "www.microsoft.com"   // any neutral high-traffic host (domain-fronting)
+  },
   "private_key": "<base64 DER EC private key>",
   "public_key":  "<base64 DER PKIX public key>",
   "ip":   "172.16.0.2/32",
@@ -565,7 +507,27 @@ enroll) is done by the client, not the core.
 }
 ```
 
-For `h2` (CONNECT-IP over TCP:443), change one field: `"network": "h2"`.
+`"vhttp": "auto"` — **the default** — tries h3 first and falls back to h2 if the QUIC handshake
+does not complete within 3 s, remembering the winning mode for the rest of the process. The failure
+mode it exists for is the endpoint (or a TCP-only hop in front of it — an HTTP CONNECT `detour`, a
+VLESS/Trojan link in a chain) **silently ignoring QUIC** — there is no error to see, only a hang;
+measured in the field through a proxied hop where Cloudflare answered TCP:443 but never replied to
+QUIC (SPEC 074). On the `standard` profile there is no h2 leg, so `auto` quietly means h3 there
+(an explicit `"vhttp": "auto"` on `standard` logs a warning).
+
+> **`profile: "standard"` requires `uri`** — the `cloudflare` profile has a default
+> (`https://cloudflareaccess.com`), `standard` has none, so without it the outbound does not come
+> up at all: `masque: uri is required for the standard profile — set it to the server's CONNECT-IP
+> request URI, e.g. https://<host>/.well-known/masque/ip/*/*/`. The value is sent verbatim as the
+> Extended CONNECT request URI (the core substitutes nothing in it), so write the template your
+> server publishes — RFC 9484 spells the full-tunnel form with `*` in the host/port positions.
+
+
+For `h2` (CONNECT-IP over TCP:443), change one field: `"vhttp": "h2"`. The `h2` path runs its
+TLS through the shared `common/tls` layer, so it gets ClientHello fragmentation like any other
+TLS outbound — including the automatic one under `detour`
+([§9](#9-automatic-clienthello-fragmentation-under-detour-spec-060)). `h3` is untouched by that:
+QUIC does not carry TLS over TCP at all.
 
 > A top-level `dns` block is required — the userspace stack works at L3 and does not resolve
 > domains itself; the outbound resolves them via the DNS router before dialing.
@@ -579,12 +541,182 @@ For `h2` (CONNECT-IP over TCP:443), change one field: `"network": "h2"`.
 > **Status.** Device-verified end-to-end on real Wi-Fi and LTE — `warp=on`, real traffic on both
 > `h3` and `h2`, idle-suspend + self-healing reconnect confirmed on-device.
 
-**📖 [Full reference →](../SPECS/021-MASQUE_CONNECT_IP_OUTBOUND/CONFIG.md)** — complete parameter
+**📖 [Full reference →](lx-protocols-transports.md#3-masque-outbound-connect-ip--warp)**
+([RU](lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)) — complete parameter
 table, profile matrix, key-material format, start-time validation and common footguns.
 
 ---
 
-## 5. Observability (CommandClient extensions)
+## 5. DNS server group (SPEC 033/035)
+
+Several DNS servers behind one tag with a selection strategy. Solves the
+"one dead DNS server kills resolution" problem: upstream's `dns.final` is a
+*default*, not a fallback, and a rule routing to a server fails the query
+outright on any network error, timeout or SERVFAIL. No build tag — the type
+is always available; a config without a `group` server behaves exactly like
+upstream.
+
+Servers carry **no states** (no down/backoff). There are two TTL'd record
+tables instead: an **error** record (any failed exchange; erases the
+server's live wins) and a **win** record (only the first success of a
+fan-out; any success erases the server's live errors). **Clean** = zero
+live errors. A network change amnesties both tables.
+
+### Fields (a `dns.servers[]` entry)
+
+```jsonc
+{
+  "type": "group",                  // selector — must be "group"
+  "tag": "public",
+  "servers": ["google", "cloudflare", "quad9"], // REQUIRED, ≥1 tags.
+                                    //   Order is NOT meaningful in any mode
+  "mode": "stable",                 // stable (default) | fastest | parallel
+  "error_ttl": "2m",                // default 2m: how long an error record lives
+  "win_ttl": "5m"                   // default 5m: how long a win record lives.
+                                    //   fastest only; ignored elsewhere (warning)
+}
+```
+
+**Failure** = transport error, timeout, or `SERVFAIL`. `NXDOMAIN` and empty
+answers are **valid responses** (and competitive wins when first in a fan).
+
+**Modes** (target chosen among the clean; with **no clean member** every
+mode makes exactly ONE attempt via the least dirty server and never fans —
+the anti-storm "survival" rule):
+
+- `stable` — stickiness before randomness: stay on the current server while
+  it is clean; re-elect a random clean one only when it is not. No
+  return-to-primary: a recovered ex-target just rejoins the pool.
+- `fastest` — the clean server with the most live wins; when nobody has a
+  live win, the query becomes an **election fan** to all clean members
+  (single-flight: one election at a time, concurrent queries go to a random
+  clean member). Re-election rhythm = `win_ttl` expiry.
+- `parallel` — every query fans to all clean members; no wins recorded;
+  N× traffic by definition.
+
+**Unified flow:** the single target gets a sub-deadline of HALF the
+remaining request budget — the rescue fan is guaranteed the rest. On target
+failure the query fans to the remaining clean members; the first success
+answers (and becomes the sticky target), stragglers are discarded (never
+cached, but their success still heals their server's error records). A fan
+failure observed after the request context ended is an artifact, recorded
+nowhere.
+
+**Observability:** the DNS query stream reports the member that actually
+answered (cache hits and total failures keep the group tag), the probe
+trace (group path inside-out, attempts with outcome
+`answered`/`timeout`/`network_error`/`servfail` and rtt), and the `fanned`
+/ `survival` flags. `GetDNSGroups` (§8, `with_lx_command`) returns the live
+records: per member — clean, live errors (count + age of newest), live
+wins, last rtt, current flag.
+
+> **Name leak warning.** Any mode fans the query name to all clean members
+> on a failure; `parallel` does it on every query. Do not mix internal and
+> public resolvers in one group.
+
+### Example — resilient public DNS as the default
+
+```jsonc
+{
+  "dns": {
+    "servers": [
+      { "type": "udp", "tag": "google",     "server": "8.8.8.8" },
+      { "type": "udp", "tag": "cloudflare", "server": "1.1.1.1" },
+      { "type": "group", "tag": "public",
+        "servers": ["google", "cloudflare"],
+        "mode": "fastest", "error_ttl": "2m", "win_ttl": "5m" }
+    ],
+    "final": "public"
+  }
+}
+```
+
+> ⚠️ The v1 contract (`mode: failover|race`, `interval`, `down_time`,
+> shipped in `v1.14.0-lx.16-rc.1`) is GONE: such configs fail to load.
+
+## 6. VLESS `encryption` — post-quantum layer (SPEC 032)
+
+A flat `encryption` field on a `vless` outbound enables the `mlkem768x25519plus`
+handshake **inside** VLESS — above the transport/TLS, below the VLESS client, and
+independent of REALITY's key exchange (different layer, do not confuse them).
+Servers that mandate it (Xray `decryption` configured) silently drop plain VLESS:
+the transport comes up (WS `101`, gRPC SETTINGS answered) and the peer then tears
+the connection down without a line in the core log — that is the symptom this
+field cures. Client half only; the server half is deliberately not ported
+(client-focused fork). Always built, no build tag.
+
+### Field (on a `vless` outbound)
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `encryption` | string | `""` | `""`/`"none"` = layer off (upstream behavior, byte for byte). Otherwise a spec string, validated at `check`/start with segment-precise errors |
+
+Spec-string grammar (dot-separated):
+
+```
+mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>[.<padding>…].<key>[.<key>…]
+```
+
+- **appearance** — how the layer looks on the wire: `native` (AEAD headers shaped
+  like TLSv1.3), `xorpub` (XOR-ed by public key), `random`.
+- **rtt** — `0rtt` or `1rtt`.
+- **padding** — optional short blocks like `100-111-1111` (a segment shorter than
+  20 chars before the first key is read as padding).
+- **key** — base64url of an X25519 (32-byte) or ML-KEM-768 (1184-byte) public
+  key; several keys may be listed. A working ML-KEM-768 key is ~1579 chars — a
+  much shorter one is a truncated key, not a different format.
+
+### Example
+
+```jsonc
+{
+  "type": "vless",
+  "tag": "pq-node",
+  "server": "example.com",
+  "server_port": 443,
+  "uuid": "00000000-0000-0000-0000-000000000000",
+  "encryption": "mlkem768x25519plus.native.0rtt.<base64url ML-KEM-768 key>",
+  "transport": { "type": "ws", "path": "/ws" }
+}
+```
+
+> **Status.** Shipped in `v1.14.0-lx.18`, **device-verified** on the subscription
+> that prompted it: +10 previously dead nodes (6/8 WS, 4/4 gRPC), no other
+> transport group moved. The `native.0rtt` form is the field-proven one;
+> `1rtt`+padding and `xorpub`/`random` parse and build but have not met a live
+> server yet. In a subscription the value arrives as
+> `settings.vnext[0].users[0].encryption` — on the sing-box outbound it is a flat
+> `encryption` field beside `uuid`; a config builder that drops it leaves the
+> core with nothing to act on.
+
+---
+
+## 7. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)
+
+A string on `tls.reality`, per node:
+
+```json
+"reality": { "enabled": true, "public_key": "…", "short_id": "0123abcd", "key_share": "classical" }
+```
+
+| Value | ClientHello | Works against |
+|---|---|---|
+| `""` (unset) | Whatever the fingerprint carries: `chrome` / `firefox` / `safari` send the `X25519MLKEM768` hybrid share, `edge` / `ios` / `android` / `360` / `qq` send X25519 only. Unchanged behaviour. | as before |
+| `"classical"` | `X25519MLKEM768` removed from `key_share` and `supported_groups` — the pre-SPEC-083 (upstream) hello, ~1.2 KB shorter (`chrome`: 594 B instead of 1720 B, one TCP segment instead of two). | **Xray < v26.9.8 only** — newer servers reject a hello without the hybrid share, silently (`reality verification failed`). |
+| `"hybrid"` | Requires the hybrid share. On a fingerprint that has none the handshake fails at once with `reality key_share "hybrid": fingerprint Edge 85 carries no X25519MLKEM768 key share` — instead of the server's silent rejection, which looks exactly like a wrong key. On `chrome` / `firefox` / `safari` it changes nothing. | as `""` |
+
+Any other value is a config error at load time (a typo must not silently become the default).
+
+Why it exists: some networks drop the two-segment hybrid first flight while the one-segment
+classical one passes (LxBox #142; Xray's own client hits the same wall, XTLS#6256). Newer Xray
+servers require the hybrid share. The core cannot pick for you between "the server rejects it" and
+"the network loses it", so the choice is per node. `classical` reduces post-quantum protection
+and only fits older servers; for a new server on such a network the remaining levers are
+`record_fragment` (§9) and a `detour`.
+
+---
+
+## 8. Observability (CommandClient extensions)
 
 These are **client-API additions, not config** — extra methods on libbox's `CommandClient`
 (the native gRPC management channel), all gated behind `with_lx_command` and consumed by
@@ -603,11 +735,21 @@ The added `CommandClient` methods:
   because standalone outbounds are not in any group).
 - **`GetPool(groupTag)`** — read a `urltest` group's current round_robin rotation pool, slot
   by slot (SPEC 019; see [§3](#3-round_robin-load-balancing-spec-019)).
+- **`GetDNSGroups()`** — the live state of every DNS `group` server (SPEC 035; see
+  [§5](#5-dns-server-group-spec-033035)): per member `clean` / `liveErrors` /
+  `lastErrorAgeMs` / `liveWins` / `current`.
+- **`GetRunningConfig()`** — the canonical JSON options the running box was actually built
+  from, post-override (SPEC 037). Returned as an object with a `Content()` accessor — a bare
+  `string` return would crash gomobile on android/arm64 (SPEC 038).
 - **`SubscribeDNSQueries(includeAnswers, handler)`** — a structured live DNS-query stream
   (SPEC 018): per query the `domain`, `qtype`, `rcode` (**`-1` = lookup failure**, a
   first-class state), the CNAME chain / answers (when `includeAnswers`), process attribution,
   and `dnsServer` / `dnsServerType` / `outbound` (an empty `outbound` means direct/system —
   a valid state, not a bug).
+- **`GetChains()`** — the state of every `chain` outbound (SPEC 073; see [§10](#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)):
+  per position the resolved node and, for positions ≥ 1, the link instance (`starting|active|idle`,
+  live connections, effective MTU and why, what `strip` removed, `rewrite` applied, last error),
+  plus dial/error/link counters.
 
 SPEC 017 also enriches the existing connection stream: a tracked `Connection` now carries a
 separate **`detourList`** field — the transport-detour tail of the final outbound, exposed
@@ -621,13 +763,144 @@ make -f Makefile.lx lx-build   # includes with_lx_command (and with_xhttp/with_a
 
 ---
 
-## 6. Validate & build
+## 9. Automatic ClientHello fragmentation under `detour` (SPEC 060)
+
+**Not a config key — a changed default.** When a TLS-over-TCP outbound (VLESS, trojan, vmess,
+anytls, shadowtls, http, masque `h2`, …) dials **through `detour`**, `record_fragment` now
+defaults to **on**.
+
+Why: the lower leg forwards our ClientHello under its own name, and the path MTU beyond that
+server can be lower than the ClientHello. The ICMP *Fragmentation Needed* never reaches us, so
+the packet simply vanishes and the connection dies as `tls handshake: EOF` after 12–17 s. It
+reproduces with a bare `curl`, so it is a property of the path, not of sing-box — but only
+fragmenting the first TLS record works around it. Measured through a broken leg: no
+fragmentation ❌ fail in 12 s; `fragment` ✅ 0.6 s; `record_fragment` ✅ **0.1 s**.
+
+Rules:
+
+- **An explicit config value always wins.** `"fragment": true` is not upgraded to record-split —
+  choosing packet-split stays your choice.
+- **Only the handshake is fragmented**, never the traffic after it. There is no ongoing cost.
+- **`h3`/QUIC is untouched** — no TLS over TCP there, and quic-go keeps its Initial below the
+  threshold anyway (masque `h3` through detour: 4/4 OK).
+- Nested chains are covered automatically: every link carries its own `detour`.
+- **REALITY nodes included — since SPEC 088.** Before it, the REALITY client built its uTLS
+  connection on the bare socket, so both an explicit `fragment` / `record_fragment` and this
+  default were accepted by the config and silently ignored there. The hybrid ClientHello after
+  [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) is 1.5–1.9 KB (two TCP segments),
+  so this matters more than it used to. Whether fragmentation helps on a network that drops that
+  first flight is a property of that network — see §7 for the other lever.
+
+> ⚠️ **Known limit:** an explicit `"record_fragment": false` is indistinguishable from "unset",
+> so auto still turns it on under `detour`. To dial through a detour with a different mode, set
+> `"fragment": true`; there is currently no way to ask for no fragmentation at all there.
+
+---
+
+## 10. `chain` outbound — a virtual multi-hop path of groups and nodes (SPEC 073)
+
+Build tag `with_lx_chain` (in the desktop `LX_TAGS` and the AAR). Without it
+`"type": "chain"` is rejected at load time.
+
+```json
+{
+  "type": "chain",
+  "tag": "virtualisation",
+  "outbounds": ["selector-in", "selector-mid", "selector-exit"],
+  "idle_timeout": "5m",
+  "strip_evasion": true,
+  "strip": { "multiplex.padding": false, "tls.utls": true },
+  "rewrite": { "wireguard": { "mtu": 1200 } }
+}
+```
+
+**Order = packet order.** `outbounds[0]` is the first hop from the client (it touches the
+real network and is used as is, dial fields included); the last entry is the node whose
+address the destination sees. This is the *opposite* of how a `detour` chain reads
+(there the node carrying `detour` is the exit). Any position may be a node, an endpoint
+or a group of any nesting — all three shapes behave the same and the length is free (≥ 2):
+
+```
+["selector-in", "selector-mid", "selector-exit"]   // all groups
+["node-in",     "node-mid",     "node-exit"]       // all nodes
+["node-in",     "selector-mid", "node-exit"]       // mixed
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `outbounds` | list of tags, ≥ 2, all distinct | required | positions in packet order; a repeated tag is a start error — see below |
+| `idle_timeout` | duration | `5m` | an idle link instance (see below) with zero live connections is removed after this; `0` = keep until stop |
+| `strip_evasion` | bool | `true` | remove one-sided DPI tricks from links at positions ≥ 1 (catalog below) |
+| `strip` | map key → bool | `{}` | patch over the catalog: `false` keep, `true` strip additionally; unknown key = start error |
+| `rewrite` | map type → JSON object | `{}` | merge-patch (RFC 7396) applied to the config of every link of that type at positions ≥ 1 |
+
+**One node at several positions.** Tags must be distinct: a repeat fails the start with
+`duplicate outbound in chain`, because in a list read as a path it is almost always a typo.
+To place the same node at several positions on purpose — the "sandwich" `WARP → someone
+else's node → WARP`, where the outer layers hide the middle node from your address and the
+destination from the middle node — declare it once per position under different tags; the
+declarations may carry identical credentials. Each position gets its own link with its own
+detour (a link is keyed by position and node), so the two instances are independent.
+
+How it works: **groups are never copied** — the chain calls the original group and lets it
+pick with all its logic (manual selection, health check, sticky, penalties,
+`interrupt_exist_connections`). A node picked at position ≥ 1 is served by its **link** —
+a runtime instance of that node that dials its server through the previous position. Links
+are created on first use (plus a warm-up at start for positions whose pick is known: nodes
+and selectors; urltest positions stay lazy) and share the node's tag, so the group's
+history and penalties keep working. A link is removed only when it has **no live
+connections and was not picked for `idle_timeout`**; switching a group does not kill the
+old link while a stream still runs through it. WireGuard links obey idle-suspend like any
+endpoint.
+
+- **`direct` at position ≥ 1 is transparent** — "no hop here"; put `direct` into a selector
+  to switch a position off at runtime. `block` rejects. All-`direct` positions ≥ 1 make the
+  chain equal to position 0.
+- **MTU of tunnel links (WireGuard, MASQUE) is lowered automatically**: `mtu` in the node's
+  config means "as standalone"; the chain subtracts the exact encapsulation overhead of
+  IP tunnels *below* the link (WG inside an IP tunnel −60/−80 by the server address family,
+  MASQUE ≈ −90), taking the worst case over a group's members. Over stream proxies
+  (vless/trojan/ss over TCP, mux) and datagram proxies the MTU is left as configured.
+- **`strip` catalog** (one-sided, the server never sees them): `tls.fragment` (packet-level
+  ClientHello fragmentation + `fragment_fallback_delay`; **`record_fragment` is not
+  touched** — under `detour` it switches on automatically as a path fix, see §9),
+  `multiplex.padding`, `xhttp.padding` (minimal range, obfs mode off). `tls.utls` is
+  available via `"tls.utls": true` (start error on a node that uses `reality`). Server
+  contracts — `flow`, `obfs`, `shadowtls`, `plugin`, `udp_over_tcp`, `ech`, transport
+  paths — are never stripped.
+- Order of transformations for a link: `strip` → `rewrite` → MTU. All patches are dry-run
+  at start against every node reachable at positions ≥ 1 — a `rewrite` with an unknown
+  field fails the start, not the first dial.
+
+> ⚠️ **DPI between hops.** The default strips ClientHello fragmentation at positions ≥ 1
+> because the usual DPI sits between you and the first hop. With a domestic relay as
+> position 0 and the DPI at the border (`["relay", "foreign-node"]`) the fragmentation is
+> needed at position 1 — set `"strip": {"tls.fragment": false}`.
+
+Observability: a connection's `detourList` (§8) shows the resolved path; `GetChains`
+(CommandClient) / Clash API `/proxies/<tag>` → `chain` give the per-position state (picked
+node, link state `starting|active|idle`, live connections, effective MTU and why, what was
+stripped/rewritten, last error) and counters. Dial errors name the position and the hop
+below: `chain[virtualisation] #2 (warp-exit) via #1 (node-m): …`. Per-layer latency:
+URLTest the internal hop tags `<tag>#0`, `<tag>#1`, … — each measures the path up to that
+position. Known limits: a group at position ≥ 1 ranks its nodes by their *direct*
+measurements; a tunnel above a hop without UDP fails at dial time with both positions
+named; nested `chain` is allowed only at position 0.
+
+---
+
+## 11. Protocol sniffers for LAN traffic (SPEC 078 / 080)
+
+New protocol names for the `sniffer` list of a `sniff` action and the `protocol` rule matcher: `wireguard`, `openvpn`, `ike`, `tailscale`, `sip` (the last one also sets `domain` from the Request-URI). They recognise VPN tunnels and calls from other devices behind a router by the shape of the first packet, and sit before upstream's uTP sniffer, which used to label plain WireGuard as `bittorrent`. Order, limits (only the first packet of a flow counts — junk and decoys are not seen through) and a router example — **[lx-sniff.md](lx-sniff.md)**.
+
+## 12. Validate & build
 
 ```sh
 git clone --recurse-submodules <repo>           # with_awg needs the submodule
 make -f Makefile.lx lx-build                     # builds ./sing-box with both features
 ./sing-box check -c lx-test/config/xhttp_reality.json
 ./sing-box check -c lx-test/config/awg2_basic.json
+./sing-box check -c lx-test/config/awg3_full.json     # AmneziaWG 3.1 field set
 
 # Android (optional): libbox.aar with with_xhttp+with_awg baked in (needs NDK r28 + OpenJDK 17)
 make lib_install && make lib_android             # → libbox.aar (SDK23) + libbox-legacy.aar (SDK21)

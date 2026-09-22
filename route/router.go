@@ -23,6 +23,8 @@ import (
 	"github.com/sagernet/sing/contrab/maphash"
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/pause"
+
+	"golang.org/x/sync/semaphore" // lx: SPEC 046 dns-hijack-async
 )
 
 var (
@@ -63,9 +65,15 @@ type Router struct {
 	// tick computes it. endpoint is the endpoint manager: WG/AWG endpoints live
 	// there (NOT in the outbound manager — outbound.Outbounds() never lists them),
 	// so the idle tick must iterate it to find IdleSuspendable endpoints.
+	// idleTeardownSet records that lx_idle_teardown was present in the config,
+	// which an explicit "0" (teardown disabled) makes indistinguishable from
+	// absent in the resolved duration alone. Prerequisite checks key off this,
+	// so "0" still requires lx_idle_suspend and still fails loudly in a build
+	// without the tag.
 	idleSuspend          time.Duration
 	idleSuspendReachable time.Duration
 	idleTeardown         time.Duration
+	idleTeardownSet      bool
 	idleStop             chan struct{}
 	idlePauseCallback    *list.Element[pause.Callback]
 	reachMu              sync.RWMutex
@@ -73,6 +81,12 @@ type Router struct {
 	reachDirty           atomic.Bool
 	endpoint             adapter.EndpointManager
 	// lx:end idle-suspend
+	// lx:begin dns-hijack-async
+	// SPEC 046. Bounds concurrent hijacked-DNS exchanges: HijackDNSPacket runs
+	// them off the stack packet loop, and the semaphore caps the goroutines the
+	// loop can spawn while a transport dial hangs (dead detour).
+	dnsHijackSem *semaphore.Weighted
+	// lx:end dns-hijack-async
 }
 
 func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions) *Router {
@@ -95,8 +109,10 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		platformInterface:    service.FromContext[adapter.PlatformInterface](ctx),
 		idleSuspend:          time.Duration(options.LXIdleSuspend),              // lx: SPEC 020 (0 = off)
 		idleSuspendReachable: time.Duration(options.LXIdleSuspendReachable),     // lx: SPEC 020 (0 = reachable never suspends)
-		idleTeardown:         idleTeardownOf(options),                           // lx: SPEC 020 level 3 (default = reachable window)
+		idleTeardown:         idleTeardownOf(options),                           // lx: SPEC 020 level 3 (default = reachable window, explicit "0" = off)
+		idleTeardownSet:      options.LXIdleTeardown != nil,                     // lx: SPEC 020 — "0" is a value, not an absence
 		endpoint:             service.FromContext[adapter.EndpointManager](ctx), // lx: SPEC 020 — idle tick iterates endpoints
+		dnsHijackSem:         semaphore.NewWeighted(dnsHijackConcurrencyLimit),  // lx: SPEC 046
 	}
 	router.reachDirty.Store(true) // lx: SPEC 020 — first tick computes the reachable set
 	return router
@@ -106,12 +122,13 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 // idleTeardownOf resolves the level-3 window (SPEC 020): an explicit
 // lx_idle_teardown wins; absent, it defaults to lx_idle_suspend_reachable (so a
 // config that opted into sleeping reachable endpoints also reclaims their
-// netstack after the same window of sleep). An explicit "0" is indistinguishable
-// from absent in badoption.Duration, which is why the default is a sane window
-// rather than "off" — teardown itself is gated on lx_idle_suspend being set.
+// netstack after the same window of sleep). An explicit "0" is the documented
+// kill switch: endpoints stay merely suspended and are never torn down, so the
+// next dial pays ~1 handshake RTT instead of a full rebuild. The option is a
+// pointer precisely so that "0" and absent stay distinguishable.
 func idleTeardownOf(options option.RouteOptions) time.Duration {
-	if teardown := time.Duration(options.LXIdleTeardown); teardown > 0 {
-		return teardown
+	if options.LXIdleTeardown != nil {
+		return time.Duration(*options.LXIdleTeardown)
 	}
 	return time.Duration(options.LXIdleSuspendReachable)
 }

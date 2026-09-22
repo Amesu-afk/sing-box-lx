@@ -72,6 +72,16 @@ type QueryEvent struct {
 	DNSServer     string
 	DNSServerType string
 	Outbound      []string
+	// SPEC 035 — group probe trace. GroupPath is the group nesting inside-out
+	// (empty = the query did not go through a group); Attempts is the probe
+	// chronology snapshotted at emit time (race stragglers resolved later are
+	// absent by design); Fanned marks a query that involved a fan-out
+	// (rescue / election / parallel); Survival marks an answer obtained via
+	// the least dirty server when no member was clean.
+	GroupPath []string
+	Attempts  []Attempt
+	Fanned    bool
+	Survival  bool
 }
 
 var _ adapter.LifecycleService = (*Manager)(nil)
