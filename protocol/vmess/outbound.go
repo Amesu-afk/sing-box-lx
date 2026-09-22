@@ -27,6 +27,8 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.VMessOutboundOptions](registry, C.TypeVMess, NewOutbound)
 }
 
+var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+
 type Outbound struct {
 	outbound.Adapter
 	logger          logger.ContextLogger
@@ -53,7 +55,14 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		serverAddr: options.ServerOptions.Build(),
 	}
 	if options.TLS != nil {
-		outbound.tlsConfig, err = tls.NewClient(ctx, logger, options.Server, common.PtrValueOrDefault(options.TLS))
+		outbound.tlsConfig, err = tls.NewClientWithOptions(tls.ClientOptions{
+			Context:       ctx,
+			Logger:        logger,
+			ServerAddress: options.Server,
+			Options:       common.PtrValueOrDefault(options.TLS),
+			// lx: SPEC 060 — see the vless outbound.
+			DialedThroughDetour: tls.DialedThroughDetour(options.DialerOptions),
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +114,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	return outbound, nil
 }
 
-func (h *Outbound) InterfaceUpdated() {
+func (h *Outbound) MultiplexEnabled() bool {
+	return h.multiplexDialer != nil
+}
+
+func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	if h.transport != nil {
 		h.transport.Close()
 	}

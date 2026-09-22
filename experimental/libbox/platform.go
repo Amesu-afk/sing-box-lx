@@ -17,6 +17,7 @@ type PlatformInterface interface {
 	ReadWIFIState() *WIFIState
 	ClearDNSCache()
 	SendNotification(notification *Notification) error
+	CancelNotification(identifier string, typeID int32) error
 	StartNeighborMonitor(listener NeighborUpdateListener) error
 	CloseNeighborMonitor(listener NeighborUpdateListener) error
 	RegisterMyInterface(name string)
@@ -88,6 +89,7 @@ func (c *ConnectionOwner) AndroidPackageNames() StringIterator {
 
 type InterfaceUpdateListener interface {
 	UpdateDefaultInterface(interfaceName string, interfaceIndex int32, isExpensive bool, isConstrained bool)
+	UpdateNetworkPath(networkPath string)
 }
 
 const (
@@ -106,6 +108,7 @@ type NetworkInterface struct {
 
 	Type      int32
 	DNSServer StringIterator
+	Gateway   StringIterator
 	Metered   bool
 }
 

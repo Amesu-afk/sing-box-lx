@@ -3,11 +3,13 @@ package v2rayxhttp
 import (
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/sagernet/sing-box/log"
 
@@ -56,6 +58,12 @@ type metaConfig struct {
 	seqPlacement     string
 	seqKey           string
 
+	// sessionTable is the resolved alphabet random session ids are drawn from, and
+	// sessionLength the resolved length range. Both empty/zero means "dashed UUID"
+	// (the default). They are only ever both set or both unset — see resolveSessionID.
+	sessionTable  string
+	sessionLength intRange
+
 	uplinkDataPlacement string
 	uplinkDataKey       string
 	uplinkChunkSize     intRange // resolved (placement-dependent default already applied)
@@ -73,9 +81,12 @@ type metaConfig struct {
 
 // normalizeMeta validates the placement/obfs option set against the selected mode
 // and resolves all defaults, mirroring sing-box-extended checkV2RayXHTTPBaseOptions
-// + GetNormalized*. See SPECS/002 PARAM_MAP.md for the per-field rules.
+// + GetNormalized*. See SPECS/TASKS/002 PARAM_MAP.md for the per-field rules.
 func normalizeMeta(opts metaOptions, mode string) (metaConfig, error) {
-	var m metaConfig
+	var (
+		m   metaConfig
+		err error
+	)
 
 	// --- session placement / key ---
 	m.sessionPlacement = orDefault(opts.SessionPlacement, placementPath)
@@ -90,6 +101,11 @@ func normalizeMeta(opts metaOptions, mode string) (metaConfig, error) {
 		return m, err
 	}
 	m.seqKey = resolveKey(opts.SeqKey, m.seqPlacement, "X-Seq", "x_seq")
+
+	// --- session id alphabet / length ---
+	if m.sessionTable, m.sessionLength, err = resolveSessionID(opts.SessionTable, opts.SessionLength); err != nil {
+		return m, err
+	}
 
 	// --- uplink data placement / key ---
 	m.uplinkDataPlacement = orDefault(opts.UplinkDataPlacement, placementAuto)
@@ -115,7 +131,6 @@ func normalizeMeta(opts metaOptions, mode string) (metaConfig, error) {
 	}
 
 	// --- packet-up tuning ranges ---
-	var err error
 	if m.scMaxEachPostBytes, err = parseRangeOr(opts.ScMaxEachPostBytes, "sc_max_each_post_bytes", intRange{1000000, 1000000}); err != nil {
 		return m, err
 	}
@@ -154,6 +169,8 @@ type metaOptions struct {
 	SessionKey           string
 	SeqPlacement         string
 	SeqKey               string
+	SessionTable         string
+	SessionLength        string
 	UplinkDataPlacement  string
 	UplinkDataKey        string
 	UplinkChunkSize      string
@@ -165,6 +182,80 @@ type metaOptions struct {
 	XPaddingMethod       string
 	ScMaxEachPostBytes   string
 	ScMinPostsIntervalMs string
+}
+
+// predefinedSessionTables are the named alphabets a session_table may reference,
+// byte-for-byte the set Xray ships (splithttp/config.go PredefinedTable). The names
+// are case-sensitive: "hex" and "HEX" are different alphabets.
+var predefinedSessionTables = map[string]string{
+	"ALPHABET": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+	"Alphabet": "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+	"BASE36":   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+	"Base62":   "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+	"HEX":      "0123456789ABCDEF",
+	"alphabet": "abcdefghijklmnopqrstuvwxyz",
+	"base36":   "0123456789abcdefghijklmnopqrstuvwxyz",
+	"hex":      "0123456789abcdef",
+	"number":   "0123456789",
+}
+
+// minSessionIDSpace is the smallest acceptable id space (len(table)^min). Xray
+// requires "more than 2.1 billion" combinations so two independent clients do not
+// draw the same id and get merged into one server-side session. It is int64: 2^31
+// does not fit in a 32-bit int, and this builds for 386/armv7/mips too.
+const minSessionIDSpace int64 = 1 << 31
+
+// resolveSessionID resolves the session id alphabet and length range. Both fields
+// are needed to take effect: with either empty the client keeps Xray's default
+// dashed-UUID id, which is what an unconfigured Xray peer also produces. A
+// half-configured pair is a config mistake rather than a silent fallback, so it is
+// rejected instead of quietly generating UUIDs the operator did not ask for.
+func resolveSessionID(table, length string) (string, intRange, error) {
+	table = strings.TrimSpace(table)
+	length = strings.TrimSpace(length)
+	if table == "" && length == "" {
+		return "", intRange{}, nil
+	}
+	if table == "" || length == "" {
+		return "", intRange{}, E.New("v2ray-xhttp: session_table and session_length must be set together")
+	}
+	if predefined, ok := predefinedSessionTables[table]; ok {
+		table = predefined
+	}
+	for i := 0; i < len(table); i++ {
+		if table[i] > unicode.MaxASCII {
+			return "", intRange{}, E.New("v2ray-xhttp: session_table must be ASCII")
+		}
+	}
+	r, err := parseRange(length, "session_length")
+	if err != nil {
+		return "", intRange{}, err
+	}
+	if r.min <= 0 {
+		return "", intRange{}, E.New("v2ray-xhttp: session_length floor must be above 0")
+	}
+	if !sessionIDSpaceSufficient(len(table), r.min) {
+		return "", intRange{}, E.New("v2ray-xhttp: session_table/session_length yield fewer than ", minSessionIDSpace,
+			" possible ids (alphabet ", len(table), " chars ^ min length ", r.min, "); widen either to avoid session collisions")
+	}
+	return table, r, nil
+}
+
+// sessionIDSpaceSufficient reports whether size^length >= minSessionIDSpace without
+// overflowing: it multiplies up in int64 (a 32-bit int cannot even hold the
+// threshold) and stops as soon as the threshold is cleared.
+func sessionIDSpaceSufficient(size, length int) bool {
+	if size <= 1 {
+		return false
+	}
+	space := int64(1)
+	for i := 0; i < length; i++ {
+		space *= int64(size)
+		if space >= minSessionIDSpace {
+			return true
+		}
+	}
+	return false
 }
 
 func orDefault(v, def string) string {
@@ -290,18 +381,15 @@ func (c *Client) applyMeta(request *http.Request, basePath, sessionID, seqStr st
 	m := &c.meta
 	path := basePath
 
-	// session id — an empty sessionID (stream-one) emits no session segment and the
-	// request targets "<path>/" (guaranteed trailing slash). Xray's splithttp server
-	// normalises its configured path WITH a trailing slash and matches it as a
-	// prefix, so a bare "<path>" fails that prefix check and the server returns 404
-	// (observed live: REALITY dials 404 on the bare form). "<path>/" passes and
-	// leaves an empty first segment after the prefix — which is how the server
-	// recognises the bidirectional stream-one branch — and it is also accepted by a
-	// server whose path has no trailing slash, so it is the robust form (lx: SPEC
-	// 011/002). Every other mode keeps the configured path verbatim (trailing slash
-	// included) so reverse-proxy routing (nginx `location /x/ {}`) matches without a 301.
+	// session id — an empty sessionID (stream-one) emits no session metadata, but
+	// the path still carries the trailing slash that path-placement implies.
+	// Xray/NekoBox normalize the CONFIGURED path to end in "/" whenever session or
+	// seq live in the path (GetNormalizedPath), and the server prefix-matches every
+	// request against that normalized path. Trimming the slash here made stream-one
+	// request "<path>" against a server expecting "<path>/" — no prefix match, 404,
+	// and the dial hung until timeout (lx: SPEC 043, wire-reproduced).
 	if sessionID == "" {
-		path = ensureStreamOneSlash(path)
+		path = barePathForStreamOne(path, m)
 	} else {
 		switch m.sessionPlacement {
 		case placementPath:
@@ -354,6 +442,14 @@ func (c *Client) applyUplinkData(request *http.Request, payload []byte) {
 		request.Body = readCloser{&byteReader{data: payload}}
 		request.Header.Set("Content-Type", "application/octet-stream")
 		request.ContentLength = int64(len(payload))
+		// lx: SPEC 076 — the payload is a bounded slice we own, so hand http2 a
+		// replay: with GetBody set the transport silently retries the POST on a
+		// fresh connection after a graceful GOAWAY instead of surfacing "cannot
+		// retry err ... after Request.Body was written" and killing the session
+		// (observed in the issue #14 field logs).
+		request.GetBody = func() (io.ReadCloser, error) {
+			return readCloser{&byteReader{data: payload}}, nil
+		}
 	}
 }
 
@@ -375,25 +471,31 @@ func chunkEncoded(payload []byte, size intRange) []string {
 	return chunks
 }
 
-// timeNow is a small indirection over time.Now to keep the throttle logic testable.
-func timeNow() time.Time { return time.Now() }
+// timeNow is a small indirection over time.Now to keep the throttle logic and
+// the XMUX age-based eviction (SPECS/TASKS/059) testable without sleeping.
+var timeNow = time.Now
 
-// ensureStreamOneSlash guarantees exactly one trailing slash on the stream-one
-// (empty sessionId) path, so the request targets "<path>/". Xray's splithttp
-// server matches its trailing-slash-normalised path as a prefix, so a bare
-// "<path>" 404s while "<path>/" passes and leaves an empty first segment (empty
-// sessionId → stream-one). It is also accepted by a server whose configured path
-// carries no trailing slash, making it the robust form. Root "/" stays "/". Used
+// trimBarePathSlash strips trailing slashes for the stream-one bare-path case,
+// while never collapsing the root path to "" (a root-only path stays "/"). Used
 // only when no sessionId is appended, so it cannot affect proxy routing for the
 // other modes, which keep the configured path verbatim.
-func ensureStreamOneSlash(path string) string {
+// barePathForStreamOne returns the path a stream-one request targets. stream-one
+// sends no sessionId, but the trailing slash is still load-bearing: Xray and
+// NekoBox normalize the configured path to end in "/" when session or seq are
+// placed in the path, and the server prefix-matches requests against it. So the
+// slash is appended under exactly the same condition, and left alone otherwise
+// (non-path placements keep the configured path verbatim).
+func barePathForStreamOne(path string, m *metaConfig) string {
 	if path == "" {
 		return "/"
 	}
-	if strings.HasSuffix(path, "/") {
+	if m.sessionPlacement != placementPath && m.seqPlacement != placementPath {
 		return path
 	}
-	return path + "/"
+	if !strings.HasSuffix(path, "/") {
+		return path + "/"
+	}
+	return path
 }
 
 // appendPathSegment joins a "/"-separated segment onto a path, inserting exactly one

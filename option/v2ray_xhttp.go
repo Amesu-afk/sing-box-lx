@@ -3,9 +3,9 @@ package option
 import "github.com/sagernet/sing/common/json/badoption"
 
 // V2RayXHTTPOptions configures the XHTTP (Xray "splithttp"/"xhttp") client
-// transport. It is a sing-box-lx downstream addition; see SPECS/002. JSON keys
+// transport. It is a sing-box-lx downstream addition; see SPECS/TASKS/002. JSON keys
 // are snake_case to match Xray's stream settings, sing-box-extended and the rest
-// of sing-box. See SPECS/002-XHTTP_CLIENT_TRANSPORT/PARAM_MAP.md for the precise
+// of sing-box. See SPECS/TASKS/002-XHTTP_CLIENT_TRANSPORT/PARAM_MAP.md for the precise
 // per-field semantics audited against Xray-core and sing-box-extended.
 //
 // Modes (Xray-compatible):
@@ -36,9 +36,17 @@ type V2RayXHTTPOptions struct {
 	// ("min-max", e.g. "100-1000", or a single integer). Empty defaults to
 	// "100-1000".
 	XPaddingBytes string `json:"x_padding_bytes,omitempty"`
-	// NoGRPCHeader is accepted for forward-compatibility with Xray stream settings
-	// but has no effect: this client emits no gRPC-style headers, so there is
-	// nothing to omit.
+	// Xmux configures HTTP connection reuse (Xray "XMUX"). A nil value still
+	// enables XMUX with Xray-compatible defaults — matching Xray-core and
+	// sing-box-extended, where the pool is always on. See SPECS/TASKS/059.
+	Xmux *V2RayXHTTPXmuxOptions `json:"xmux,omitempty"`
+
+	// NoGRPCHeader omits the "Content-Type: application/grpc" request header that
+	// the streamed-body modes (stream-one, stream-up) set by default, mirroring
+	// Xray's FillStreamRequest (transport/internet/splithttp/config.go). The
+	// header is load-bearing in front of reverse proxies/CDNs, which key
+	// response streaming (no buffering) on a gRPC content type — without it a
+	// stream-one dial can hang until timeout.
 	NoGRPCHeader bool `json:"no_grpc_header,omitempty"`
 
 	// ---- session / seq placement (core) -------------------------------------
@@ -57,6 +65,19 @@ type V2RayXHTTPOptions struct {
 	// SeqKey is the name carrying the seq when placement is not "path". Empty
 	// defaults to "X-Seq" (header) or "x_seq" (query/cookie).
 	SeqKey string `json:"seq_key,omitempty"`
+
+	// SessionTable is the alphabet the random session id is drawn from. It is
+	// either a literal ASCII alphabet ("abc123") or the name of a predefined one
+	// (hex, HEX, number, alphabet, Alphabet, ALPHABET, base36, BASE36, Base62).
+	// Empty (or an empty SessionLength) keeps the default dashed-UUID session id.
+	// (Xray proto field is sessionIDTable; we expose session_table to match our
+	// session_placement/session_key naming.)
+	SessionTable string `json:"session_table,omitempty"`
+	// SessionLength is the session id length in characters, as a "min-max" range
+	// or a single integer. Only used together with SessionTable. The floor must be
+	// above 0 and the id space (len(table)^min) must exceed 2^31 so independent
+	// clients do not collide onto one server-side session.
+	SessionLength string `json:"session_length,omitempty"`
 
 	// ---- uplink data (obfs / tuning) ----------------------------------------
 
@@ -112,7 +133,7 @@ type V2RayXHTTPOptions struct {
 	// and sing-box-extended) that once capped concurrent upload POSTs. Current
 	// Xray serializes to one POST body in flight at a time (matching our
 	// sequential packet-up upload), so this field is accepted for config/link
-	// symmetry but IGNORED. See SPECS/002 PARAM_MAP.md.
+	// symmetry but IGNORED. See SPECS/TASKS/002 PARAM_MAP.md.
 	ScMaxConcurrentPosts int `json:"sc_max_concurrent_posts,omitempty"`
 
 	// ---- server-only (accepted for config symmetry, IGNORED by the client) --
@@ -131,4 +152,45 @@ type V2RayXHTTPOptions struct {
 	// server-injected keepalive padding from the stream-up download — verify against
 	// the target server if it emits any.
 	ScStreamUpServerSecs string `json:"sc_stream_up_server_secs,omitempty"`
+}
+
+// V2RayXHTTPXmuxOptions configures XHTTP connection reuse ("XMUX"): how many
+// HTTP connections the client keeps, how many streams share one, and when a
+// connection is rotated out of the pool. Mirrors Xray's XmuxConfig
+// (transport/internet/splithttp/config.go) and sing-box-extended's
+// V2RayXHTTPXmuxOptions. See SPECS/TASKS/059-XHTTP_XMUX.
+//
+// The range fields take the "min-max" string form used by the rest of our XHTTP
+// options (e.g. "600-900"), a single integer ("4" == "4-4"), or — for configs
+// authored against Xray/sing-box-extended — a two-element JSON array ([600,900]).
+// Each range is rolled ONCE, not per request: the manager rolls max_concurrency
+// and max_connections at construction, and every connection rolls its own reuse
+// limits when it is created.
+//
+// Defaults follow Xray's all-or-nothing rule: a section that is absent OR
+// entirely empty selects max_concurrency "1-1", h_max_request_times "600-900",
+// h_max_reusable_secs "1800-3000"; a section with ANY field set takes every
+// field as written, and unset ranges stay zero (= unlimited).
+type V2RayXHTTPXmuxOptions struct {
+	// MaxConcurrency bounds how many streams may share a single HTTP connection.
+	// Mutually exclusive with MaxConnections.
+	MaxConcurrency XmuxRange `json:"max_concurrency,omitempty"`
+	// MaxConnections bounds how many connections the pool holds; while the pool
+	// is below this count a new connection is always opened. Empty means
+	// unlimited. Mutually exclusive with MaxConcurrency.
+	MaxConnections XmuxRange `json:"max_connections,omitempty"`
+	// CMaxReuseTimes is how many times a connection may be handed out for a new
+	// stream before it is retired. Empty means unlimited.
+	CMaxReuseTimes XmuxRange `json:"c_max_reuse_times,omitempty"`
+	// HMaxRequestTimes is how many HTTP requests may traverse a connection before
+	// it is retired. Note this counts requests, not streams: in packet-up one
+	// stream issues many upload POSTs.
+	HMaxRequestTimes XmuxRange `json:"h_max_request_times,omitempty"`
+	// HMaxReusableSecs is how long a connection stays reusable, in seconds.
+	HMaxReusableSecs XmuxRange `json:"h_max_reusable_secs,omitempty"`
+	// HKeepAlivePeriod is the HTTP/2 keep-alive ping period in seconds (the
+	// transport's ReadIdleTimeout). Zero selects the default; a negative value
+	// disables keep-alive pings. Unlike the fields above this is a plain integer,
+	// matching the reference.
+	HKeepAlivePeriod int64 `json:"h_keep_alive_period,omitempty"`
 }

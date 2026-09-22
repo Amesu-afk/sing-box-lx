@@ -2,9 +2,24 @@
 
 > 🌐 Русская версия: **[lx-energy.ru.md](lx-energy.ru.md)**.
 >
-> Mechanism specs: [SPEC 020](../SPECS/020-MULTI_WG_IDLE_BUFFER_HEAT/SPEC.md) (idle-suspend), [SPEC 019](../SPECS/019-URLTEST_MODE_STICKY/SPEC.md) (round_robin/pool/passive_check), [SPEC 007](../SPECS/007-AWG_OVER_WIREGUARD_DETOUR_GUARD/SPEC.md) (AWG guard). Config keys of all lx features: [lx-config.md](lx-config.md).
+> Features: [ENERGY](../SPECS/FEATURES/008-ENERGY/FEATURE.md) (idle-suspend), [URLTEST_BALANCE](../SPECS/FEATURES/007-URLTEST_BALANCE/FEATURE.md) (round_robin/pool/passive_check), [AWG](../SPECS/FEATURES/003-AWG/FEATURE.md). Config keys of all lx features: [lx-config.md](lx-config.md).
 
 This is the main document on **why the fork saves battery on Android and how to control it**. Upstream sing-box keeps every WireGuard/AmneziaWG endpoint alive 24/7 regardless of traffic: recv-workers with their buffers (~8 MB per worker at the mobile `BatchSize=128` — the dominant GC-heat source; measured on-device: 8 endpoints suspended freed 134 MB), plus keepalive/handshake timers that wake the radio. The fork adds selective **suspension** of idle endpoints and teaches the health-check machinery **not to keep them awake**. The full model, step by step, follows.
+
+## Table of contents
+
+- [1. The big picture: three layers](#1-the-big-picture-three-layers)
+- [2. The reachability layer](#2-the-reachability-layer)
+- [3. Two idle thresholds](#3-two-idle-thresholds)
+- [4. The tick decision: gate chain](#4-the-tick-decision-gate-chain)
+- [5. Down, Close, and the wake cost](#5-down-close-and-the-wake-cost)
+- [6. urltest: probes, and how they were taught to stay quiet](#6-urltest-probes-and-how-they-were-taught-to-stay-quiet)
+- [7. Timelines](#7-timelines)
+  - [Night (round_robin pool=3, interval=15m, idle_timeout=30m, thresholds 30s/30m)](#night-round_robin-pool3-interval15m-idle_timeout30m-thresholds-30s30m)
+  - [Selector switching away from a group](#selector-switching-away-from-a-group)
+- [8. Recommended mobile configuration](#8-recommended-mobile-configuration)
+- [9. Guarantees (what will NOT break)](#9-guarantees-what-will-not-break)
+- [10. Observability and troubleshooting](#10-observability-and-troubleshooting)
 
 ---
 
@@ -58,7 +73,7 @@ The set is cached and recomputed **only on events** (selector switch, urltest au
 
 | | Unreachable endpoint | Reachable endpoint | Any SLEEPING endpoint |
 |---|---|---|---|
-| Threshold | `lx_idle_suspend` (30s idle) | `lx_idle_suspend_reachable` (5m idle); `0`/absent — never | `lx_idle_teardown` (5m of **sleep**, counted from falling asleep) |
+| Threshold | `lx_idle_suspend` (30s idle) | `lx_idle_suspend_reachable` (5m idle); `0`/absent — never | `lx_idle_teardown` (5m of **sleep**, counted from falling asleep); an explicit `0` never tears down, an absent key inherits the reachable window |
 | What happens | `Down()` — freeze | `Down()` — freeze | **`Close()`** — full teardown: the gVisor netstack (~6 MB/node) goes too |
 | Wake | dial, +1 RTT | dial, +1 RTT | dial, **rebuild ~0.5–1 s** on the first request |
 

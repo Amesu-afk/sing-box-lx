@@ -2,6 +2,7 @@ package openconnect
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/netip"
 	"net/url"
@@ -14,6 +15,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/endpoint"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/iponly"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -50,6 +52,8 @@ type Endpoint struct {
 	flavor                  string
 	stateAccess             sync.Mutex
 	state                   atomic.Pointer[clientState]
+	dnsTransportAccess      sync.Mutex
+	dnsTransport            *DNSTransport
 	deviceStarted           bool
 	readLoopDone            chan struct{}
 	statusAccess            sync.Mutex
@@ -65,10 +69,40 @@ type clientState struct {
 	tunnelConfigured bool
 	localAddresses   []netip.Prefix
 	routeSet         *netipx.IPSet
+	preferredDomains map[string]bool
+	configuration    openconnecttransport.Configuration
 	tunnelInfo       adapter.OpenConnectTunnelInfo
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.OpenConnectEndpointOptions) (adapter.Endpoint, error) {
+	tcpKeepAliveEnabled := options.TCPKeepAliveEnabled || options.TCPKeepAlive != 0 || options.TCPKeepAliveInterval != 0
+	if tcpKeepAliveEnabled && options.DisableTCPKeepAlive {
+		return nil, E.New("tcp_keep_alive_enabled conflicts with disable_tcp_keep_alive")
+	}
+	if !tcpKeepAliveEnabled {
+		options.DisableTCPKeepAlive = true
+	} else if options.TCPKeepAlive == 0 && options.TCPKeepAliveInterval == 0 {
+		options.TCPKeepAliveSystemDefaults = true
+	}
+	if options.CSD != nil && options.CSD.WrapperPath != "" {
+		err := adapter.CheckSecurityFeature(ctx, "OpenConnect `csd.wrapper_path`")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.HIP != nil && options.HIP.WrapperPath != "" {
+		err := adapter.CheckSecurityFeature(ctx, "OpenConnect `hip.wrapper_path`")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.TNCC != nil && options.TNCC.WrapperPath != "" {
+		err := adapter.CheckSecurityFeature(ctx, "OpenConnect `tncc.wrapper_path`")
+		if err != nil {
+			return nil, err
+		}
+	}
+	options.UDPBindPort = options.DTLSLocalPort
 	loopContext, cancelLoop := context.WithCancel(ctx)
 	openConnectEndpoint := &Endpoint{
 		endpointBase: endpointBase{
@@ -98,7 +132,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	serverURL, err := url.Parse(server)
 	if err != nil {
-		return nil, E.Cause(err, "parse OpenConnect server")
+		return nil, E.Cause(err, "parse server")
 	}
 	serverPort := serverURL.Port()
 	if serverPort == "" {
@@ -162,6 +196,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 }
 
 func (e *Endpoint) buildClientOptions(options option.OpenConnectEndpointOptions, outboundDialer N.Dialer) (openconnect.ClientOptions, error) {
+	var tlsConfig *tls.Config
+	if options.TLS.Insecure {
+		tlsConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 	certificateAuthority, err := materialSource("tls.certificate_authority", options.TLS.CertificateAuthority, options.TLS.CertificateAuthorityPath)
 	if err != nil {
 		return openconnect.ClientOptions{}, err
@@ -185,12 +223,13 @@ func (e *Endpoint) buildClientOptions(options option.OpenConnectEndpointOptions,
 	var tokenOptions *openconnect.TokenOptions
 	if options.Token != nil {
 		tokenOptions = &openconnect.TokenOptions{
-			Mode:     options.Token.Mode,
-			Secret:   options.Token.Secret,
-			PIN:      options.Token.PIN,
-			Password: options.Token.Password,
-			DeviceID: options.Token.DeviceID,
-			Counter:  options.Token.Counter,
+			Mode:       options.Token.Mode,
+			Secret:     options.Token.Secret,
+			SecretPath: options.Token.SecretPath,
+			PIN:        options.Token.PIN,
+			Password:   options.Token.Password,
+			DeviceID:   options.Token.DeviceID,
+			Counter:    options.Token.Counter,
 		}
 		if tokenOptions.Mode == openconnect.TokenModeHOTP {
 			e.hotpCounter.Store(tokenOptions.Counter)
@@ -201,6 +240,14 @@ func (e *Endpoint) buildClientOptions(options option.OpenConnectEndpointOptions,
 		}
 	}
 	var csdOptions *openconnect.CSDOptions
+	var mobileOptions *openconnect.MobileOptions
+	if options.Mobile != nil {
+		mobileOptions = &openconnect.MobileOptions{
+			PlatformVersion: options.Mobile.PlatformVersion,
+			DeviceType:      options.Mobile.DeviceType,
+			DeviceUniqueID:  options.Mobile.DeviceUniqueID,
+		}
+	}
 	if options.CSD != nil {
 		csdOptions = &openconnect.CSDOptions{WrapperPath: options.CSD.WrapperPath}
 	}
@@ -226,6 +273,13 @@ func (e *Endpoint) buildClientOptions(options option.OpenConnectEndpointOptions,
 			Certificates:                 tnccCertificates,
 		}
 	}
+	var fortinetHostCheckOptions *openconnect.FortinetHostCheckOptions
+	if options.FortinetHostCheck != nil {
+		fortinetHostCheckOptions = &openconnect.FortinetHostCheckOptions{
+			HostCheck:           options.FortinetHostCheck.HostCheck,
+			CheckVirtualDesktop: options.FortinetHostCheck.CheckVirtualDesktop,
+		}
+	}
 	formEntries := common.Map(options.FormEntries, func(entry option.OpenConnectFormEntryOptions) openconnect.FormEntry {
 		return openconnect.FormEntry{
 			FormID:        entry.FormID,
@@ -236,21 +290,45 @@ func (e *Endpoint) buildClientOptions(options option.OpenConnectEndpointOptions,
 		}
 	})
 	return openconnect.ClientOptions{
-		Context:             e.loopContext,
-		Server:              options.Server,
-		Flavor:              options.Flavor,
-		Username:            options.Username,
-		Password:            options.Password,
-		AuthGroup:           options.AuthGroup,
-		Token:               tokenOptions,
-		ReportedOS:          options.ReportedOS,
-		UserAgent:           options.UserAgent,
-		CSD:                 csdOptions,
-		HIP:                 hipOptions,
-		TNCC:                tnccOptions,
-		NoUDP:               options.NoUDP,
-		AllowInsecureCrypto: options.AllowInsecureCrypto,
+		Context:                        e.loopContext,
+		Server:                         options.Server,
+		Flavor:                         options.Flavor,
+		Username:                       options.Username,
+		Password:                       options.Password,
+		AuthGroup:                      options.AuthGroup,
+		Cookie:                         options.Cookie,
+		Token:                          tokenOptions,
+		ReportedOS:                     options.ReportedOS,
+		UserAgent:                      options.UserAgent,
+		Version:                        options.Version,
+		LocalHostname:                  options.LocalHostname,
+		Mobile:                         mobileOptions,
+		CSD:                            csdOptions,
+		HIP:                            hipOptions,
+		TNCC:                           tnccOptions,
+		FortinetHostCheck:              fortinetHostCheckOptions,
+		NoUDP:                          options.NoUDP,
+		DTLSLocalPort:                  options.DTLSLocalPort,
+		CompressionDisabled:            options.CompressionDisabled,
+		CompressionMode:                options.CompressionMode,
+		IPv6Disabled:                   options.IPv6Disabled,
+		HTTPKeepAliveDisabled:          options.HTTPKeepAliveDisabled,
+		XMLPostDisabled:                options.XMLPostDisabled,
+		ExternalAuthDisabled:           options.ExternalAuthDisabled,
+		PasswordAuthenticationDisabled: options.PasswordAuthenticationDisabled,
+		PFS:                            options.PFS,
+		MTU:                            options.MTU,
+		BaseMTU:                        options.BaseMTU,
+		DPDInterval:                    time.Duration(options.DPDInterval),
+		ReconnectTimeout:               time.Duration(options.ReconnectTimeout),
+		TrojanInterval:                 time.Duration(options.TrojanInterval),
+		QueueLength:                    options.QueueLength,
+		AllowInsecureCrypto:            options.AllowInsecureCrypto,
 		TLSConfig: openconnect.ClientTLSOptions{
+			Config:               tlsConfig,
+			ServerName:           options.TLS.ServerName,
+			PeerFingerprints:     options.TLS.PeerFingerprint,
+			SystemTrustDisabled:  options.TLS.SystemTrustDisabled,
 			CertificateAuthority: certificateAuthority,
 			Certificate:          clientCertificate,
 			Key:                  clientKey,
@@ -274,7 +352,14 @@ func (e *Endpoint) handleTunnelConfiguration(event openconnect.TunnelConfigurati
 	e.updateState(func(state *clientState) {
 		state.tunnelConfigured = false
 	})
-	err := e.device.UpdateConfiguration(configuration)
+	routeSet, err := buildIPSet(configuration.Routes, configuration.ExcludedRoutes)
+	if err != nil {
+		return E.Cause(err, "build route set")
+	}
+	err = e.device.UpdateConfiguration(openconnecttransport.Configuration{
+		MTU:       configuration.MTU,
+		Addresses: configuration.Addresses,
+	})
 	if err != nil {
 		return E.Cause(err, "update device configuration")
 	}
@@ -285,10 +370,7 @@ func (e *Endpoint) handleTunnelConfiguration(event openconnect.TunnelConfigurati
 		}
 		e.deviceStarted = true
 	}
-	routeSet, err := buildIPSet(configuration.Routes, configuration.ExcludedRoutes)
-	if err != nil {
-		return E.Cause(err, "build route set")
-	}
+	preferredDomains := buildPreferredDomains(configuration)
 	var ipv4Addresses []netip.Prefix
 	var ipv6Addresses []netip.Prefix
 	for _, address := range configuration.Addresses {
@@ -308,6 +390,8 @@ func (e *Endpoint) handleTunnelConfiguration(event openconnect.TunnelConfigurati
 		state.tunnelConfigured = true
 		state.localAddresses = configuration.Addresses
 		state.routeSet = routeSet
+		state.preferredDomains = preferredDomains
+		state.configuration = configuration
 		state.tunnelInfo = adapter.OpenConnectTunnelInfo{
 			Server:         e.server,
 			Flavor:         e.flavor,
@@ -319,6 +403,12 @@ func (e *Endpoint) handleTunnelConfiguration(event openconnect.TunnelConfigurati
 			ConnectedSince: connectedSince,
 		}
 	})
+	e.dnsTransportAccess.Lock()
+	dnsTransport := e.dnsTransport
+	e.dnsTransportAccess.Unlock()
+	if dnsTransport != nil {
+		dnsTransport.updateConfiguration(configuration)
+	}
 	return nil
 }
 
@@ -358,7 +448,7 @@ func (e *Endpoint) readLoop() {
 			if E.IsClosedOrCanceled(err) || e.loopContext.Err() != nil {
 				return
 			}
-			e.logger.Error(E.Cause(err, "OpenConnect client terminated"))
+			e.logger.Error(E.Cause(err, "client terminated"))
 			e.setTerminalError(err)
 			return
 		}
@@ -397,7 +487,7 @@ func (e *Endpoint) Close() error {
 	return err
 }
 
-func (e *Endpoint) InterfaceUpdated() {
+func (e *Endpoint) InterfaceUpdated(ctx context.Context) {
 	e.client.RestartSession()
 }
 
@@ -436,11 +526,11 @@ func (e *Endpoint) ready() bool {
 
 func (e *Endpoint) WritePackets(packets [][]byte) error {
 	if !e.ready() {
-		return E.New("OpenConnect client is not ready yet")
+		return E.New("endpoint is not ready yet")
 	}
 	err := e.client.WriteDataPackets(packets)
 	if E.IsMulti(err, openconnect.ErrDataChannelNotReady) {
-		return E.New("OpenConnect client is not ready yet")
+		return E.New("endpoint is not ready yet")
 	}
 	return err
 }
@@ -473,7 +563,7 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 		e.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	}
 	if !e.ready() || !e.client.Ready() {
-		return nil, E.New("OpenConnect client is not ready yet")
+		return nil, E.New("endpoint is not ready yet")
 	}
 	if destination.IsDomain() {
 		destinationAddresses, err := e.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
@@ -491,23 +581,27 @@ func (e *Endpoint) DialContext(ctx context.Context, network string, destination 
 func (e *Endpoint) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
 	e.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	if !e.ready() || !e.client.Ready() {
-		return nil, netip.Addr{}, E.New("OpenConnect client is not ready yet")
+		return nil, netip.Addr{}, E.New("endpoint is not ready yet")
 	}
 	if destination.IsDomain() {
 		destinationAddresses, err := e.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, netip.Addr{}, err
 		}
-		return N.ListenSerial(ctx, e.device, destination, destinationAddresses)
+		packetConn, destinationAddress, err := N.ListenSerial(ctx, e.device, destination, destinationAddresses)
+		if err != nil {
+			return nil, netip.Addr{}, err
+		}
+		return iponly.NewPacketConn(e.logger, packetConn), destinationAddress, nil
 	}
 	packetConn, err := e.device.ListenPacket(ctx, destination)
 	if err != nil {
 		return nil, netip.Addr{}, err
 	}
 	if destination.IsIP() {
-		return packetConn, destination.Addr, nil
+		return iponly.NewPacketConn(e.logger, packetConn), destination.Addr, nil
 	}
-	return packetConn, netip.Addr{}, nil
+	return iponly.NewPacketConn(e.logger, packetConn), netip.Addr{}, nil
 }
 
 func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -522,7 +616,12 @@ func (e *Endpoint) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 }
 
 func (e *Endpoint) PreferredDomain(metadata *adapter.InboundContext, domain string) bool {
-	return false
+	state := e.state.Load()
+	if !state.started || !state.tunnelConfigured || !e.client.Ready() {
+		return false
+	}
+	canonicalDomain := canonicalOpenConnectDomain(domain)
+	return openConnectDomainMatchesAny(canonicalDomain, state.preferredDomains)
 }
 
 func (e *Endpoint) PreferredAddress(metadata *adapter.InboundContext, address netip.Addr) bool {

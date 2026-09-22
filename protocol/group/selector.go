@@ -147,7 +147,14 @@ func (s *Selector) SelectOutbound(tag string) bool {
 }
 
 func (s *Selector) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	conn, err := s.selected.Load().DialContext(ctx, network, destination)
+	// lx:begin chain
+	// SPEC 073: внутри цепочки выбранный узел подменяется его звеном для хопа.
+	selected, err := adapter.ResolveChainLeaf(ctx, s.selected.Load())
+	if err != nil {
+		return nil, err
+	}
+	conn, err := selected.DialContext(ctx, network, destination)
+	// lx:end chain
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +162,13 @@ func (s *Selector) DialContext(ctx context.Context, network string, destination 
 }
 
 func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	conn, err := s.selected.Load().ListenPacket(ctx, destination)
+	// lx:begin chain
+	selected, err := adapter.ResolveChainLeaf(ctx, s.selected.Load())
+	if err != nil {
+		return nil, err
+	}
+	conn, err := selected.ListenPacket(ctx, destination)
+	// lx:end chain
 	if err != nil {
 		return nil, err
 	}
@@ -164,27 +177,44 @@ func (s *Selector) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 
 func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	// lx: SPEC 064 — register the inbound conn. Upstream 515a73e4e now hands `s`
+	// (not `selected`) to ConnectionManager, so the plain-outbound branch below
+	// registers its outbound socket via Selector.DialContext on its own; the
+	// handler branch (nested groups, handler outbounds) still bypasses it, and
+	// wrapping before the branch keeps both covered. Approach from upstream PR #4285.
+	conn = s.interruptGroup.NewConn(conn, true)
 	selected := s.selected.Load()
 	if outboundHandler, isHandler := selected.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
-		s.connection.NewConnection(ctx, selected, conn, metadata, onClose)
+		s.connection.NewConnection(ctx, s, conn, metadata, onClose)
 	}
 }
 
 func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
 	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	// lx: SPEC 064 — see NewConnection; same registration gap on the UDP path.
+	conn = s.interruptGroup.NewSingPacketConn(conn, true)
 	selected := s.selected.Load()
 	if outboundHandler, isHandler := selected.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
-		s.connection.NewPacketConnection(ctx, selected, conn, metadata, onClose)
+		s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
 	}
 }
 
-func RealTag(detour adapter.Outbound) string {
-	if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
-		return group.Now()
+func RealTag(outboundManager adapter.OutboundManager, detour adapter.Outbound) string {
+	tag := detour.Tag()
+	for {
+		group, isGroup := detour.(adapter.OutboundGroup)
+		if !isGroup {
+			return tag
+		}
+		tag = group.Now()
+		var loaded bool
+		detour, loaded = outboundManager.Outbound(tag)
+		if !loaded {
+			return tag
+		}
 	}
-	return detour.Tag()
 }

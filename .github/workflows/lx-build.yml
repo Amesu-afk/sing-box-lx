@@ -38,20 +38,27 @@ jobs:
     if: ${{ inputs.target == 'android-aar' || inputs.target == 'all' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      # SPEC 044: AAR must be built with Go >= 1.25 — a go1.24-built libbox
+      # kills all quic-go outbounds on some vendor Android kernels (see
+      # lx-release.yml build_android for the full story).
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.go_pin.outputs.version }}
       - name: Setup Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r28
+          # lx: r28c = 28.2.13676358 — совпадает с локальным NDK. Прежнее `r28` не
+          # алиас на последнюю ревизию, а отдельный архив от 05.02.2025.
+          ndk-version: r28c
       - name: Setup OpenJDK 17
         run: sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
       - name: Ensure a describe-able tag
@@ -69,7 +76,7 @@ jobs:
           mkdir -p dist
           cp libbox.aar dist/
           cp libbox-legacy.aar dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: android-aar-${{ inputs.branch }}
           path: dist/*
@@ -81,15 +88,19 @@ jobs:
     if: ${{ inputs.target == 'apple-xcframework' || inputs.target == 'all' }}
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      # Toolchain pin lives in go.version (SPEC 049) — go.mod's 1.24 is the
+      # language floor, not a toolchain (and makes badtls a stub). SPEC 044.
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.go_pin.outputs.version }}
       - name: Ensure a describe-able tag
         run: git tag -f "build-apple"
       - name: Build (make lib_apple)
@@ -102,7 +113,7 @@ jobs:
           mkdir -p dist
           # xcframework is a directory bundle — zip it for the artifact.
           ditto -c -k --sequesterRsrc --keepParent Libbox.xcframework dist/Libbox.xcframework.zip
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: apple-xcframework-${{ inputs.branch }}
           path: dist/*
@@ -114,15 +125,19 @@ jobs:
     if: ${{ inputs.target == 'binary' || inputs.target == 'all' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      # Toolchain pin lives in go.version (SPEC 049) — go.mod's 1.24 is the
+      # language floor, not a toolchain (and makes badtls a stub). SPEC 044.
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.go_pin.outputs.version }}
       - name: Ensure a describe-able tag
         run: git tag -f "build-binary"
       - name: Build (Makefile.lx lx-build)
@@ -141,7 +156,7 @@ jobs:
           mkdir -p dist
           cp sing-box dist/sing-box-linux-amd64
           cp libcronet.so dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: binary-linux-amd64-${{ inputs.branch }}
           path: dist/*
@@ -155,15 +170,19 @@ jobs:
     if: ${{ inputs.target == 'linux-musl' || inputs.target == 'all' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.branch }}
           submodules: recursive
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      # Toolchain pin lives in go.version (SPEC 049) — go.mod's 1.24 is the
+      # language floor, not a toolchain (and makes badtls a stub). SPEC 044.
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
         with:
-          go-version-file: go.mod
-          check-latest: true
+          go-version: ${{ steps.go_pin.outputs.version }}
       - name: Clone cronet-go (musl toolchain provider)
         run: |
           CRONET_REF="$(cat .github/CRONET_GO_VERSION 2>/dev/null || echo main)"
@@ -195,7 +214,7 @@ jobs:
         run: |
           mkdir -p dist
           cp sing-box-musl-amd64 dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: linux-musl-amd64-${{ inputs.branch }}
           path: dist/*

@@ -2,7 +2,7 @@
 // (a.k.a. "splithttp") v2ray transport for sing-box-lx. It is a lean-native
 // implementation written on sing-box/sing primitives and the in-tree
 // v2rayhttp HTTP/2 conn helpers, rather than vendoring Xray internals.
-// See SPECS/002-XHTTP_CLIENT_TRANSPORT.
+// See SPECS/TASKS/002-XHTTP_CLIENT_TRANSPORT.
 //
 // Wire protocol (mirrors Xray-core transport/internet/splithttp):
 //
@@ -23,23 +23,23 @@ package v2rayxhttp
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	sHTTP "github.com/sagernet/sing/protocol/http"
+	"github.com/sagernet/sing/service"
 
 	"golang.org/x/net/http2"
 )
@@ -53,133 +53,13 @@ const (
 
 var _ adapter.V2RayClientTransport = (*Client)(nil)
 
-// transportPoolSize is how many independent HTTP/2 transports (and therefore
-// underlying TLS connections) a client spreads its streams over.
-//
-// Every proxied connection is one HTTP/2 stream, and a single transport puts
-// them all on one TCP connection. That collapses under the long-lived streams a
-// video session holds open: measured against a live Xray XHTTP inbound, a probe
-// request took 0.4s with 10 held streams, 2.6s with 50, and timed out past 100.
-// Spreading dials round-robin keeps each connection's stream count low.
-const transportPoolSize = 8
-
-// slotRefreshDebounce collapses a burst of handshake timeouts (every initial
-// dial of a page hits the same stale pool at once, right after the radio wakes)
-// into a single pool refresh.
-const slotRefreshDebounce = 3 * time.Second
-
-// freshHandshakeTimeout is the budget for a dial over a pool member that has
-// never answered yet, and so must still pay TCP connect + TLS/REALITY + the
-// HTTP/2 preface before the request even goes out.
-//
-// It is deliberately much larger than [handshakeTimeout]. That one is calibrated
-// for a warm connection (~330ms measured, even with 100 streams on the pool),
-// where anything past a few seconds means the socket is dead. Applying the same
-// number to a cold dial gets it wrong in the expensive direction: four-ish round
-// trips at a 1.5s RTT is already past 5s, so a slow-but-working link would fail
-// instead of merely lagging — and on the commonest TarnVPN setup (XHTTP over
-// REALITY, which resolves to stream-one) there is no retry to absorb it, because
-// a stream-one dial carries its upload body on the same stream and cannot be
-// replayed. Being generous here costs a longer wait in the genuinely-dead case,
-// which the pool refresh then fixes for every subsequent dial.
-// A var (not const) so tests can shrink it, mirroring handshakeTimeout.
-var freshHandshakeTimeout = 15 * time.Second
-
-// No per-connection health check (http2.Transport ReadIdleTimeout/PingTimeout)
-// is configured here, on purpose. That probe is whole-ClientConn: when a PONG
-// misses its window the transport tears the connection down and aborts EVERY
-// multiplexed stream with "http2: client connection lost". Because the pool
-// multiplexes many independent proxied connections onto each member, one probe
-// timeout — trivially caused on mobile by a PONG queued behind another member
-// saturating the shared radio — kills a whole batch of live, merely-idle
-// streams (messenger push sockets, keep-alives) at once, which the user sees as
-// apps freezing and reconnecting.
-//
-// Instead, staleness is reaped at DIAL granularity: a new dial bounds the time
-// until its first response header (handshakeRoundTrip). A miss means the pooled
-// connection is dead — the classic post-idle zombie, where the phone slept, NAT
-// dropped the silent TCP connections, and nothing tore them down. On a miss the
-// whole pool is swapped for fresh transports (refreshAllSlots). Crucially the
-// swap only redirects NEW dials; goroutines already relaying over a member keep
-// their own reference, so a false positive costs a few extra connections, never
-// a healthy-stream teardown. That is the property the per-conn ping lacked.
-
-// poolTransport is a pool member plus the one bit of state the dial budget needs:
-// whether this transport has ever produced a response header.
-//
-// A member that has answered before owns a live TCP+TLS session, so the next dial
-// over it is a single round trip and anything slower means the connection died.
-// A member that has never answered still has to do everything: TCP connect, the
-// TLS/REALITY handshake, the HTTP/2 preface, then the request — four-ish round
-// trips, which on a bad mobile link is seconds, not milliseconds. Holding both to
-// the same deadline is what would turn a slow-but-working link into a failing one
-// (see [freshHandshakeTimeout]).
-//
-// It holds the member behind an http.RoundTripper rather than embedding
-// *http2.Transport: the concrete type cannot be substituted, and the cold/warm
-// budget is exactly the kind of timing behaviour that needs a stand-in to be
-// testable at all.
-type poolTransport struct {
-	rt   http.RoundTripper
-	warm atomic.Bool
-}
-
-func (t *poolTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	return t.rt.RoundTrip(req)
-}
-
-// CloseIdleConnections forwards to the underlying transport when it has one, so a
-// pool member stays reapable through the same call the bare transport offered.
-func (t *poolTransport) CloseIdleConnections() {
-	if closer, ok := t.rt.(interface{ CloseIdleConnections() }); ok {
-		closer.CloseIdleConnections()
-	}
-}
-
-// transportSlot holds one pool member behind an atomically swappable pointer, so
-// a member whose connection has gone stale can be replaced without disturbing an
-// in-flight dial that already captured the old transport.
-//
-// inflight counts the proxied connections currently leased to this slot — not the
-// dials it has served. That distinction is the whole point: dials are short, the
-// streams they open are not, and it is the live stream count that decides how much
-// a member's single TCP connection has to carry (see [Client.acquireSlot]).
-type transportSlot struct {
-	ptr      atomic.Pointer[poolTransport]
-	inflight atomic.Int64
-}
-
-func (s *transportSlot) get() *poolTransport { return s.ptr.Load() }
-
-// slotLease is one dial's claim on a pool member: the transport every request of
-// that dial must use, plus the release that hands the capacity back when the
-// proxied connection ends. Every conn type owns its lease and releases it exactly
-// once from Close.
-type slotLease struct {
-	slot *transportSlot
-	rt   *poolTransport
-	once sync.Once
-}
-
-func (l *slotLease) release() {
-	if l == nil {
-		return
-	}
-	l.once.Do(func() { l.slot.inflight.Add(-1) })
-}
-
 type Client struct {
 	ctx        context.Context
 	dialer     N.Dialer
 	serverAddr M.Socksaddr
-	// newTransport builds a fresh HTTP/2 transport (and therefore a fresh
-	// underlying TLS/REALITY connection on first use). Held so a stale slot can
-	// be swapped for a live one.
-	newTransport func() *http2.Transport
-	slots        []*transportSlot
-	slotIdx      atomic.Uint64
-	refreshMu    sync.Mutex
-	lastRefresh  time.Time
+	// xmux owns the pool of HTTP connections; every dial takes one from it and
+	// releases it when the conn closes (SPECS/TASKS/059).
+	xmux         *xmuxManager
 	scheme       string
 	host         string
 	path         string
@@ -192,6 +72,9 @@ type Client struct {
 	// realityEnabled records whether the TLS config is a Reality client config.
 	// It drives mode=auto resolution (Reality → stream-one, like Xray).
 	realityEnabled bool
+	// noGRPCHeader suppresses the default "Content-Type: application/grpc" on
+	// streamed-body requests (stream-one, stream-up). See option.NoGRPCHeader.
+	noGRPCHeader bool
 }
 
 // NewClient builds an XHTTP client transport. The tlsConfig (possibly Reality)
@@ -219,6 +102,8 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		SessionKey:           options.SessionKey,
 		SeqPlacement:         options.SeqPlacement,
 		SeqKey:               options.SeqKey,
+		SessionTable:         options.SessionTable,
+		SessionLength:        options.SessionLength,
 		UplinkDataPlacement:  options.UplinkDataPlacement,
 		UplinkDataKey:        options.UplinkDataKey,
 		UplinkChunkSize:      options.UplinkChunkSize,
@@ -235,10 +120,14 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		return nil, err
 	}
 
-	// Build a pool of independent transports. They are identical in behaviour;
-	// keeping them separate is what forces separate TLS connections, since a
-	// single http2.Transport happily multiplexes every stream onto one. The
-	// factory is retained so a stale member can be rebuilt in place.
+	xmuxConfig, err := normalizeXmux(options.Xmux)
+	if err != nil {
+		return nil, err
+	}
+
+	// newTransport builds one pooled HTTP connection. XMUX holds several of these
+	// and decides which one carries a given stream; each has its own dialer, so
+	// separate transports mean separate TCP+TLS connections (SPECS/TASKS/059).
 	var (
 		scheme       string
 		newTransport func() *http2.Transport
@@ -249,7 +138,8 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		// streaming request/response body machinery works without TLS.
 		newTransport = func() *http2.Transport {
 			return &http2.Transport{
-				AllowHTTP: true,
+				AllowHTTP:       true,
+				ReadIdleTimeout: xmuxConfig.keepAlivePeriod,
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
 					return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
 				},
@@ -263,19 +153,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		tlsDialer := tls.NewDialer(dialer, tlsConfig)
 		newTransport = func() *http2.Transport {
 			return &http2.Transport{
+				ReadIdleTimeout: xmuxConfig.keepAlivePeriod,
 				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
 					return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
 				},
 			}
 		}
-	}
-	slots := make([]*transportSlot, transportPoolSize)
-	for i := range slots {
-		s := &transportSlot{}
-		// Cold by construction: none of these has dialed yet, so the first dial over
-		// each gets freshHandshakeTimeout.
-		s.ptr.Store(&poolTransport{rt: newTransport()})
-		slots[i] = s
 	}
 
 	var host string
@@ -304,12 +187,25 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		headers[key] = value
 	}
 
+	xmux := newXmuxManager(xmuxConfig, func() xmuxConn {
+		return &http2XmuxConn{transport: newTransport()}
+	})
+	// The pool's transitions (a connection opened, a connection retired and why)
+	// are what is worth observing about XMUX — the pool size itself follows from
+	// the config. Debug level, so it costs nothing unless someone is looking.
+	// See SPECS/TASKS/059 §8.2.
+	if logFactory := service.FromContext[log.Factory](ctx); logFactory != nil {
+		xmuxLogger := logFactory.NewLogger("xhttp")
+		xmux.onEvent = func(format string, args ...any) {
+			xmuxLogger.Debug(fmt.Sprintf(format, args...))
+		}
+	}
+
 	return &Client{
 		ctx:            ctx,
 		dialer:         dialer,
 		serverAddr:     serverAddr,
-		newTransport:   newTransport,
-		slots:          slots,
+		xmux:           xmux,
 		scheme:         scheme,
 		host:           host,
 		path:           path,
@@ -318,11 +214,35 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		paddingRange:   paddingRange,
 		meta:           meta,
 		realityEnabled: tlsConfigIsReality(tlsConfig),
+		noGRPCHeader:   options.NoGRPCHeader,
 	}, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
-	sessionID := newSessionID()
+	sessionID := c.newSessionID()
+	// One pooled connection carries this whole dial: both halves of a split mode
+	// and every upload POST of packet-up. It is released once, when the conn
+	// closes — see releaseOnce in conn.go. getContext may wait out the breaker's
+	// backoff window before opening a transport (lx: SPEC 076).
+	xmuxClient, err := c.xmux.getContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	xmuxClient.addOpenUsage(1)
+	// lx: SPEC 077 — one release handle for the whole dial. The conn's Close and
+	// fail share it with this error path, so a raise that fails INSIDE the dial
+	// (fail already released the slot before the error surfaced here) cannot
+	// release twice and drive openUsage negative.
+	release := newXmuxRelease(xmuxClient)
+	conn, err := c.dialMode(ctx, sessionID, xmuxClient, release)
+	if err != nil {
+		release.release()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease) (net.Conn, error) {
 	switch c.mode {
 	case modeAuto:
 		// Match Xray's auto resolution (transport/internet/splithttp/dialer.go):
@@ -330,138 +250,23 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 		// mode, live-validated against Xray 3x-ui). Xray also picks stream-up when
 		// downloadSettings is present, but we don't support asymmetric transport.
 		if c.realityEnabled {
-			return c.dialStreamOne(ctx, sessionID)
+			return c.dialStreamOne(ctx, sessionID, xmuxClient, release)
 		}
-		return c.dialPacketUp(ctx, sessionID)
+		return c.dialPacketUp(ctx, sessionID, xmuxClient, release)
 	case modePacketUp:
-		return c.dialPacketUp(ctx, sessionID)
+		return c.dialPacketUp(ctx, sessionID, xmuxClient, release)
 	case modeStreamUp:
-		return c.dialStreamUp(ctx, sessionID)
+		return c.dialStreamUp(ctx, sessionID, xmuxClient, release)
 	case modeStreamOne:
-		return c.dialStreamOne(ctx, sessionID)
+		return c.dialStreamOne(ctx, sessionID, xmuxClient, release)
 	default:
 		return nil, E.New("v2ray-xhttp: unknown mode: ", c.mode)
 	}
 }
 
 func (c *Client) Close() error {
-	for _, s := range c.slots {
-		if tr := s.get(); tr != nil {
-			tr.CloseIdleConnections()
-		}
-	}
+	c.xmux.Close()
 	return nil
-}
-
-// acquireSlot leases the least-loaded pool member to one dial, counting the lease
-// against that member until the proxied connection closes.
-//
-// Round-robin — what this replaces — balances *dials*, which is not the quantity
-// that hurts. A dial is over in one round trip; the stream it opens can live for
-// the whole session, and it is streams that a member's single TCP connection has
-// to carry (a probe took 0.4s with 10 held streams, 2.6s with 50). A short-video
-// feed opens and drops connections constantly with a handful outliving the rest,
-// so an even split of dials drifts into a very uneven split of live streams: the
-// member that happened to collect the long ones keeps being handed more, and its
-// connection is where every new dial then queues, stalls behind TCP head-of-line
-// blocking, and eventually trips the handshake budget.
-//
-// The scan is over 8 slots and stops at the first empty one, so it costs less
-// than the atomic increment it replaces. Ties break at a rotating offset, which
-// keeps the all-equal case (an idle pool) exactly round-robin.
-//
-// All requests belonging to one dial must share the member they were opened with:
-// the upload and download halves of stream-up/packet-up are paired by session id,
-// and keeping them on a single connection preserves their ordering. That is why
-// the lease captures the *transport*, not the slot — a concurrent refresh must
-// never split a dial's halves across two connections.
-func (c *Client) acquireSlot() *slotLease {
-	start := c.slotIdx.Add(1) - 1
-	size := uint64(len(c.slots))
-	best := c.slots[start%size]
-	bestLoad := best.inflight.Load()
-	for i := uint64(1); i < size && bestLoad > 0; i++ {
-		candidate := c.slots[(start+i)%size]
-		if load := candidate.inflight.Load(); load < bestLoad {
-			best, bestLoad = candidate, load
-		}
-	}
-	best.inflight.Add(1)
-	return &slotLease{slot: best, rt: best.get()}
-}
-
-// refreshAllSlots swaps every pool member for a fresh transport, dropping the
-// stale connections. It is triggered when a dial's handshake times out — the
-// tell-tale of a pool gone stale after the radio slept and NAT dropped the idle
-// TCP connections (see the package comment). Swapping the pointer does NOT tear
-// down a member's in-flight streams: goroutines already relaying over it keep
-// their own reference; only new dials get the fresh connection. So a false
-// positive (a merely-slow handshake) costs at most a few extra connections,
-// never a healthy-stream teardown. Debounced so the storm of stalled initial
-// dials right after wake refreshes the pool exactly once.
-func (c *Client) refreshAllSlots() {
-	now := timeNow()
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
-	if !c.lastRefresh.IsZero() && now.Sub(c.lastRefresh) < slotRefreshDebounce {
-		return
-	}
-	c.lastRefresh = now
-	for _, s := range c.slots {
-		old := s.ptr.Swap(c.newPoolTransport())
-		if old != nil {
-			old.CloseIdleConnections()
-		}
-	}
-}
-
-// newPoolTransport wraps a freshly built transport as a cold pool member, so its
-// first dial is measured against freshHandshakeTimeout rather than the warm one.
-func (c *Client) newPoolTransport() *poolTransport {
-	return &poolTransport{rt: c.newTransport()}
-}
-
-// handshakeVia runs one handshake-bounded round trip over a pool member, giving a
-// never-yet-used transport the cold budget, and promoting it to the warm one the
-// moment it proves it can answer.
-func (c *Client) handshakeVia(pt *poolTransport, req *http.Request) (*http.Response, error) {
-	timeout := handshakeTimeout
-	if !pt.warm.Load() {
-		timeout = freshHandshakeTimeout
-	}
-	response, err := handshakeRoundTrip(pt, req, timeout)
-	if err == nil {
-		pt.warm.Store(true)
-	}
-	return response, err
-}
-
-// retireTransport is the whole reaction to a handshake timeout observed on rt:
-// refresh the pool, then close rt's own idle connections.
-//
-// The second half is not redundant. refreshAllSlots can only close what it swaps,
-// and at the instant it runs rt still owns the stream that is in the middle of
-// timing out — so the connection is not idle and CloseIdleConnections skips it.
-// Moments later the cancelled stream is removed and rt becomes idle, but by then
-// rt is unreachable from the slots, so no future refresh will ever revisit it:
-// the swap only ever closes the pointer it just replaced. The zombie TCP
-// connection and its http2 readLoop goroutine would then stay for as long as the
-// peer keeps them (on a NAT-dropped link: forever). The debounce widens the same
-// hole — a sibling dial timing out inside the window skips the refresh entirely.
-//
-// Calling it after refreshAllSlots is what makes the ordering work: by then rt is
-// out of rotation, and its cancelled stream has been reaped by RoundTrip's own
-// cleanup, so the connection is genuinely idle and actually closes. Closing idle
-// connections never touches a live stream, so even a false positive (a merely
-// slow handshake) costs at most a reconnect, which is the same trade the pool
-// refresh already makes.
-func (c *Client) retireTransport(rt http.RoundTripper) {
-	c.refreshAllSlots()
-	// Matched by capability, not by concrete type: *http2.Transport and *http.Transport
-	// both qualify, and a test can hand in a recorder.
-	if closer, ok := rt.(interface{ CloseIdleConnections() }); ok {
-		closer.CloseIdleConnections()
-	}
 }
 
 // baseURL builds a fresh request URL targeting the normalized base path. The
@@ -510,11 +315,28 @@ func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr strin
 	return request.WithContext(ctx), nil
 }
 
-// newSessionID returns a random session id formatted as a dashed UUID string
+// newSessionID returns a random session id for one dial. With session_table and
+// session_length configured it draws length.rand() characters from the alphabet,
+// mirroring Xray's GenerateSessionID; otherwise it falls back to the dashed-UUID
+// form. The server treats the id as an opaque grouping key and never needs to know
+// which form was used, so this is a client-only obfuscation knob.
+func (c *Client) newSessionID() string {
+	if c.meta.sessionTable == "" {
+		return newUUIDSessionID()
+	}
+	table := c.meta.sessionTable
+	id := make([]byte, c.meta.sessionLength.rand())
+	for i := range id {
+		id[i] = table[randIntn(len(table))]
+	}
+	return string(id)
+}
+
+// newUUIDSessionID returns a random session id formatted as a dashed UUID string
 // (8-4-4-4-12), matching Xray's sessionId = uuid.New().String() (verified against
-// XTLS/Xray-core transport/internet/splithttp dialer.go). The server treats it as
-// an opaque grouping key; the dashed format keeps it interchangeable with Xray.
-func newSessionID() string {
+// XTLS/Xray-core transport/internet/splithttp dialer.go). This is the default and
+// the form an unconfigured Xray peer also produces.
+func newUUIDSessionID() string {
 	var b [16]byte
 	for i := range b {
 		b[i] = byte(rand.Intn(256))

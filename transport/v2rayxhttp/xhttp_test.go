@@ -309,6 +309,11 @@ func TestValidationRejections(t *testing.T) {
 		{"uplink header outside packet-up", modeStreamOne, metaOptions{UplinkDataPlacement: "header"}},
 		{"bad padding placement", modePacketUp, metaOptions{XPaddingObfsMode: true, XPaddingPlacement: "path"}},
 		{"bad padding method", modePacketUp, metaOptions{XPaddingMethod: "rot13"}},
+		{"session table without length", modePacketUp, metaOptions{SessionTable: "hex"}},
+		{"session length without table", modePacketUp, metaOptions{SessionLength: "16-32"}},
+		{"session length zero floor", modePacketUp, metaOptions{SessionTable: "hex", SessionLength: "0-32"}},
+		{"session id space too small", modePacketUp, metaOptions{SessionTable: "number", SessionLength: "4"}},
+		{"session table not ascii", modePacketUp, metaOptions{SessionTable: "абвгд", SessionLength: "32"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -382,6 +387,50 @@ func TestUplinkChunkSizeDefaults(t *testing.T) {
 	}
 }
 
+// --- streamed-body gRPC content type ------------------------------------------
+
+// Xray's FillStreamRequest sets "Content-Type: application/grpc" on requests that
+// carry a body (stream-one, stream-up). Reverse proxies in front of an XHTTP
+// server key unbuffered response streaming on it — without it a stream-one dial
+// hangs until timeout (live-verified 2026-08-01).
+func TestGRPCHeaderOnStreamedBody(t *testing.T) {
+	const grpcContentType = "application/grpc"
+
+	newReq := func(body *strings.Reader) *http.Request {
+		request, err := http.NewRequest(http.MethodPost, "https://example.com/feed", body)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		return request
+	}
+
+	// Body present, opt-out off → header set.
+	client := &Client{}
+	request := newReq(strings.NewReader("payload"))
+	client.applyGRPCHeader(request)
+	if got := request.Header.Get("Content-Type"); got != grpcContentType {
+		t.Fatalf("Content-Type = %q, want %q", got, grpcContentType)
+	}
+
+	// no_grpc_header → nothing set (Xray's NoGRPCHeader).
+	optedOut := &Client{noGRPCHeader: true}
+	request = newReq(strings.NewReader("payload"))
+	optedOut.applyGRPCHeader(request)
+	if got := request.Header.Get("Content-Type"); got != "" {
+		t.Fatalf("no_grpc_header: Content-Type = %q, want empty", got)
+	}
+
+	// Bodyless request (packet-up download GET) → nothing set.
+	request, err := http.NewRequest(http.MethodGet, "https://example.com/feed", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	client.applyGRPCHeader(request)
+	if got := request.Header.Get("Content-Type"); got != "" {
+		t.Fatalf("bodyless: Content-Type = %q, want empty", got)
+	}
+}
+
 // itoa is a tiny local helper to avoid importing strconv in the test for one use.
 func itoa(i int) string {
 	if i == 0 {
@@ -395,4 +444,70 @@ func itoa(i int) string {
 		i /= 10
 	}
 	return string(b[pos:])
+}
+
+// --- session id generation -----------------------------------------------------
+
+func TestSessionIDDefaultIsUUID(t *testing.T) {
+	c := clientWith(t, modePacketUp, intRange{0, 0}, metaOptions{})
+	id := c.newSessionID()
+	if len(id) != 36 {
+		t.Fatalf("default session id = %q (len %d), want 36-char dashed UUID", id, len(id))
+	}
+	for _, i := range []int{8, 13, 18, 23} {
+		if id[i] != '-' {
+			t.Fatalf("default session id = %q, want dash at %d", id, i)
+		}
+	}
+}
+
+func TestSessionIDTableAndLength(t *testing.T) {
+	t.Run("predefined table, fixed length", func(t *testing.T) {
+		c := clientWith(t, modePacketUp, intRange{0, 0}, metaOptions{SessionTable: "hex", SessionLength: "16"})
+		for i := 0; i < 64; i++ {
+			id := c.newSessionID()
+			if len(id) != 16 {
+				t.Fatalf("id = %q (len %d), want 16", id, len(id))
+			}
+			if strings.Trim(id, "0123456789abcdef") != "" {
+				t.Fatalf("id = %q, want lowercase hex only", id)
+			}
+		}
+	})
+	t.Run("literal table, ranged length", func(t *testing.T) {
+		c := clientWith(t, modePacketUp, intRange{0, 0}, metaOptions{SessionTable: "abcXYZ789", SessionLength: "20-24"})
+		seenLengths := map[int]bool{}
+		for i := 0; i < 256; i++ {
+			id := c.newSessionID()
+			if len(id) < 20 || len(id) > 24 {
+				t.Fatalf("id = %q (len %d), want length in [20,24]", id, len(id))
+			}
+			if strings.Trim(id, "abcXYZ789") != "" {
+				t.Fatalf("id = %q, want configured alphabet only", id)
+			}
+			seenLengths[len(id)] = true
+		}
+		if len(seenLengths) < 2 {
+			t.Fatalf("ranged length never varied across 256 ids: %v", seenLengths)
+		}
+	})
+	t.Run("table name resolves case-sensitively", func(t *testing.T) {
+		// "HEX" is the UPPERCASE alphabet, "hex" the lowercase one.
+		c := clientWith(t, modePacketUp, intRange{0, 0}, metaOptions{SessionTable: "HEX", SessionLength: "32"})
+		id := c.newSessionID()
+		if strings.Trim(id, "0123456789ABCDEF") != "" {
+			t.Fatalf("id = %q, want uppercase hex only", id)
+		}
+	})
+}
+
+// A configured session id must ride the same placement engine as the default one:
+// the generator changes the id's shape, not where it is carried.
+func TestSessionIDTableOnPath(t *testing.T) {
+	c := clientWith(t, modePacketUp, intRange{0, 0}, metaOptions{SessionTable: "hex", SessionLength: "16"})
+	id := c.newSessionID()
+	req := mustRequest(t, c, "POST", id, "0")
+	if want := "/xhttp/" + id + "/0"; req.URL.Path != want {
+		t.Fatalf("path = %q, want %q", req.URL.Path, want)
+	}
 }

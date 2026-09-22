@@ -1,0 +1,530 @@
+# FEATURE 004 — HOTFIXES — что мы чиним за апстримом
+
+| Поле | Значение |
+|------|----------|
+| Тип | Процессная фича (постоянная работа форка) |
+| Build-tag | — (фиксы встроены в ядро) |
+| Состояние | Живой реестр |
+
+Форк не пишется с нуля — он дорабатывает продукт SagerNet. Часть работы
+поэтому не «добавить своё», а **починить чужое**: баги апстрима, которые
+бьют по нашим пользователям, чинятся у нас, потому что ждать апстрим дороже.
+
+Отсюда обязанность, которой нет у обычной фичи: каждый хотфикс — это патч
+поверх чужой базы, и у него должен быть **срок годности**. Пока апстрим
+не починил то же самое, мы держим фикс и платим за него на каждом мерже;
+как только починил — фикс надо снять, иначе он начнёт конфликтовать
+или тихо расходиться с новой логикой.
+
+Поэтому каждая запись несёт **условие снятия**. Реестр того, что уже снято
+и за чем следить, — [UPSTREAM_SYNC](../005-UPSTREAM_SYNC/FEATURE.md).
+
+## Promises
+
+<!-- backfill 2026-07-31 · утверждено владельцем 2026-08-01 -->
+
+- **P1. У каждого держащегося фикса есть условие снятия.** Запись реестра без
+  условия снятия — долг без срока: на каждом мерже апстрима мы платим за патч,
+  не зная, когда перестать. Держатель ожидания — сопровождающий форка.
+  Свидетель: тот случай, когда при бампе submodule или мерже апстрима по
+  строке реестра видно, что именно проверить и когда фикс снять (010 снят
+  ровно так). Мутация: новая запись «держим» без условия снятия.
+- **P2. Вложенные туннели через `detour` несут трафик.** Инкапсуляция
+  раздувает внешнюю датаграмму; без фикса она молча дропалась из-за DF.
+  Свидетель: тот случай, когда AWG-over-AWG через `detour` поднимается и
+  качает данные; тот случай, когда явный `"udp_fragment": false` возвращает
+  DF. Мутация: нижнее плечо туннельного outbound снова форсит DF по умолчанию.
+- **P3. Опечатка в `detour` видна на старте.** Нода с несуществующим
+  провайдером падает при запуске с внятной ошибкой, а не живёт «мёртвой,
+  в логах пусто». Свидетель: тот случай, когда конфиг с опечаткой в теге
+  отвергается на старте. Мутация: возврат ленивого резолва с кэшированием
+  промаха.
+- **P4. Остановка туннеля завершается быстро.** `box.Close()` при десятках
+  WG/AWG-нод — доли секунды, ничего не остаётся недозакрытым. Свидетель:
+  тот случай, когда профиль с ~20-30 пропингованными нодами останавливается
+  без 10-секундного зависания. Мутация: снятие quiesce-этапа или гейта
+  in-flight wake.
+- **P5. WG/AWG-узел с умершим путём чинит себя сам — и быстро.** Если
+  состояние потока на пути умерло (сон устройства → протухший NAT/DPI
+  5-tuple), узел сам пересоздаёт сокет и восстанавливается без реконнекта
+  пользователя: страховочно по give-up (~90 с), досрочно при доказуемо
+  мёртвой сессии (нет keypair / handshake старше 180 с → ~15 с) и мгновенно
+  по событийному нуджу потребителя (`RebindStaleEndpoints()` на пробуждении
+  устройства) *(v2, 2026-08-02 — расширено по полевому остатку, см.
+  HISTORY.md задачи 041)*; в здоровом/спящем состоянии любой триггер ничего
+  не стоит; пиновый `listen_port` не меняется (самолечение тогда ограничено).
+  Свидетель: тот случай, когда узел с мёртвым первым сокетом восстанавливается
+  после give-up сам; тот случай, когда второй give-up в окне не даёт второго
+  пересоздания; тот случай, когда после пробуждения устройства пинг узла
+  зелёный в первые секунды, а не на второй минуте. Мутация: rebind без смены
+  порта при непинованном `listen_port`; фоновый опрос/таймер вместо
+  событийных триггеров; нудж, будящий idle-спящие узлы.
+
+- **P6. Смерть acceptLoop system-стека не фатальна.** Если acceptLoop
+  умирает из-за чужого вмешательства в listener-fd (реальный кейс — reload:
+  `errno=EINVAL`, сокет разлушен shutdown'ом, а не закрыт), стек логирует
+  warn с errno, переоткрывает listener и продолжает принимать TCP — новый
+  TCP не остаётся навсегда с мгновенным RST при живом QUIC/UDP. Свидетель:
+  два живых восстановления, зафиксированных на устройстве. Мутация: тихий
+  выход из acceptLoop без relisten.
+
+- **P7. Узел с выключенным TLS — это plain-TCP, а не краш.** Trojan/VLESS-нода
+  с `"tls": {"enabled": false}` (легальный конфиг, типовой для публичных
+  подписок) дозванивается плоским TCP; она не может уронить процесс ядра —
+  ни на URL-тесте, ни на живом трафике. Свидетель: тот случай, когда конфиг
+  с plain-trojan нодой проходит `check`, а её дозвон не рождает TLS-рукопожатие;
+  red/green юниты обоих пакетов. Мутация: создание TLS-dialer без проверки,
+  что TLS-конфиг реально построен.
+
+- **P8. RPC, пришедший до готовности сервиса, — no-op, а не краш.** Команда
+  управления ядром (сброс сети на смену интерфейса, опрос WiFi-состояния),
+  доставленная в окно между созданием box и завершением его старта, тихо
+  игнорируется; процесс не падает. Свидетель: тот случай, когда смена
+  WiFi↔LTE ровно в момент запуска туннеля не роняет приложение; red/green
+  юнит на `ResetNetwork` без пройденной стадии инициализации. Мутация: гейт
+  ранних RPC по наличию объекта (`Box() != nil`) вместо статуса готовности.
+
+- **P9. Неудачный TCP-дозвон не роняет процесс.** Соединение, не дошедшее до
+  established (узел молчит, RST, таймаут), отваливается по таймауту как
+  обычная ошибка — оно не может убить ядро вместе с туннелем, сколько бы
+  ретрансмитов SYN ни пришло следом. Свидетель: тот случай, когда поток
+  коннектов на «чёрную дыру» при включённом сниффинге переживается без
+  паники; red/green юнит в форке gvisor на endpoint с занулённым handshake
+  в состоянии `connecting`. Мутация: разыменование `ep.h` в
+  `handleConnecting` под гейтом, проверяющим только состояние endpoint'а.
+
+- **P10. Провал bind одного адресного семейства не гасит второе.** WG/AWG-узел
+  на машине, где default-интерфейс не участвует в IPv6-стеке (типовой случай —
+  снятая галка «IP версии 6» на адаптере: `IPV6_UNICAST_IF` → WSAEINVAL),
+  живёт на IPv4: v6-сокет молча не открывается — как при EAFNOSUPPORT, —
+  вместо того чтобы провалить весь `Open`, закрыть уже открытый v4-сокет и
+  оставить устройство вообще без сокетов («address family not supported by
+  protocol» на каждой инициации). Порт выжившего сокета при деградации
+  сохраняется. Свидетель: юнит «v6-fail → v4 жив и носит пакеты» (кросс-
+  платформенный) и windows-юнит на WSAEINVAL (red на базе до фикса); тот
+  случай, когда на машине жалобы туннель поднимается без правки настроек
+  адаптера. Мутация: возврат фильтра деградации к одному EAFNOSUPPORT;
+  безусловный `v4conn.Close()` в ветках ошибок v6; потеря порта выжившего
+  сокета при деградации.
+
+- **P11. Остановка во время запуска не роняет процесс.** Демон намеренно
+  разрешает `CloseService` пока `instance.Start()` ещё идёт (стоп не должен
+  ждать медленный старт), поэтому `Box.Close` легален в любой точке
+  `Box.Start` — и WG/AWG-эндпоинт обязан это переживать: стадия старта,
+  накрытая закрытием, либо атомарно доделывается и тут же корректно
+  закрывается, либо чисто отказывает (`os.ErrClosed`), но не трогает
+  обнулённый tun-device. Двойной конкурентный `Box.Close` — чистый отказ,
+  не паника double-close. Свидетель: red/green юнит «Close, затем Start» на
+  nil-device харнесе (red = nil-паника в транспортном Start); смоук
+  `Box.Start` ∥ `Box.Close` с прогонкой закрытия по всей траектории старта
+  (без `-race`: детектор дополнительно видит три известные апстрим-гонки вне
+  WG — debugHTTPServer, монитор интерфейсов, Router — они вне обещания и
+  задокументированы в SPEC 072). Мутация: вызов транспортного `Start` вне
+  `resumeMu`; возврат select-then-close идемпотентности `Box.Close`.
+
+- **P12. Один мёртвый detour-узел не замораживает сетевую машинерию процесса.**
+  Дозвон WG-бинда через detour ограничен по времени (`C.TCPTimeout`; XHTTP-dial
+  сам паркуется, пока HTTP-слой не принял тело запроса — SPEC 077, прежде
+  сторож dial-контекста SPEC 050): полумёртвая нода стоит своему
+  эндпоинту ретрай-цикла в 15 с, а не вечного захвата `connAccess` со всей
+  очередью за ним (Send, Close, rebind). ПРОВАЛ поднятия стрима (ошибка
+  RoundTrip, не-200, мёртвый pooled-conn XMUX) до принятия тела валит сам
+  dial с причиной (SPEC 077), после — рвёт upload-пайп сам: заблокированный
+  Write выходит с причиной отказа, а не висит на пайпе, который никто не
+  прочтёт (дыра дампа 2026-08-17: сторож 050 снимался по `created`, а
+  `created` закрывается и при провале). После возврата из dial dial-контекст
+  на conn не влияет — контракт `net.Dialer`, на который опирается пул
+  DNS-транспорта (SPEC 077). Жизнь стрима не
+  привязана к dial-контексту: истёкший дедлайн дайла НЕ убивает живое
+  соединение (иначе — реконнект-цикл каждые 15 с), каждый upload-POST
+  packet-up ограничен собственным бюджетом, `Close` обрывает подвисшие
+  RoundTrip'ы. Реакция эндпоинта на pause-события (`Down`/`Up`) исполняется
+  вне замка pause-менеджера — подписчик, упёршийся в мьютексы устройства,
+  больше не останавливает доставку pause/wake/смены сети всему процессу;
+  всплеск событий сходится к последнему (latest-wins), закрытие инвалидирует
+  очередь. Свидетель: red/green юнит «дозвон в чёрную дыру возвращается в
+  пределах бюджета и отпускает `connAccess`» (red = вечное зависание);
+  red/green юниты raise-провалов и conn-жизни (`raise_failure_test.go`: провал
+  raise валит dial с причиной; conn переживает дедлайн дайла; пост ограничен;
+  Close рвёт pending RoundTrip) и dial-контракта (`dial_ctx_contract_test.go`:
+  отмена сразу после возврата не трогает conn; dial ждёт принятия тела;
+  полуживой узел — ошибка из dial в дедлайн; слот пула отдаётся ровно раз); юниты механики диспатча (не блокирует,
+  latest-wins, инвалидация штампом закрытия); полевые дампы 2026-08-12 и
+  2026-08-17 как эталоны симптома. Мутация: dial под `connAccess` без
+  дедлайна; error-ветка raise без разбития пайпа (только `setupReader`);
+  возврат запросов XHTTP на dial-контекст; возврат conn из XHTTP-dial до
+  принятия тела (сторож снаружи dial в любой форме — пул DNS отменяет
+  контекст раньше любого подъёма); безлимитный upload-POST; возврат
+  синхронного `Down`/`Up` в pause-колбэк.
+
+**Не-обещания:** снятые и закрытые записи (010 — снят апстримом; 012 —
+не воспроизводится) гарантий не несут. Отправка issue апстриму не обещана —
+условия снятия пассивные, проверяются нами на мержах.
+
+## Реестр
+
+| Задача | Симптом | Где патч | Условие снятия | Статус |
+|---|---|---|---|---|
+| [010](../../TASKS/010-WG_ENDPOINT_GRO_SPLIT_BRAIN/SPEC.md) | WG-endpoint без `detour` режет download на Android (0.44 Mbps) | submodule `conn/` | ✅ **выполнено** — upstream `24ea133` | **СНЯТ** |
+| [028](../../TASKS/028-NESTED_TUNNEL_UDP_FRAGMENT/SPEC.md) | Вложенные туннели через `detour` не ходят | `protocol/masque/outbound.go`, endpoint | Апстрим сам выставит `UDPFragmentDefault` для туннельных outbound'ов | держим |
+| [029](../../TASKS/029-ENDPOINT_DETOUR_START_ORDER/SPEC.md) | Endpoint с `detour` мёртв, если провайдер объявлен позже | `protocol/wireguard/endpoint.go` | ✅ причина устранена — upstream `f39ab0e9` (lx.15). Остаток: апстрим сам введёт ранний резолв detour с fail-fast | **частично снят** — держим только fail-fast |
+| [030](../../TASKS/030-FAST_BOX_SHUTDOWN/SPEC.md) | `box.Close()` виснет 10 с+ при ~30 узлах | `box.go`, `route/reachability_common_lx.go` | Апстрим введёт свой quiesce-этап при остановке | держим |
+| [012](../../TASKS/012-TCP_DOWNLINK_STALL_ZOMBIE_CONNS/SPEC.md) | ↑517 ↓0, приложения «висят» | — (кода нет) | — | закрыт: не воспроизводится |
+| [039](../../TASKS/039-REPORT_ARCHIVE_ROTATION/SPEC.md) | Архивы отчётов растут без предела — 427 МБ / 575 папок за 19 дней | `experimental/libbox/report.go` + вызов в OOM- и crash-путях | Апстрим введёт свою ротацию архивов отчётов | держим |
+| [040](../../TASKS/040-SINGTUN_ACCEPTLOOP_SELFHEAL/SPEC.md) | acceptLoop system-стека молча умирает от чужого close fd → весь новый TCP получает мгновенный RST до рестарта VPN (LxBox §047: «браузер мёртв, QUIC жив») | форк `submodules/sing-tun` (`stack_system.go`: warn с errno + relisten + счётчик) | Апстрим сделает acceptLoop устойчивым (или заменит механику system-стека) | держим |
+| [041](../../TASKS/041-WG_HANDSHAKE_GIVEUP_REBIND/SPEC.md) | WG/AWG-узлы после сна устройства навсегда в ERR (мёртвый 5-tuple), лечит только реконнект; v2 — лечение за ~90 с юзер читает как «протухли» | форк `submodules/wireguard-go` (`device/`: rebind по give-up + досрочный по стале-предикату) + маркер-блок `transport/wireguard/endpoint.go` + lx-файлы `protocol/wireguard/`, `experimental/libbox/` (нудж `RebindStaleEndpoints`) | Триггеры give-up/досрочный: апстрим введёт своё пересоздание bind по провалу цикла рукопожатий (следить за give-up веткой `device/timers.go` при бампах submodule). Нудж: апстрим даст собственный wake-API | держим |
+| [045](../../TASKS/045-TLS_DISABLED_NIL_DIALER_CRASH/SPEC.md) | Trojan/VLESS-нода с `"tls": {"enabled": false}` роняет весь процесс nil-паникой на первом дозвоне (вкл. URL-тест) | `protocol/trojan/outbound.go`, `protocol/vless/outbound.go` (`// lx: tls-disabled-dialer`) | Апстрим добавит nil-гейт при создании TLS-dialer (как у vmess) или сменит контракт `NewClientWithOptions`; проверять оба файла на мерже | держим |
+| [046](../../TASKS/046-DNS_HIJACK_PACKET_LOOP_STALL/SPEC.md) | DNS-сервер с `detour` на мёртвый outbound останавливает ВЕСЬ форвардинг: hijack-DNS ставится синхронно из пакетного цикла стека, а постановка висит в `ConnPool.acquireShared` до DNS-таймаута на каждый уникальный запрос | `route/dns.go`, `route/router.go` (`// lx: dns-hijack-async`, semaphore 256 + go-wrap) | Апстрим сделает постановку exchange неблокирующей (следить за `Client.ExchangeAsync` / `ConnPool` при мержах) | держим |
+| [048](../../TASKS/048-GVISOR_HANDSHAKE_NIL_CRASH/SPEC.md) | TCP, не дошедший до established (узел молчит/RST/таймаут), роняет весь процесс nil-паникой: `performHandshake` зануляет `ep.h` и отпускает мьютекс до `Close()`, а гейт `handleConnecting` проверяет состояние, но не `h` | форк-сабмодуль `submodules/gvisor` ([Leadaxe/gvisor-lx](https://github.com/Leadaxe/gvisor-lx), `// lx:begin handshake-nil-guard`) | Апстрим добавит nil-guard в `handleConnecting` либо занулит `h` под тем же удержанием мьютекса, что и смена состояния; проверять при каждом бампе `sagernet/gvisor` — встречный бамп на мерже уводит `replace` и молча снимает патч | держим |
+| [047](../../TASKS/047-EARLY_RPC_NIL_ROUTER_CRASH/SPEC.md) | `ResetNetwork` по command-протоколу (смена WiFi↔LTE на старте туннеля) роняет весь процесс nil-паникой: гейт проверяет `Box() != nil`, а `Box` публикуется до `Start()` — поля `NetworkManager` ещё не присвоены | `route/network.go` (`// lx:begin early-rpc-guard`), `experimental/libbox/command_server.go` (4 гейта на `Ready()`), новый `daemon/started_service_ready_lx.go` | Апстрим введёт гейт готовности на ранних command-RPC либо перестанет публиковать `s.instance` до завершения `Start()`; проверять оба файла на мерже | держим |
+| [050](../../TASKS/050-URLTEST_ZOMBIE_RUN_SURVIVES_RESTART/SPEC.md) | URL-тест на полуживом узле `vless + xhttp + encryption` виснет навсегда и **переживает остановку ядра**: у XHTTP-conn нет дедлайнов (`Set*Deadline` → `os.ErrInvalid`), `encryption.Handshake` работает без ctx, а `URLTestGroup.Close()` не отменяет идущий прогон — зомби копятся с каждым перезапуском, держат весь массив outbound'ов (2806 узлов при 396–428 МБ) и группа перестаёт публиковать замеры («утерялся пинг») | `transport/v2rayxhttp/conn.go` (дедлайны; сторож ctx снят SPEC 077 — dial паркуется до принятия тела), `protocol/vless/lx_encryption.go` + одна строка `protocol/vless/outbound.go`, `protocol/group/urltest.go` (child-ctx + `cancel` в `Close`) — метка `// lx: 050` | Апстрим даст `net.Conn` с рабочими дедлайнами в потоковых HTTP-транспортах и отменяемый жизненный цикл urltest-прогона (`Close()` гасит идущий тест); проверять `urltest.go` и потребителей `NeedAdditionalReadDeadline` на мержах | держим — фикс в дереве, red/green проверен откатом; read-сторона `encryption`-хендшейка ограничена `guardHandshake` (критерий 2 SPEC 050), стенд `lx-test/zombie` зелёный — был красным на lx.36 и на выпущенном `v1.14.0-lx.39`; остаток: живой узел + device |
+| [052](../../TASKS/052-NETSTACK_CONNECT_DEADLINE/SPEC.md) | TCP-дайлы через gVisor-netstack (WG/AWG+MASQUE, openvpn, openconnect, tailscale) — единственный класс путей дайла без таймаута: на тихой чёрной дыре (Wi-Fi зарезал UDP, мёртвый узел) каждый дайл молча висит ~127с SYN-бэкоффа gVisor (домены — до N×127с), группе не на что реагировать; полевой дамп — 16 дайлов, припаркованных в `DialTCPWithBind` | `transport/wireguard/connect_deadline_lx.go` (логика + обоснование) + 2-строчный шов в `device_stack_gonet.go`; тот же шов inline в `transport/openvpn/device_stack.go`, `transport/openconnect/device_stack.go`, `protocol/tailscale/endpoint.go` (везде маркер `// lx: SPEC 052`): одноразовый connect-дедлайн `C.TCPTimeout` (15s = бюджет проб), умирает с connect через `defer cancel()` | Апстрим ограничит netstack-connect сам (следить за `DialTCPWithBind`/gonet-вызовами при мержах) либо оживит `TCPSynRetriesOption` в gVisor (в текущем пине — мёртвая ручка) | держим — стенд: blackhole `2m7.065s`→`15.050s`, warm/wake не задеты |
+| [053](../../TASKS/053-REALITY_MIN_CLIENT_VER/SPEC.md) | REALITY-узлы на сервере Xray ≥ v26.7.11 **молча** уходят на камуфляжный сайт вместо туннеля: сервер там по умолчанию требует `minClientVer` ≥ 26.3.27, а апстрим объявляет зашитую с 2023 года версию `1.8.1`; отказ не даёт ошибки (проброс на `dest` — намеренно, чтобы пробер не отличил REALITY по форме отказа) | `common/tls/reality_client.go` (`// lx: SPEC 053`) — три байта `SessionId[0..2]` = `26, 3, 27` | Апстрим сам поднимет константу (или начнёт брать её из версии билда); файл апстримный и активно трогается (kTLS/ECH/TLS spoof) — проверять на каждом мерже, встречное изменение молча снимет правку | держим — field ✅ 2026-09-13 на стенде SPEC 083 (v26.7.11: `26.3.27` ходит, `1.8.1` отсекается) |
+| [083](../../TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) | REALITY-узлы на сервере Xray ≥ v26.9.8 **молча** уходят на камуфляжный сайт (`reality verification failed`): сервер (`XTLS/REALITY@8cdf7bf`) требует key_share `X25519MLKEM768` перед X25519, а апстрим сам вырезает гибрид из ClientHello (костыль под utls 1.7.2) | `common/tls/reality_client.go` (`// lx: SPEC 083`) — фильтр снят, `AuthKey` по `Ecdhe`, при nil — `MlkemEcdhe` | Апстрим уберёт фильтр сам (issue #4520); проверять на мерже, что **безусловный** фильтр не вернулся (после [089](../../TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md) фильтр в файле есть — под `key_share: classical`; страж `TestLxRealityKeyShareDefaultKeepsHybrid`) и `HelloChrome_Auto` несёт гибрид перед X25519 | держим — DEVICE-VERIFIED на стенде (v26.9.9 ходит, v26.7.11/v26.7.28 без регрессии); не-chrome отпечатки гибрида в `metacubex/utls` не несут — `firefox` закрыт форком [086](../../TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md), `safari` — [087](../../TASKS/087-UTLS_SAFARI_26_3/SPEC.md); `edge`/`ios`/`android`/`360`/`qq` — по решению владельца остаются, подмена в приложениях |
+| [084](../../TASKS/084-INTERRUPT_GROUP_ABBA_DEADLOCK/SPEC.md) | Переключение вложенного selector'а (Clash API / `SelectOutbound`) при живом соединении через внешнюю группу (DoH с `detour`) — ABBA-дедлок `interrupt.Group`: `Interrupt` внутренней группы держит свой замок и закрывает обёртку внешней, `Close` DoH держит внешний и ждёт внутренний; дальше каждый новый conn через группу виснет в `NewConn` — трафик мёртв до рестарта (issue #20, OpenWrt `lx.35`: 67 goroutine в `Mutex.Lock`). **Наш регресс** с `lx.25`: inbound-обёртка 064 v2 дала второй порядок захвата, у апстрима его нет | `common/interrupt/group.go`, `common/interrupt/conn.go` (`// lx: SPEC 084`) — под замком только снятие записи, нижележащий `Close` после `Unlock` | Апстрим сам вынесет `Close` из-под `access` либо уйдёт inbound-обёртка 064 v2; на каждом мерже проверять, что `Interrupt` и три `Close` не держат замок на время нижележащего `Close` | держим — red/green юнит (три обёртки) + e2e вложенных selector'ов, `-race`; полевой прогон на конфиге репортёра открыт |
+| [085](../../TASKS/085-SOCKS5_UDP_ASSOCIATE_UNSPECIFIED_BIND/SPEC.md) | socks5-outbound: TCP ходит, UDP **молча** нет с серверами, отвечающими на UDP ASSOCIATE BND.ADDR `0.0.0.0`/`::` (типично для публичных прокси; отчёт Cultsonfire 2026-09-14, в Xray те же прокси работают). Клиент sing (`protocol/socks/client.go:161-167`, v0.9.0…v0.9.3, апстримный `dev` тоже) диалит релей по этому адресу как есть, а для Go неопределённый хост = локальная система — датаграммы уходят на `127.0.0.1`, ошибки нет | `protocol/socks/udp_associate_lx.go` (новый: `relayDialer` — обёртка dialer'а для `socks.NewClient`, перехватывает UDP-dial релея; кода sing не копируем, хендшейк остаётся в библиотеке) + `protocol/socks/outbound.go` (`lx:begin socks-udp-bind`, один шов в `NewOutbound`, +5 строк) — unspecified/пустой BND.ADDR → адрес сервера из конфига с портом из ответа (как Xray, `proxy/socks/client.go:97-100`); порт 0 — ошибка; только `version: 5` | Апстрим sing начнёт нормализовать `response.Bind` в `Client.DialContext` — страж `TestLxUpstreamSocksClientDialsUnspecifiedBind` упадёт на бампе sing; тогда снять шов, файл и тесты. **Следить** за контрактом: релей диалится через переданный dialer с сырым BND.ADDR (`client.go:162`) — если sing начнёт диалить мимо dialer'а, фикс отвалится молча; ловит `TestLxRelayDialerNormalisesBind`. На мерже `outbound.go` — шов на месте (`TestLxNewOutboundUDPThroughUnspecifiedBind`) | держим (`lx.39`, задача C) — red/green юнит (записывающий dialer, контракт с sing) + живой round-trip через настоящий `NewOutbound`, `-race`; на узлах репортёра: у выбранного BND `0.0.0.0` (фикс по адресу), но UDP-релей сервера мёртв для любого клиента — остаток жалобы серверный; TUN → socks UDP на AVD подтверждён STUN; через `detour` WARP MASQUE не проверено |
+| [086](../../TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md) | REALITY-узлы с `fp=firefox` на Xray ≥ v26.9.8 **молча** уходят на камуфляжный сайт (`reality verification failed`) и после 083: гибридный key_share `X25519MLKEM768` есть только в chrome-пресетах `metacubex/utls` v1.8.7, `HelloFirefox_Auto` там = Firefox 120 без гибрида; metacubex Firefox 148 не несёт (issues закрыты, внешние PR не принимает), апстрим sing-box сидит на той же библиотеке; провайдеры отдают `fp=firefox` прямо в ссылке (singbox-launcher#124) | четвёртый форк-сабмодуль `submodules/utls` = [Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx): metacubex/utls `v1.8.7` + два cherry-pick из refraction — `fc716b2` (пресет `HelloFirefox_148` + reuse одного X25519-ключа в гибридной и классической записях key share) и `ddebe39` (reuse через байт-маркеры); собственных правок библиотеки нет, единственный конфликт — блок import; `replace` в `go.mod` (`lx:begin utls-firefox148`), путь модуля прежний — linkname `badtls`/`ktls` резолвятся; страж `common/tls/utls_firefox148_lx_test.go` (`"firefox"` = Firefox 148; гибрид перед X25519 по разу у `chrome`/`firefox`; reuse + контракт `AuthKey` 083) | metacubex выпустит тег с Firefox 148 и reuse, либо апстрим sing-box переедет на библиотеку, где он есть, — снять `replace` и сабмодуль (`"firefox"` уже смотрит в `HelloFirefox_Auto`). До тех пор каждый бамп `metacubex/utls` в апстриме = переезд ветки `lx` форка на новый тег с теми же коммитами — с [087](../../TASKS/087-UTLS_SAFARI_26_3/SPEC.md) их три (раннбук §1.1); страж-тест упадёт, если `replace` съедет на голый metacubex | держим — стенд на Mac 2026-09-16 (Xray v26.9.9: `fp=firefox` 204, ядро до фикса — `reality verification failed`; v26.7.28/v26.7.11 и `chrome` без регрессии; контроль с dest `www.cloudflare.com` — 204); оба AAR — dry run `lx-release` ✅; field ✅ узел репортёра singbox-launcher#124 через лаунчер (lx.1 — падал, lx.2 — 204); выпущено в v1.14.1-lx.2; остаток — AAR на AVD (LxBox после бампа) |
+| [087](../../TASKS/087-UTLS_SAFARI_26_3/SPEC.md) | REALITY-узлы с `fp=safari` на Xray ≥ v26.9.8 **молча** уходят на камуфляжный сайт (`reality verification failed`) и после 086: в `metacubex/utls` v1.8.7 `HelloSafari_Auto = HelloSafari_16_0` — гибридного key_share `X25519MLKEM768` у него нет; отпечаток приходит из подписки, пользователь его не меняет | тот же форк-сабмодуль `submodules/utls` ([Leadaxe/utls-lx](https://github.com/Leadaxe/utls-lx)) — третий `cherry-pick -x` из refraction: `aa6edf4` «feat: add safari 26.3» (`HelloSafari_Auto = HelloSafari_26_3` + пресет, +110 строк); конфликтов не было, reuse ключа пресет не использует, собственных правок библиотеки по-прежнему нет; в ядре — только гитлинк, `replace` и маппинг `"safari"` не менялись; страж `common/tls/utls_firefox148_lx_test.go` расширен (`safari` = Safari 26.3; гибрид перед X25519 по разу у `chrome`/`firefox`/`safari`) | metacubex выпустит тег с Firefox 148 + reuse **и** Safari 26.3, либо апстрим sing-box переедет на библиотеку, где они есть, — снять `replace` и сабмодуль. До тех пор каждый бамп `metacubex/utls` в апстриме = переезд ветки `lx` форка на новый тег с теми же **тремя** коммитами (раннбук §1.1); страж-тест упадёт, если `replace` съедет на голый metacubex | держим — стенд на Mac 2026-09-16 (Xray v26.9.9: `fp=safari` 204 ×3, ядро lx.2 — `reality verification failed` ×3; v26.7.28/v26.7.11 — 204, `chrome`/`firefox` без регрессии); выпущено в v1.14.1-lx.3; остаток — AAR на AVD (LxBox после бампа) |
+| [088](../../TASKS/088-REALITY_FRAGMENT_BYPASS/SPEC.md) | REALITY-узлы **молча** игнорируют `fragment` / `record_fragment`: `RealityClientConfig.ClientHandshake` строит `utls.UClient` на голом соединении, минуя обёртку `tlsfragment` uTLS-клиента; дефолт [060](../../TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) до REALITY не доходил. После 083 ClientHello = 1720–1885 байт, два TCP-сегмента — на сети репортёра LxBox #142 теряется | `common/tls/utls_client.go` (`wrapClientConn`, `// lx: SPEC 088`), `common/tls/reality_client.go` (`prepareClientHello` — обёртка перед `utls.UClient`) | Апстрим проведёт фрагментацию в REALITY сам — снять helper в пользу его формы. Проверять на мерже: `utls.UClient(` в `reality_client.go` получает результат `wrapClientConn`, а не входной `conn`; страж `TestLxRealityClientHelloGoesThroughFragmentConn` | держим — стражи зелёные, red-check пройден, `lx-build` ✅ (2026-09-17); выпущено в v1.14.1-lx.4; полевой прогон на сети #142 впереди — фрагментация там может и не помочь |
+| [089](../../TASKS/089-REALITY_KEY_SHARE_OPTION/SPEC.md) | *(опция, противовес 083)* Нет способа вернуть классический REALITY ClientHello на одном узле: 083 сняла апстримный фильтр `X25519MLKEM768` целиком, а сети, где двухсегментное приветствие теряется, требуют выбора у узла; `fp=edge` даёт эффект как побочный | `option/tls.go` (`reality.key_share`), `constant/tls.go`, `common/tls/reality_client.go` (`// lx: SPEC 089`: `classical` = Build → фильтр → Build, `hybrid` = проверка шара) | Не хотфикс — снимать нечего. Сторожить: фильтр только под `case C.RealityKeyShareClassical`, безусловный уронит `TestLxRealityKeyShareDefaultKeepsHybrid`; появится апстримная опция того же смысла — переехать на её имя | держим — стражи зелёные, `lx-build` ✅ (2026-09-17); выпущено в v1.14.1-lx.4; остаток — проводка в LxBox/лаунчер, стенд по 083 §2 |
+| [090](../../TASKS/090-REALITY_SHORT_ID_OVERFLOW_PANIC/SPEC.md) | REALITY `short_id` длиннее 16 hex-символов роняет **весь процесс** паникой `index out of range [8] with length 8` вместо ошибки конфигурации — и в клиенте, и в сервере: `hex.Decode` пишет `len(src)/2` байт в `dst`, не сверяясь с его ёмкостью, поэтому запись уходит за границы `[8]byte` **внутри** `hex.Decode`, а стоящая следом апстримная проверка `decodedLen > 8` мёртвая (до неё управление не доходит). Код апстримный, ровесник REALITY (2023-02/03), в текущем `upstream/stable` дословно тот же. Нечётная длина и не-hex ловятся самим `hex.Decode` ошибкой — уязвима только длина | `common/tls/reality_client.go` + `common/tls/reality_server.go` (`// lx: SPEC 090`) — проверка `len(short_id) > 16` **до** `hex.Decode`, текст ошибки апстримный (`invalid short_id`, на сервере `invalid short_id[<i>]: <value>`); мёртвая проверка после декодирования снята | Апстрим добавит проверку длины до `hex.Decode` (или перейдёт на `hex.DecodeString` + `len`) в обоих файлах. Файлы апстримные и активно трогаются (kTLS/ECH/key_share) — проверять маркер `// lx: SPEC 090` на каждом мерже, встречное переписывание блока молча снимет патч | держим — red/green юниты в `common/tls/reality_client_lx_test.go` (`TestLxRealityShortIDTooLongRejected`, `TestLxRealityServerShortIDTooLongRejected`): до фикса оба роняли процесс тестов паникой в `hex.Decode`, после — 18 hex → `invalid short_id`, 16 hex/пусто → ок, `"abc"`/`"zz"` → `decode short_id`. Найдено DRIFT-инвентарём контракта LxBox на пине `v1.14.1-lx.4`; приложения (LxBox §343, лаунчер) такое значение отбрасывают сами, поэтому их пользователей не било |
+| [091](../../TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) (§1) | `tuic.udp_relay_mode` с опечаткой молча означает `native`: в апстримном `switch` нет ветки `default`, поэтому `"qiuc"`, `"Native"`, `"udp"` и любое другое значение проходят как документированный дефолт, а пользователь, написавший `quic` с опечаткой, получает не тот режим UDP-релея и никакого сигнала об этом. Соседняя опция `congestion_control` при опечатке даёт ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`) — поведение расходится внутри одного outbound'а. Документация апстрима знает ровно два значения. Код апстримный, `switch` без `default` там с появления tuic-outbound'а | `protocol/tuic/outbound.go` (`// lx: SPEC 091`) — ветка `default` с `unknown udp_relay_mode: <value> (expected native or quic)`; `""` по-прежнему = `native`, проверка конфликта с `udp_over_stream` осталась выше | Апстрим добавит `default` в `switch` (или валидацию значения в `option`). Файл апстримный — проверять маркер `// lx: SPEC 091` на каждом мерже: встречное переписывание блока молча вернёт тихий дефолт | держим — юниты `protocol/tuic/udp_relay_mode_lx_test.go` (`TestLxTUICUnknownUDPRelayModeRejected`, `TestLxTUICKnownUDPRelayModesAccepted`, `TestLxTUICUDPOverStreamConflictStillWinsOverTypo`), red-check пройден — до фикса `"qiuc"` конструировался без ошибки. Найдено DRIFT-инвентарём контракта лаунчера (DRIFT 131 §8.3) |
+| [092](../../TASKS/092-INIT_ERROR_NAMES_TAG/SPEC.md) | Отказ `box.New` на конфиге называет элемент **только индексом**: `initialize outbound[0]: invalid short_id`. Приложения-потребители (LxBox §455, лаунчер, `lxd apply`) показывают текст ядра дословно, а у пользователя в подписке сотня узлов с тегами, а не с номерами, — по индексу он не находит, какой именно узел чинить. При этом тип и тег в каждом из шести циклов инициализации **уже вычислены** рядом, для имени логгера (`outbound/vless[proxy-de-1]`), и ошибка просто их не использует. Код апстримный, форма ошибки не менялась с появления менеджеров | `box.go` (`// lx: SPEC 092`, шесть строк) — хвост ` <type>[<tag>]` перед двоеточием во всех шести индексированных циклах (DNS server, endpoint, inbound, service, outbound, certificate provider): `E.Cause(err, "initialize outbound[", i, "] ", outboundOptions.Type, "[", tag, "]")`. Апстримный префикс `initialize <kind>[<i>]` сохранён дословно — на него могут матчить существующие парсеры; ошибки внутри конструкторов не тронуты | Апстрим включит тип и/или тег в текст ошибок инициализации `box.New` (в любой форме — хвостом, префиксом, полем структуры). Файл апстримный и несёт швы других SPEC — проверять маркер `// lx: SPEC 092` на каждом мерже: встречное переписывание цикла молча вернёт голый индекс | держим — страж `lx-test/initerr/init_error_names_tag_lx_test.go` (`with_utls`): outbound `vless` с тегом → `initialize outbound[0] vless[proxy-de-1]: `, без тега → `outbound[0] vless[0]`, inbound `mixed` → `initialize inbound[0] mixed[in-local]: `; red-check пройден — до фикса все три давали голый индекс. Пожелание LxBox от 2026-09-18 после приёма lx.5 |
+| [093](../../TASKS/093-GRPC_SERVICE_NAME_CUSTOM_PATH/SPEC.md) | gRPC-транспорт не умеет **многосегментный** путь: `service_name: "a/b"` уходит на провод как `/a%2Fb/Tun`, и сервер Xray, у которого `serviceName` задан формой абсолютного пути (`"/a/b/Tun"` — документированная конвенция Xray, сравнение пути строгое), отвечает `v2ray-grpc: unexpected status: 404 Not Found`. Формы `/a/b/Tun` у нас не было вовсе: ведущий `/` просто экранировался вместе со всем именем. Заявка лаунчера #130 (2026-09-18), тот же класс жалоб разбирался 2026-09-03 | `transport/v2raygrpclite/client.go` + `transport/v2raygrpclite/server.go` + `transport/v2raygrpc/custom_name.go` (`// lx: SPEC 093`) — путь и имя стрима берутся из форк-нативного helper'а `common/grpcname` (дословный порт `getServiceName`/`getTunStreamName` Xray): ведущий `/` = custom path (посегментный `PathEscape`, последний сегмент = имя стрима, хвост `\|…` отброшен), без ведущего `/` — байт в байт прежнее поведение. Опции не добавлялись, валидации нет — форму задаёт содержимое `service_name`, как у Xray | Апстрим примет конвенцию custom path (или эквивалент — любой способ задать многосегментный путь) в `v2raygrpclite`. Файлы апстримные — проверять маркер `// lx: SPEC 093` на каждом мерже: встречное переписывание строки пути молча вернёт `%2F` и 404 против Xray. Helper `common/grpcname` — форк-нативный пакет, снятию не подлежит (после снятия патча просто останется неиспользуемым) | держим — стражи `transport/v2raygrpclite/service_name_lx_test.go` (h2-стенд «lite client → lite server» на loopback + путь на проводе), `common/grpcname/grpcname_test.go` (табличный юнит по §1.1 целиком) и `transport/v2raygrpc/custom_name_lx_test.go`; red-check пройден — до фикса `/a/b/Tun` давал «bad path». ⚠️ Против **живого Xray** не прогонялось (сверка по исходникам Xray/grpc-go, SPEC §1.0); выпущено в `v1.14.1-lx.8` |
+| [060](../../TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md) | TLS-outbound (VLESS/trojan/vmess/anytls/shadowtls/http/masque h2) через `detour` молча не поднимается на части нижних плеч: `tls handshake: EOF` через 12–17 с. Нижнее плечо пересылает наш ClientHello от своего имени, PMTU за ним ниже его размера (порог ≈1490 B), ICMP *Fragmentation Needed* до нас не доходит. Причина **вне ядра** — воспроизводится голым `curl`; ни `mtu`, ни `tun.mtu`, ни route-action `tls_fragment` до этой точки не достают | `common/tls/client.go` (`// lx: SPEC 060`) — `record_fragment` включается по умолчанию, когда `DialedThroughDetour`; +1 поле в семи протокольных outbound'ах | Апстрим сам включит фрагментацию под detour либо даст `*bool` для явного отказа; файлы апстримные — проверять на каждом мерже. ⚠️ Явный `record_fragment: false` неотличим от «не задано» — «detour без фрагментации» сейчас не выразить | держим — матрица 38/38 на живых узлах |
+| [064](../../TASKS/064-SELECTOR_INTERRUPT_DEAD_ON_INBOUND/SPEC.md) | `interrupt_exist_connections` у `selector` мёртв для пользовательского трафика: переключение узла внутри группы не рвёт активные соединения, старый узел доживает до своего таймаута, помогает только Stop/Start. У `urltest` бага нет. Дефект апстримный и ровесник самой фичи (`c320be75a`, 2023-09-15, v1.10.0); в апстриме заведён дважды (issues #4281, #2625), фикс-PR #4285 завис с раздутым диффом | `protocol/group/selector.go` (`// lx: SPEC 064`) — обёртка входящего conn в `interruptGroup` до развилки веток (`NewConn`/`NewSingPacketConn`, подход PR #4285; покрывает и вложенные группы, и dns-ветку) + порт `SingPacketConn` в `common/interrupt/{conn,group}.go` | Апстрим смержит #4285 либо эквивалент; файлы апстримные — проверять на каждом мерже, встречное изменение молча снимет правку | держим — v1 field-verified на `rc.7`; v2 (текущий) ждёт полевого прогона |
+| [069](../../TASKS/069-WG_V6_BIND_FAIL_KILLS_V4/SPEC.md) | Windows: default-адаптер вне v6-стека (снятая галка «IP версии 6» — типовая корпоративная/«оптимизированная» машина) → `IPV6_UNICAST_IF` даёт WSAEINVAL на каждом bind, `Open` закрывает уже открытый v4-сокет, `BindUpdate` к этому моменту закрыл старый bind — устройство без сокетов, **все** WG/AWG-эндпоинты мертвы со старта («address family not supported by protocol»); ребинды SPEC 041 бьют в ту же стену | форк `submodules/wireguard-go` (`conn/bind_std.go` + `conn/lx_family_{default,windows}.go`, `// lx: SPEC 069`) | Апстрим научит `Open` переживать пофамильный провал bind шире EAFNOSUPPORT (или перестанет ронять соседний сокет); следить за обработкой ошибок вокруг `listenNet` в `conn/bind_std.go` при каждом бампе сабмодуля — переписывание блока молча снимет патч | держим — юниты зелёные (darwin `-race`), windows cross-build/vet чистые; остаток: полевой прогон на машине жалобы |
+| [072](../../TASKS/072-WG_DETOUR_LIFECYCLE_FREEZE/SPEC.md) (поглотила 070 + 071) | Семья полевых отказов жизненного цикла WG-эндпоинта, три дампа: (1) стоп во время долгого старта ронял процесс SIGSEGV'ом (`CloseService` конкурентно с `Box.Start`, nil tun-device); (2) полумёртвый detour-узел (VLESS+XHTTP) замораживал сетевую машинерию процесса на десятки минут — dial без дедлайна в непрочитанном upload-пайпе под `connAccess`, pause-колбэки под замком `sing`; (3) на rc.2 с обоими фиксами — снова 38-мин фриз: error-ветки raise закрывали `created` (сторож 050 снимался), не разбивая пайп, а 15-с дедлайн дайла, ездивший на ctx запроса, рвал живые detour-conn'ы (реконнект-цикл, умножавший заходы в дыру); лечит только force-stop | `protocol/wireguard/endpoint.go` + `box.go` (`// lx: SPEC 070`: `Start` под `resumeMu` + гейт `closing`, CAS в `Close`), `transport/wireguard/client_bind.go` + `endpoint.go` (`// lx: SPEC 071`: дедлайн `C.TCPTimeout` на dial + async latest-wins pause-диспатч), `transport/v2rayxhttp/conn.go` (`// lx: SPEC 072`: `fail()` рвёт upload-пайп на провале raise; conn-scoped ctx запросов; per-post бюджет packet-up; `Close` рвёт pending RoundTrip) | Механизм 1: апстрим сериализует жизненный цикл (следить за локами вокруг `instance.Start()` в `daemon/started_service.go`). Механизм 2: апстрим ограничит dial в `connect()`; `sing` перестанет звать pause-колбэки под `d.access` (следить при бампах). Механизмы 3–4 — постоянный контракт форк-нативного пакета `v2rayxhttp`, снятия нет (инварианты пришпилены `raise_failure_test.go`) | держим — юниты red/green всех четырёх механизмов + `-race` сюиты зелёные; остаток: полевой прогон на профиле дампа 2026-08-17; в окне start/close живут ещё 3 апстрим-гонки без крашей (см. SPEC 072) |
+
+## Разбор записей
+
+**010 — GRO split-brain.** UDP_GRO включался, а приёмный путь был
+linux-only, из-за чего Android получал склеенные пакеты и не разбирал их.
+Наш фикс — гейт за `!android`. При миграции на wireguard-go v0.0.3 апстрим
+сделал то же самое (`24ea133 «conn: harmonize GOOS checks…»`), наш патч
+удалён. Но остался **след**: GRO на Android теперь полностью рабочий и
+требует большого `MaxSegmentSize` как топлива — см. запись CONSTRAINT
+в [UPSTREAM_SYNC](../005-UPSTREAM_SYNC/FEATURE.md).
+
+**028 — DF во вложенных туннелях.** Нижний UDP-сокет открывается через
+`common/dialer`, который по умолчанию ставит DF. При вложении внешняя
+датаграмма штатно великовата (инкапсуляция +32 WG, +`s4` AWG на каждый пакет) —
+с DF она молча дропается вместо фрагментации. Direct-узлы через тот же detour
+работали, потому что их датаграммы мелкие. Фикс: endpoint и masque ставят
+`UDPFragmentDefault=true` (opt-out, как у direct/hysteria2/tuic); явный
+`"udp_fragment": false` возвращает DF.
+
+**029 — порядок старта.** Ядро упорядочивает старт по зависимостям, и `detour`
+в этих зависимостях участвует: провайдер гарантированно стартует раньше
+потребителя независимо от порядка в конфиге. Ломалось не упорядочивание —
+резолв **обходил** его, утекая в фазу создания, которая идёт до старта. Провайдер,
+объявленный в конфиге позже, на тот момент ещё не был зарегистрирован, промах
+кэшировался навсегда, и эндпоинт молча не пропускал ни байта; перестановка строк
+в конфиге «чинила» его случайно.
+
+Причина устранена **апстримом** (`f39ab0e9`, приехал с мержем в lx.15): преждевременный
+резолв из фазы создания убран, проба перенесена в старт. Наша половина фикса,
+делавшая то же самое, при мерже растворилась — держать её больше незачем.
+
+Держим только вторую половину: **ранний резолв detour на старте вместо ленивого
+при первом дайле**. Это не исправление бага, а защита от тихого отказа — при
+опечатке в теге `detour` (или удалённом провайдере) конфиг падает на старте
+с внятной ошибкой, тогда как ленивый резолв закэшировал бы промах навсегда
+и дал бы ровно тот же симптом «нода мёртвая, в логах пусто», с отладки которого
+началась вся задача. Условие снятия: апстрим введёт такой же ранний резолв
+с fail-fast сам.
+
+**030 — медленная остановка.** `box.Close` рвал endpoints, пока idle/urltest-тик
+ещё слал wake-пинги; каждый `Endpoint.Close()` блокировался на `resumeMu`,
+дожидаясь полного device-rebuild с хендшейком (~0.5–5 с), и это суммировалось
+последовательно. Фикс из четырёх шагов; drain намеренно **не трогаем** —
+иначе use-after-free в gVisor netstack.
+
+**012 — зонтик, а не баг.** Симптом наблюдался на разных узлах, включая WG,
+то есть за ним стояло несколько причин. WG-долю закрыл 010. Для не-WG
+(VLESS/reality) отдельного фикса нет — симптом не воспроизводится, и закрывать
+его выдуманным объяснением мы не стали. Артефакт: зонд `LX_CONN_TRACE`
+(в бою не прогонялся; сам зонд глушил `ReadWaiter` и маскировал баг —
+перед живым прогоном сделать прозрачным).
+
+**039 — архивы отчётов без ротации.** Апстрим пишет каждый OOM/crash-отчёт в новую
+папку и не удаляет старые никогда: удаление подразумевается на стороне клиента, а тот
+чистит только выгруженное. Отчёт тяжёлый (два pprof-профиля + копия конфига, ~750 КБ),
+поэтому регулярный сбой превращается в сотни МБ — на устройстве нашлось 575 папок и
+427 МБ, накопленных за 19 дней, пик 94 отчёта в сутки. Фикс — подрезка архива перед
+записью нового отчёта, по количеству и по объёму, общая для обоих путей. Тонкость:
+порядок удаления только по mtime — суффиксы коллизий (`-1..-1000`) ломают
+лексикографический порядок имён, и сортировка по имени удаляла бы не те папки.
+Накопленное фикс не подчищает сам: ротация срабатывает лишь при следующем отчёте.
+
+**040 — смерть acceptLoop system-стека.** system-стек sing-tun принимает весь
+TCP одним listener'ом; когда его fd разлушивает чужой код (триггер — reload
+VPN; `errno=EINVAL` в живых логах показывает, что сокет именно разлушен
+shutdown'ом, а не закрыт — fdsan виновника поэтому не ловит), acceptLoop
+молча завершался, и весь новый TCP получал мгновенный RST до рестарта VPN
+при живом QUIC/UDP — симптом «браузер мёртв, Telegram/YouTube живы» (LxBox
+§047). Фикс в форке `submodules/sing-tun`: warn с errno + relisten + счётчик
+восстановлений. Девайс-верифицирован: два живых восстановления в поле.
+
+**041 — мёртвый 5-tuple после сна.** За время сна per-flow-состояние на пути
+(NAT-маппинг и/или классификация DPI) умирает, а `wireguard-go` после провала
+цикла рукопожатий (90 с ретраев, ветка give-up) навсегда продолжает ретраить
+в тот же сокет — тот же исходящий порт, тот же мёртвый 5-tuple. Ручной
+реконнект «лечил» ровно сменой ephemeral-порта. Фикс — пассивное
+самовосстановление: событие give-up (существующий таймерный путь, срабатывает
+только под спросом трафика) один раз переоткрывает bind — со свежим портом,
+если `listen_port` не пинован, — и сразу повторяет рукопожатие; masquerade-
+приманка `i1` уходит с первой же инициацией нового 5-tuple. В здоровом,
+спящем и закрытом состоянии цена нулевая: ни таймеров, ни горутин; на
+down-девайсе rebind вырождается в no-op (совместимость со сном SPEC 020 —
+из state machine девайса).
+
+**045 — nil TLS-dialer при выключенном TLS.** Апстримный ECH-коммит
+(`1f0308054`) заменил дозвонную проверку `tlsConfig != nil` на
+`tlsDialer != nil`, а dialer стал создаваться в конструкторе под гейтом
+`options.TLS != nil` — без учёта того, что для `enabled: false` конструктор
+конфига по контракту возвращает `(nil, nil)`. Итог: живой dialer с nil-конфигом,
+SIGSEGV на первом рукопожатии, гибнет весь процесс (паника в горутине ядра).
+Уязвимы trojan и vless; vmess апстрим сам защитил тем же гейтом, который мы
+и распространили. Стреляет только при удавшемся TCP-коннекте — поэтому
+нода-мина из подписки может месяцами молчать (ТСПУ дропает её TCP) и выстрелить,
+когда путь внезапно проходим. Диагностирован по крашбандлу 4PDA: порт в кадре
+стека совпал с единственной `enabled:false`-нодой конфига. На момент фикса баг
+жив в upstream `testing`.
+
+**046 — DNS-hijack морозил пакетный цикл.** Обе ветки tun-стека зовут
+DNS-hijack **синхронно из пакетного цикла** (system — из `ForwardDispatcher`,
+gvisor — из UDP-forwarder'а), а дальше цепочка синхронна до самого
+`ConnPool.acquireShared`, который ждёт завершения dial. Метод `ExchangeAsync`
+вопреки имени блокирует вызывающего: асинхронна доставка ответа, а не
+постановка запроса. Поэтому один DNS-сервер с `detour` на молча дропаемую
+ноду останавливал **весь** форвардинг туннеля — гасли чужие DNS, ICMP и новые
+соединения любых протоколов, при полностью чистых логах (входящие
+`inbound DNS packet` идут, ответных `dns: exchanged` нет). Фонового потока
+ru-запросов от Android-приложений (каждые ~5 с при 10-секундном таймауте)
+хватало, чтобы цикл стоял почти непрерывно; волны «оживает на 4–5 минут и
+снова умирает» — это отпускающие dial-таймауты. Фикс — увести exchange
+в горутину под семафором (256, `TryAcquire` без блокировки: переполнение
+дропает запрос, а UDP-клиент ретрайнет). Баг не стеко-специфичен —
+воспроизведён на обоих стеках. Вторичный эффект, удлиняющий видимый отказ:
+netd после серии таймаутов метит DNS-сервер VPN unresponsive и ещё минуты
+отвечает «unknown host» уже после оживания ядра.
+
+**047 — RPC обгоняет старт box.** `NetworkManager.router` присваивается
+единственный раз, на стадии `StartStateInitialize`, а `Box` публикуется
+раньше — до `Start()`. Гейт ранних command-RPC проверял `Box() != nil`, то
+есть факт создания, а не готовности: `ResetNetwork`, прилетевший в это окно
+(смена WiFi↔LTE ровно на старте туннеля), разыменовывал nil-поле и убивал
+весь процесс. Фикс — гейтить по статусу сервиса (`ServiceStatus_STARTED`),
+как это уже делали `URLTest` и все наши lx-RPC, плюс ранний nil-guard в самом
+`ResetNetwork` на случай другого пути входа. Окно узкое и открывается только
+под внешним событием, поэтому баг выглядел как случайный краш на старте.
+
+**048 — гонка nil-хендшейка в gvisor.** `performHandshake` в ветке провала
+зануляет `ep.h`, отпускает мьютекс и лишь потом идёт в `Close()`; состояние
+endpoint'а в этом окне ещё `SynSent`/`SynRecv`, поэтому гейт
+`handleConnecting` — он проверяет состояние, но не `h` — пропускает пришедший
+сегмент на `ep.h.processSegments()`. Триггер бытовой: недостижимый узел
+(молчит или шлёт RST) при живых ретрансмитах SYN. Баг апстримный, но наш путь
+**расширяет окно** — lazy-режим sing-tun дёргает `CreateEndpoint` отложенно,
+из сниффера, то есть уже из роутинг-пайплайна. Защита на нашей стороне
+невозможна: паника рождается во внутренней горутине gvisor, `recover()` в
+чужой горутине не работает, а окно целиком лежит между двумя точками внутри
+зависимости — наша единственная точка входа к тому моменту уже за ним. Отсюда
+третий форк-сабмодуль, взятый **снапшотом пина без истории**: вся тяжесть
+апстрима оказалась в истории (1.45 ГБ против 7.3 МБ рабочего дерева). Тест
+едет вместе с патчем — если при переносе на новый пин guard потеряется, будет
+красный, а не тишина.
+
+**050 — зомби-прогон urltest.** Три дефекта, смертельных только вместе:
+у XHTTP-conn нет дедлайнов (`Set*Deadline` → `os.ErrInvalid`, а `Write` идёт
+в `io.Pipe`, который никто не читает, пока `RoundTrip` из соседней горутины
+не поднял поток); `encryption.Handshake` работает с голым `net.Conn` без ctx
+и вызывается уже после создания conn, так что отмена до него не доходит;
+`URLTestGroup.Close()` гасит только ticker и не отменяет идущий прогон.
+Ключевое здесь — что третий дефект **нельзя чинить в одиночку**:
+`batch.Wait()` это чистый `wg.Wait()`, отмену ctx он не слушает вовсе,
+поэтому разбудить задачу способны только дедлайны и сторож ctx на диале.
+Итог в поле: прогоны переживают полную остановку ядра, копятся поколениями
+с каждым перезапуском, держат массив outbound'ов от прежней подписки
+(2806 узлов при 592 в конфиге) и не публикуют замеры — пользователь читает
+это как «утерялся пинг», а лечит только ребилд конфига.
+
+**053 — протухшая версия клиента REALITY.** Редкий для реестра случай: чужой код
+не сломан, в нём протухла константа. REALITY возит версию клиента в первых трёх
+байтах `SessionId`, апстрим зашил туда `1.8.1` в 2023-м и с тех пор не трогал,
+а Xray коммитом `af7eb68` (v26.7.11) включил отсечку `minClientVer` **по умолчанию** —
+раньше незаданное поле означало «не проверять вовсе». Порог там `26.3.27`,
+сравнение целочисленное (`Value()` пакует три байта в одно число), так что наш
+`1.8.1` мимо с запасом.
+
+Диагностическая ловушка здесь важнее самой правки: отказ по версии — одно из
+четырёх AND-условий, и при провале сервер не рвёт соединение, а прозрачно
+проксирует его на камуфляжный `dest` с настоящим сертификатом. Так задумано —
+иначе пробер отличал бы REALITY-сервер по форме отказа. Для пользователя это
+«узел не работает, но ошибки нет», для нас — симптом, неотличимый от неверного
+shortId, чужого публичного ключа или разъехавшихся часов. Отсюда правило: жалобу
+такого вида на REALITY-узле сверять с версией сервера **до** того, как искать
+причину у себя.
+
+Условие снятия здесь пассивное вдвойне. Апстрим однажды поднимет константу сам —
+но файл `common/tls/reality_client.go` он активно правит (kTLS, ECH, TLS spoof),
+поэтому встречное изменение способно откатить наши три байта молча. И порог
+на стороне Xray может подняться снова: автоматически это не отслеживается,
+сигналом будут те же беспричинно-мёртвые узлы.
+
+**083 — ClientHello без постквантового шара.** Продолжение 053 через два месяца:
+Xray снова ужесточил вход, и снова тихо. Коммит `8cdf7bf` (v26.9.8) требует в
+приветствии key_share `X25519MLKEM768` **перед** необязательным X25519 и без него
+проксирует соединение на `dest` — та же неотличимая подмена. Ирония в том, что
+utls-спека Chrome этот шар несёт, а отрезает его наш собственный код: апстрим
+sing-box в мае 2025-го вырезал гибрид из ClientHello, потому что utls 1.7.2 не
+различала ключ гибрида и чистого X25519 при расчёте `AuthKey`. С utls 1.8 ключи
+лежат в раздельных полях (`Ecdhe` / `MlkemEcdhe`), костыль давно был мёртвым
+грузом — и стал причиной отказа. Снятие фильтра плюс fallback на `MlkemEcdhe`
+повторяет выбор сервера один в один.
+
+Урок реестра: костыль под конкретную версию зависимости должен уходить вместе
+с ней, иначе он переживёт свою причину и однажды сам станет багом. И второй,
+уже знакомый: тихие отсечки REALITY надо ловить стендом, а не догадкой —
+поэтому 053 закрыта здесь же, тем же прогоном.
+
+**084 — ABBA-дедлок вложенных групп.** Редкая для реестра запись: сломали мы
+сами. Обёртка входящего соединения из 064 v2 нужна была, чтобы
+`interrupt_exist_connections` доставал до трафика из inbound, но она же дала
+вложенным selector'ам второй порядок вложенности обёрток: входящее закрывается
+изнутри наружу, исходящее через `detour` — снаружи внутрь. Пока `interrupt.Group`
+держал свой мьютекс на время чужого `Close`, двух порядков хватало на классический
+ABBA: `Interrupt` внутренней группы (переключение по Clash API) стоит на замке
+внешней, `Close` DoH-соединения — на замке внутренней, а следом на тех же замках
+виснет регистрация каждого нового соединения — «трафик мёртв до рестарта».
+Апстриму его «Close под замком» ничего не стоит: вложенности inbound-стороны у
+него нет, и порядок один. Нам он стал ценой за 064. Фикс снят с симптома на
+инвариант: примитив не держит замок на время чужого `Close` — и порядок обёрток
+перестаёт иметь значение вовсе.
+
+Урок реестра: чужой примитив, безопасный в чужой топологии, надо перечитывать
+при каждом расширении топологии — обёртка поверх обёртки меняет порядок замков,
+даже если в самом примитиве не тронута ни одна строка. И второй: репортёр принёс
+готовый диагноз с дампами — стенд построен по его стекам один в один, красный до
+фикса и зелёный после.
+
+**085 — релей, которого нет.** Запись про чужой код, который формально
+следует RFC и именно поэтому не работает с половиной реальных серверов. RFC
+1928 велит серверу назвать в ответе на UDP ASSOCIATE адрес релея, и клиент sing
+ему верит буквально: диалит UDP ровно туда, куда сказали. Но серверы за NAT и
+публичные прокси массово отвечают `0.0.0.0` — «тот же хост, к которому ты
+подключился», — а Go по документации шлёт такое на локальную систему. Итог
+тихий: хендшейк успешен, сокет «подключён», `WriteTo` доволен, ответ не
+приходит никогда, в логе пусто. Снаружи это «TCP ходит, UDP нет», и первое
+подозрение падает на `detour`, MASQUE, что угодно, только не на пять строк в
+библиотеке. Xray эту развилку прошёл давно и подставляет адрес прокси.
+
+Решение повторяет Xray, но с одной поправкой к очевидному: адрес берётся из
+конфига, а не из `RemoteAddr()` управляющего соединения — под `detour` тот
+адрес принадлежит плечу, а не SOCKS-серверу. И с одной добавкой: порт 0 в
+ответе — ошибка, а не адрес. Форк sing ради этого не заводится, и код sing не
+копируется: правило живёт в обёртке dialer'а, которую библиотека получает в
+`socks.NewClient`, — хендшейк остаётся в sing и меняется вместе с ним, а нам
+достаётся ровно один UDP-dial релея. Первый вариант фикса был копией ветки
+клиента и отвергнут владельцем сразу: апстрим правит хендшейк, копия разошлась
+бы молча. За чем следить — за контрактом «релей диалится через переданный
+dialer с сырым BND.ADDR»: тест на это стоит рядом со стражем.
+
+Урок реестра — про честность диагноза. Механизм был доказан по первоисточникам
+(код sing, документация Go, код Xray, эксперимент), а привязка к отчёту — нет,
+и релиз ушёл раньше, чем сняли BND.ADDR с узлов репортёра. Проверка после
+релиза разложила жалобу на два слоя: выбранный у него узел действительно
+отвечает `0.0.0.0` — фикс по адресу, — но UDP-релей того же сервера не отвечает
+никому, в том числе по адресу, который подставляет Xray. `urltest` выбирает узел
+по TCP и такой узел охотно делает активным. Отсюда правило: хендшейк с сервером
+репортёра стоит пяти минут и снимается до тега, а не после. Второй урок — страж
+на апстрим: тест, который фиксирует чужой дефект и падает, когда его починят,
+превращает условие снятия из строки в реестре в сигнал на бампе зависимости.
+
+**060 — ClientHello, исчезающий за чужим сервером.** Единственная запись реестра,
+где сломан не код — ни наш, ни апстрима, — а **путь**. Когда TLS-outbound ходит
+через `detour`, наше приветствие пересылает нижнее плечо от своего имени, и
+PMTU на участке «detour-сервер → цель» бывает ниже его размера. ICMP
+*Fragmentation Needed* адресуется тому серверу, а не нам, поэтому до клиента
+не доходит: пакет просто исчезает, а наружу это выглядит как `tls handshake:
+EOF` через 12–17 с — то есть как мёртвый узел. Порог замерен (≈1490 B) и
+зависит от плеча, а не от протокола: та же связка через другое плечо работает,
+и воспроизводится всё голым `curl` без sing-box вовсе.
+
+Ловушка в том, что ни одна «ручка MTU» сюда не достаёт: `mtu` у туннельного
+outbound'а режет пакеты **внутри** уже поднятого туннеля, `tun.mtu`
+ограничивает вход из TUN, а route-action `tls_fragment` применяется к
+соединениям через маршрутизатор — приветствие же рождается в outbound'е после
+роутинга и мимо всех трёх. Остаётся единственный рычаг на нашей стороне:
+фрагментация первой TLS-записи. Отсюда решение — включать её по умолчанию
+именно под `detour`, одной точкой в общем слое, чтобы не заводить правило
+«помни, где ставить флаг»; режется только хендшейк, поэтому постоянного налога
+на трафик нет (замер: `record_fragment` 0.1 с против 12 с отказа).
+
+**086 — отпечаток, у которого не было шара.** Продолжение 083 через три дня, и уже
+не про наш код. 083 сняла фильтр, который вырезал гибрид из ClientHello, — но вырезать
+можно только то, что есть, а в `metacubex/utls` гибридный key share несут одни
+chrome-пресеты; `firefox` там — Firefox 120 без него, и сервер отсекает его так же
+тихо. Ждать библиотеку нечего: metacubex внешних PR не принимает, а апстрим sing-box
+сидит на ней же. У Xray `fp=firefox` работает потому, что у него другая ветка utls —
+первоисточник refraction, где Firefox 148 есть; нам первоисточник закрыт: на
+metacubex-ветке стоят REALITY-сервер и linkname-экспорты `badtls`/`ktls`. Отсюда
+четвёртый форк-сабмодуль: metacubex как база, два коммита refraction поверх.
+Переносится не только декларативный пресет, но и reuse одного X25519-ключа между
+гибридной и классической записями — это логика внутри `ApplyPreset`, в нашем слое её
+не собрать, а без неё приветствие не совпадёт с настоящим Firefox.
+
+Урок реестра: граница чужого фикса может проходить по зависимости, а не по коду, —
+тогда патч не «правка», а переезд на другую ветку библиотеки, и его цена —
+сопровождение ещё одного форка на каждом мерже. И второй, из самой 083: «мертво by
+design, паритет с Xray» оказалось неверным выводом — паритета не было, у Xray просто
+другая utls; сверять надо библиотеки, а не выводы о них.
+
+**087 — та же дыра, второй отпечаток.** Через день после 086 выяснилось, что её граница
+(«только Firefox 148») держалась не на решении, а на том, что дальше никто не смотрел: `safari` в
+`metacubex/utls` — Safari 16.0, гибрида нет, сервер отсекает его тем же молчанием. Форк уже стоял,
+метод сверки уже был написан, поэтому весь фикс — один `cherry-pick -x` и две строки в страже.
+Заодно закрылся и вопрос «а остальные?»: у refraction гибридный шар несут ровно три пресета —
+Chrome 131/133, Firefox 148 и Safari 26.3, а `edge`/`ios`/`android`/`360`/`qq` там застряли на
+Edge 106, iOS 14, 360 11.0, QQ 11.1 и Android 11 OkHttp. Xray-core сидит на тех же пресетах, значит
+для этих имён у нас с ним честный паритет, и решение владельца — не тащить в ядро то, чего нет и у
+первоисточника: подмену делают приложения (LxBox §281, лаунчер).
+
+Урок реестра: когда патч оказывается дешёвым (чужой коммит, чужая проверка, наш гитлинк), граница
+записи стоит ровно столько, сколько стоит её перепроверить. 086 закрылась на «только firefox»,
+потому что цена входа была высокой — но после того как форк заведён, эта цена больше не
+аргумент, и остаток границы надо разбирать сразу, а не ждать второй жалобы. И обратное: граница,
+которая совпала с границей первоисточника, — уже не долг, а факт; её можно закрыть решением, а не
+задачей.
+
+**088/089 — обратная сторона 083.** Через день после 087 пришла жалоба с другого конца: 083 сделала
+приветствие принимаемым новыми серверами — и вдвое длиннее, из одного TCP-сегмента оно стало двумя,
+и на одном мобильном операторе такие сегменты не доходят (Xray-клиент там же не проходит, XTLS#6256
+закрыт «not planned»). Ядро не может выбрать за пользователя между «сервер отвергнет» и «сеть потеряет»,
+поэтому 089 отдаёт выбор узлу (`reality.key_share`), возвращая апстримный фильтр под флагом. Разбор
+жалобы заодно вскрыл 088: единственная защита от потери длинного ClientHello — фрагментация — до REALITY
+никогда не доходила, потому что апстрим строит его UConn мимо обёртки; 060 записала «REALITY получает тот
+же дефолт», проверив helper, а не путь.
+
+Урок реестра: фикс, меняющий размер первого пакета, надо сразу проверять на другом конце — там, где
+пакет режут, а не только там, где его принимают. И второй: «одна точка для всех движков» верна ровно
+до того движка, который берёт данные из этой точки, но применяет их сам; страж должен смотреть на
+провод, а не на поле структуры.
+
+## Особенности сопровождения
+
+- **Апстрим-issue мы не заводили.** По 028/029/030/039/040/041/045 наверх ничего
+  не отправлялось — значит условие снятия у них пассивное («апстрим
+  однажды сам»), и проверять его нужно нам на каждом мерже. Если политику
+  менять, отправка issue сделает срок снятия предсказуемым.
+- **Фиксы в submodule — отдельный случай.** 010 жил в `wireguard-go`,
+  041 живёт там же, 040 — в форке `sing-tun`; там снятие происходит
+  не мержем апстрима, а бампом версии submodule — и заметить его сложнее
+  (а встречный upstream-bump гитлинка на мерже нельзя принимать вслепую,
+  иначе фикс молча откатится).
+- **Field-подтверждение — часть работы.** 028/029/030 закрыты на стенде,
+  но помечены как ждущие проверки на устройстве: стенд воспроизводит
+  механизм, а не условия. 041 закрыта на синтетике и **в релизный тег ещё
+  не входит** — остаток field на стенде жалобы; 040, напротив,
+  девайс-верифицирована живыми восстановлениями.

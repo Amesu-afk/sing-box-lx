@@ -18,6 +18,7 @@ import (
 )
 
 func (r *Router) hijackDNSStream(ctx context.Context, conn net.Conn, metadata adapter.InboundContext) error {
+	r.searchProcessInfo(ctx, &metadata)
 	metadata.Destination = M.Socksaddr{}
 	for {
 		conn.SetReadDeadline(time.Now().Add(C.DNSTimeout))
@@ -33,6 +34,7 @@ func (r *Router) hijackDNSStream(ctx context.Context, conn net.Conn, metadata ad
 }
 
 func (r *Router) hijackDNSPacket(ctx context.Context, conn N.PacketConn, packetBuffers []*N.PacketBuffer, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) error {
+	r.searchProcessInfo(ctx, &metadata)
 	err := dnsOutbound.NewDNSPacketConnection(ctx, r.dns, conn, packetBuffers, metadata)
 	N.CloseOnHandshakeFailure(conn, onClose, err)
 	if err != nil && !E.IsClosedOrCanceled(err) {
@@ -41,6 +43,18 @@ func (r *Router) hijackDNSPacket(ctx context.Context, conn N.PacketConn, packetB
 	return nil
 }
 
+// lx:begin dns-hijack-async
+// SPEC 046. HijackDNSPacket is called synchronously from the stack packet
+// loop (sing-tun ForwardDispatcher / gvisor dispatchLoop), but ExchangeAsync
+// blocks the caller up to the DNS timeout while the transport dial is in
+// flight (ConnPool.acquireShared waits for the shared dial). With a DNS
+// server routed through a dead detour every unique query froze the packet
+// loop for the full timeout, stalling ALL forwarding. Run the exchange on
+// its own goroutine; the semaphore caps concurrency, and over-limit queries
+// are dropped (UDP — the client retries).
+// lx:end dns-hijack-async
+const dnsHijackConcurrencyLimit = 256 // lx: SPEC 046
+
 func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.PacketWriter, metadata adapter.InboundContext) {
 	var message mDNS.Msg
 	err := message.Unpack(payload)
@@ -48,20 +62,30 @@ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.P
 		r.logger.ErrorContext(ctx, E.Cause(err, "process DNS packet: unpack request"))
 		return
 	}
+	r.searchProcessInfo(ctx, &metadata)
 	destination := metadata.Destination
 	metadata.Destination = M.Socksaddr{}
-	r.dns.ExchangeAsync(adapter.WithContext(ctx, &metadata), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, exchangeErr error) {
-		if exchangeErr == nil {
-			exchangeErr = r.writeDNSPacketResponse(&message, response, writer, destination)
-		}
-		if exchangeErr != nil && !R.IsRejected(exchangeErr) && !E.IsClosedOrCanceled(exchangeErr) {
-			r.logger.ErrorContext(ctx, E.Cause(exchangeErr, "process DNS packet"))
-		}
-	})
+	// lx:begin dns-hijack-async
+	if !r.dnsHijackSem.TryAcquire(1) {
+		r.logger.DebugContext(ctx, "process DNS packet: hijack overloaded, dropping query")
+		return
+	}
+	go func() {
+		defer r.dnsHijackSem.Release(1)
+		// lx:end dns-hijack-async
+		r.dns.ExchangeAsync(adapter.WithContext(ctx, &metadata), &message, adapter.DNSQueryOptions{}, func(response *mDNS.Msg, exchangeErr error) {
+			if exchangeErr == nil {
+				exchangeErr = r.writeDNSPacketResponse(&message, response, writer, destination)
+			}
+			if exchangeErr != nil && !R.IsRejected(exchangeErr) && !E.IsClosedOrCanceled(exchangeErr) {
+				r.logger.ErrorContext(ctx, E.Cause(exchangeErr, "process DNS packet"))
+			}
+		})
+	}() // lx: SPEC 046
 }
 
 func (r *Router) writeDNSPacketResponse(message *mDNS.Msg, response *mDNS.Msg, writer N.PacketWriter, destination M.Socksaddr) error {
-	responseBuffer, err := dns.TruncateDNSMessage(message, response, 1024)
+	responseBuffer, err := dns.TruncateDNSMessage(message, response, N.CalculateFrontHeadroom(writer), N.CalculateRearHeadroom(writer))
 	if err != nil {
 		return err
 	}
