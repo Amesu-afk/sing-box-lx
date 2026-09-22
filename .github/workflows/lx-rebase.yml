@@ -1,107 +1,111 @@
 name: lx-rebase
 
-# Auto-rebase the lx feature commits onto the newest STABLE upstream sing-box tag.
-# See SPECS/004 §2.3. Outcomes:
-#   * already based on the newest stable tag → no-op (logs "up to date").
-#   * clean rebase that still builds + `sing-box check` passes → push lx-rebase/<tag> + open a PR.
-#   * rebase conflict OR build/check fails → open an issue listing the // lx seams to fix.
-# NEVER force-pushes `lx` — a human reviews the PR and updates `lx` themselves.
+# Weekly sync check of the lx fork against upstream sing-box.
+#
+# The fork is maintained by MERGING upstream/testing into the integration branch
+# (see the "Merge upstream/testing ... into lx-*" commits), so this workflow does the same:
+#   * upstream ref already merged          → no-op.
+#   * clean merge + build + `sing-box check` → push lx-sync/<ref>-<sha> and open a PR.
+#   * merge conflict OR build/check fails  → create/update ONE tracking issue (label: lx-sync).
+# The job itself stays green in the "needs attention" case — the issue is the report.
+# It never pushes to the integration branch directly.
 #
 # Requirements:
 #   * Settings → Actions → General → Workflow permissions = "Read and write".
-#   * For the auto-PR step: enable "Allow GitHub Actions to create and approve pull requests".
-#     (If it's off, the workflow falls back to an issue pointing at the ready branch.)
+#   * For the auto-PR step: "Allow GitHub Actions to create and approve pull requests".
 
 on:
   schedule:
     - cron: '0 6 * * 1'        # Mondays 06:00 UTC
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Upstream tag to rebase onto (blank = newest stable)'
+      upstream_ref:
+        description: 'Upstream branch or tag to merge (e.g. testing, stable, v1.14.1)'
         required: false
-        default: ''
+        default: 'testing'
 
 permissions:
   contents: write
   pull-requests: write
   issues: write
 
+concurrency:
+  group: lx-rebase
+  cancel-in-progress: false
+
 env:
   UPSTREAM: https://github.com/SagerNet/sing-box.git
+  # Integration branch = the branch the workflow runs from (default branch for cron: lx-1.15-integration).
+  LX_BRANCH: ${{ github.ref_name }}
+  UPSTREAM_REF: ${{ github.event.inputs.upstream_ref || 'testing' }}
+  ISSUE_LABEL: lx-sync
 
 jobs:
-  rebase:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
-          ref: lx
+          ref: ${{ env.LX_BRANCH }}
           fetch-depth: 0
-          submodules: recursive
+          submodules: false     # only wireguard-go is needed for the build; inited below
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with: { go-version-file: go.mod, check-latest: true }
 
-      - name: Configure git + upstream
+      - name: Configure git + fetch upstream
+        id: up
         run: |
           git config user.name  "lx-rebase-bot"
-          git config user.email "247031499+Leadaxe@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote add upstream "$UPSTREAM" 2>/dev/null || git remote set-url upstream "$UPSTREAM"
-          git fetch --tags --quiet upstream
-
-      - name: Pick target tag
-        id: pick
-        run: |
-          INPUT="${{ github.event.inputs.tag }}"
-          if [ -n "$INPUT" ]; then
-            TARGET="$INPUT"
+          git fetch --quiet --no-tags upstream "+refs/heads/*:refs/remotes/upstream/*"
+          git fetch --quiet --tags upstream || true
+          if git rev-parse -q --verify "refs/remotes/upstream/$UPSTREAM_REF" >/dev/null; then
+            TARGET="upstream/$UPSTREAM_REF"
+          elif git rev-parse -q --verify "refs/tags/$UPSTREAM_REF" >/dev/null; then
+            TARGET="$UPSTREAM_REF"
           else
-            # newest STABLE upstream tag: vMAJOR.MINOR.PATCH only (excludes -alpha/-beta/-rc and our -lx.N)
-            TARGET=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+            echo "::error::Upstream ref '$UPSTREAM_REF' not found"; exit 1
           fi
-          if [ -z "$TARGET" ]; then echo "No stable upstream tag found"; exit 1; fi
-          if ! git rev-parse -q --verify "refs/tags/$TARGET" >/dev/null; then
-            echo "Tag $TARGET does not exist after fetch"; exit 1
-          fi
+          SHA=$(git rev-parse --short "$TARGET")
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          echo "Target upstream tag: $TARGET"
+          echo "sha=$SHA"       >> "$GITHUB_OUTPUT"
+          echo "branch=lx-sync/${UPSTREAM_REF//\//-}-$SHA" >> "$GITHUB_OUTPUT"
+          echo "Syncing $LX_BRANCH with $TARGET ($SHA)"
 
       - name: Up to date?
         id: check
         run: |
-          TARGET="${{ steps.pick.outputs.target }}"
-          if git merge-base --is-ancestor "$TARGET" HEAD; then
+          if git merge-base --is-ancestor "${{ steps.up.outputs.target }}" HEAD; then
             echo "uptodate=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::lx already contains $TARGET — nothing to rebase."
+            echo "::notice::$LX_BRANCH already contains ${{ steps.up.outputs.target }} — nothing to do."
           else
             echo "uptodate=false" >> "$GITHUB_OUTPUT"
+            echo "behind=$(git rev-list --count HEAD..${{ steps.up.outputs.target }})" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Attempt rebase
-        id: rebase
+      - name: Attempt merge
+        id: merge
         if: steps.check.outputs.uptodate == 'false'
         run: |
-          TARGET="${{ steps.pick.outputs.target }}"
-          BRANCH="lx-rebase/${TARGET}"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          git checkout -b "$BRANCH"
-          if git rebase "$TARGET"; then
+          git checkout -b "${{ steps.up.outputs.branch }}"
+          if git merge --no-edit -m "Merge ${{ steps.up.outputs.target }} (${{ steps.up.outputs.sha }}) into $LX_BRANCH" \
+               "${{ steps.up.outputs.target }}"; then
             echo "result=clean" >> "$GITHUB_OUTPUT"
-            echo "::notice::clean rebase onto $TARGET"
           else
             git diff --name-only --diff-filter=U > /tmp/conflicts.txt || true
-            git rebase --abort || true
+            git merge --abort || true
             echo "result=conflict" >> "$GITHUB_OUTPUT"
-            echo "::warning::rebase conflict onto $TARGET"
+            echo "::warning::merge conflict in $(wc -l < /tmp/conflicts.txt) files"
           fi
 
-      - name: Build + check (clean rebase only)
+      - name: Build + check (clean merge only)
         id: verify
-        if: steps.rebase.outputs.result == 'clean'
+        if: steps.merge.outputs.result == 'clean'
         run: |
-          git submodule update --init --recursive
-          if make -f Makefile.lx lx-build \
+          git submodule update --init --recursive submodules/wireguard-go
+          if make -f Makefile.lx lx-build 2>&1 | tee /tmp/build.log \
              && ./sing-box check -c lx-test/config/xhttp_reality.json \
              && ./sing-box check -c lx-test/config/awg2_basic.json; then
             echo "build=pass" >> "$GITHUB_OUTPUT"
@@ -110,53 +114,59 @@ jobs:
           fi
 
       - name: Push branch + open PR (clean + builds)
-        if: steps.rebase.outputs.result == 'clean' && steps.verify.outputs.build == 'pass'
+        if: steps.merge.outputs.result == 'clean' && steps.verify.outputs.build == 'pass'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TARGET="${{ steps.pick.outputs.target }}"
-          BRANCH="${{ steps.rebase.outputs.branch }}"
+          BRANCH="${{ steps.up.outputs.branch }}"
           git push -f origin "$BRANCH"
-          cat > /tmp/pr.md <<EOF
-          Automated rebase of the lx feature commits onto upstream \`$TARGET\`.
+          printf '%s\n' \
+            "Automated merge of upstream \`${{ steps.up.outputs.target }}\` (\`${{ steps.up.outputs.sha }}\`) into \`$LX_BRANCH\`." \
+            "" \
+            "- clean merge, ${{ steps.check.outputs.behind }} upstream commits" \
+            "- \`make -f Makefile.lx lx-build\` succeeds" \
+            "- \`sing-box check\` passes for XHTTP + AWG2 sample configs" > /tmp/pr.md
+          gh pr create --base "$LX_BRANCH" --head "$BRANCH" \
+            --title "lx-sync: merge upstream ${UPSTREAM_REF} @ ${{ steps.up.outputs.sha }}" --body-file /tmp/pr.md \
+          || echo "::warning::PR not created (already exists, or Actions may not create PRs). Branch $BRANCH is pushed."
 
-          - clean rebase (no conflicts)
-          - \`make -f Makefile.lx lx-build\` succeeds
-          - \`sing-box check\` passes for XHTTP + AWG2 sample configs
-
-          Review the \`// lx\` seams (\`grep -rn "// lx"\`), then update \`lx\` (rebase / fast-forward) **manually** — this workflow never force-pushes \`lx\`.
-          EOF
-          if gh pr create --base lx --head "$BRANCH" \
-               --title "lx-rebase: onto upstream $TARGET" --body-file /tmp/pr.md; then
-            echo "::notice::PR opened for $BRANCH"
-          else
-            # auto-PR likely blocked (the "Allow Actions to create PRs" toggle is off) — fall back to an issue
-            gh issue create --title "lx-rebase: branch ready for $TARGET (open PR manually)" \
-              --body "Branch \`$BRANCH\` is rebased onto \`$TARGET\`, builds, and passes \`check\`. Auto-PR was blocked — enable Settings → Actions → General → \"Allow GitHub Actions to create and approve pull requests\", or open the PR by hand."
-          fi
-
-      - name: Open issue (conflict or build failure)
-        if: steps.rebase.outputs.result == 'conflict' || steps.verify.outputs.build == 'fail'
+      - name: Report (conflict or build failure) — one tracking issue
+        if: steps.merge.outputs.result == 'conflict' || steps.verify.outputs.build == 'fail'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TARGET="${{ steps.pick.outputs.target }}"
-          if [ "${{ steps.rebase.outputs.result }}" = "conflict" ]; then
-            REASON="rebase conflict"
+          TARGET="${{ steps.up.outputs.target }}"
+          if [ "${{ steps.merge.outputs.result }}" = "conflict" ]; then
+            REASON="merge conflict ($(wc -l < /tmp/conflicts.txt) files)"
           else
-            REASON="build/check failed after a clean rebase (likely a semantic conflict)"
+            REASON="build/check failed after a clean merge"
           fi
           {
-            echo "Automated rebase onto upstream \`$TARGET\` needs manual attention: **$REASON**."
+            echo "Sync of \`$LX_BRANCH\` with upstream \`$TARGET\` (\`${{ steps.up.outputs.sha }}\`, ${{ steps.check.outputs.behind }} commits behind) needs manual work: **$REASON**."
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             echo
             if [ -s /tmp/conflicts.txt ]; then
-              echo "Conflicted files:"; echo '```'; cat /tmp/conflicts.txt; echo '```'; echo
+              echo "<details><summary>Conflicted files</summary>"; echo; echo '```'
+              head -300 /tmp/conflicts.txt; echo '```'; echo "</details>"; echo
+            fi
+            if [ -s /tmp/build.log ] && [ "${{ steps.verify.outputs.build }}" = "fail" ]; then
+              echo "<details><summary>Build log (tail)</summary>"; echo; echo '```'
+              tail -60 /tmp/build.log; echo '```'; echo "</details>"; echo
             fi
             echo "Resolve locally:"
             echo '```'
-            echo "git fetch upstream --tags"
-            echo "git checkout -b lx-rebase/$TARGET lx && git rebase $TARGET"
-            echo "# fix the // lx: seams, then: git push origin lx-rebase/$TARGET and open a PR into lx"
+            echo "git remote add upstream $UPSTREAM  # once"
+            echo "git fetch upstream"
+            echo "git checkout -b lx-sync/manual origin/$LX_BRANCH"
+            echo "git merge $TARGET   # fix // lx: seams, build, then PR into $LX_BRANCH"
             echo '```'
           } > /tmp/issue.md
-          gh issue create --title "lx-rebase: needs manual attention for $TARGET" --body-file /tmp/issue.md
+          gh label create "$ISSUE_LABEL" --color FBCA04 --description "lx upstream sync" 2>/dev/null || true
+          NUM=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$NUM" ]; then
+            gh issue edit "$NUM" --title "lx-sync: upstream $UPSTREAM_REF needs manual merge" --body-file /tmp/issue.md
+            echo "::notice::Updated issue #$NUM"
+          else
+            gh issue create --label "$ISSUE_LABEL" --title "lx-sync: upstream $UPSTREAM_REF needs manual merge" --body-file /tmp/issue.md
+          fi
