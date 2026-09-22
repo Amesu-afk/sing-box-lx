@@ -28,7 +28,6 @@ import (
 	"unsafe"
 
 	"github.com/sagernet/sing-box/adapter"
-	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
@@ -50,6 +49,7 @@ type RealityClientConfig struct {
 	uClient   *UTLSClientConfig
 	publicKey []byte
 	shortID   [8]byte
+	keyShare  string // lx: SPEC 089 — C.RealityKeyShare*
 }
 
 func NewRealityClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
@@ -76,16 +76,24 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 	if len(publicKey) != 32 {
 		return nil, E.New("invalid public_key")
 	}
+	// lx: SPEC 090 — hex.Decode writes len(src)/2 bytes without checking dst; the post-decode check never runs
+	if len(options.Reality.ShortID) > 16 {
+		return nil, E.New("invalid short_id")
+	}
 	var shortID [8]byte
-	decodedLen, err := hex.Decode(shortID[:], []byte(options.Reality.ShortID))
+	_, err = hex.Decode(shortID[:], []byte(options.Reality.ShortID))
 	if err != nil {
 		return nil, E.Cause(err, "decode short_id")
 	}
-	if decodedLen > 8 {
-		return nil, E.New("invalid short_id")
+	// lx: SPEC 089 — reject typos at load time; "classic" must not silently
+	// become the default.
+	switch options.Reality.KeyShare {
+	case C.RealityKeyShareDefault, C.RealityKeyShareHybrid, C.RealityKeyShareClassical:
+	default:
+		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, " (expected \"hybrid\" or \"classical\")")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID}
+	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -133,18 +141,33 @@ func (e *RealityClientConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn) (aTLS.Conn, error) {
-	// lx: REALITY builds its uTLS connection straight on the socket, so it never passed
-	// through UTLSClientConfig.Client() where the fragmenter is installed — which meant the
-	// TLS-fragmentation setting was silently inert on the one transport people actually use
-	// against DPI. Install it here on the same terms.
-	//
-	// Safe with respect to REALITY's own checks: tlsfragment.Conn overrides Write only (reads
-	// pass through the embedded conn, ReaderReplaceable reports true), and packet splitting
-	// does not alter a byte of the ClientHello — only how it is spread across segments — so
-	// the HMAC REALITY embeds in the session id still covers the same content.
-	if e.uClient.fragment || e.uClient.recordFragment {
-		conn = tf.NewConn(conn, ctx, e.uClient.fragment, e.uClient.recordFragment, e.uClient.fragmentFallbackDelay)
+	uConn, verifier, err := e.prepareClientHello(conn)
+	if err != nil {
+		return nil, err
 	}
+
+	err = uConn.HandshakeContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if debug.Enabled {
+		fmt.Printf("REALITY Conn.Verified: %v\n", verifier.verified)
+	}
+
+	if !verifier.verified {
+		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
+		return nil, E.New("reality verification failed")
+	}
+
+	return &realityClientConnWrapper{uConn}, nil
+}
+
+// prepareClientHello builds the REALITY ClientHello on conn without sending it:
+// the utls UConn with the fingerprint's hello, the key_share policy applied
+// (SPEC 089), and the session id sealed with the AuthKey. Split from
+// ClientHandshake so tests can inspect what would go on the wire. lx: SPEC 088/089.
+func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *realityVerifier, error) {
 	verifier := &realityVerifier{
 		serverName: e.uClient.ServerName(),
 	}
@@ -152,27 +175,57 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
+	// lx: SPEC 088 — the same `fragment` / `record_fragment` wrappers the plain
+	// uTLS client gets; upstream builds the UConn on the bare conn, so those
+	// flags (and the SPEC 060 detour default) were written to the config and
+	// ignored here.
+	conn, err := e.uClient.wrapClientConn(conn)
+	if err != nil {
+		return nil, nil, err
+	}
 	uConn := utls.UClient(conn, uConfig, e.uClient.id)
 	verifier.UConn = uConn
-	err := uConn.BuildHandshakeState()
-	if err != nil {
-		return nil, err
-	}
-	for _, extension := range uConn.Extensions {
-		if ce, ok := extension.(*utls.SupportedCurvesExtension); ok {
-			ce.Curves = common.Filter(ce.Curves, func(curveID utls.CurveID) bool {
-				return curveID != utls.X25519MLKEM768
-			})
-		}
-		if ks, ok := extension.(*utls.KeyShareExtension); ok {
-			ks.KeyShares = common.Filter(ks.KeyShares, func(share utls.KeyShare) bool {
-				return share.Group != utls.X25519MLKEM768
-			})
-		}
-	}
+	// lx: SPEC 083 — апстрим здесь вырезал X25519MLKEM768 из supported_groups
+	// и key_share (костыль под utls v1.7.2, где Ecdhe гибрида и чистого X25519
+	// не различались). XTLS/REALITY@8cdf7bf (Xray ≥ v26.9.8) отвергает
+	// ClientHello без гибридного шара — молча проксирует на dest, у нас это
+	// «reality verification failed». metacubex/utls ≥ 1.8 кладёт ключи
+	// раздельно (Ecdhe / MlkemEcdhe), фильтр больше не нужен: отпечаток
+	// шлёт то, что заложено в его спеке (Chrome — GREASE, MLKEM, X25519).
 	err = uConn.BuildHandshakeState()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	// lx: SPEC 089 — `reality.key_share` поверх отпечатка. `classical` — тот
+	// самый апстримный фильтр, но по выбору узла: гибридный ClientHello
+	// (~1.9 КБ, два TCP-сегмента) кое-где теряется в сети, а классический
+	// (~0.5 КБ) проходит — ценой совместимости с Xray ≥ v26.9.8. `hybrid` —
+	// проверка, что отпечаток шар несёт: без неё узел на `edge` умирает как
+	// «reality verification failed», неотличимо от чужого ключа.
+	switch e.keyShare {
+	case C.RealityKeyShareClassical:
+		for _, extension := range uConn.Extensions {
+			if curves, isCurves := extension.(*utls.SupportedCurvesExtension); isCurves {
+				curves.Curves = common.Filter(curves.Curves, func(curveID utls.CurveID) bool {
+					return curveID != utls.X25519MLKEM768
+				})
+			}
+			if keyShares, isKeyShares := extension.(*utls.KeyShareExtension); isKeyShares {
+				keyShares.KeyShares = common.Filter(keyShares.KeyShares, func(share utls.KeyShare) bool {
+					return share.Group != utls.X25519MLKEM768
+				})
+			}
+		}
+		// Second build re-marshals the hello from the filtered extensions
+		// (the preset is applied once; see utls buildHandshakeState).
+		err = uConn.BuildHandshakeState()
+		if err != nil {
+			return nil, nil, err
+		}
+	case C.RealityKeyShareHybrid:
+		if !realityHelloCarriesHybridShare(uConn) {
+			return nil, nil, E.New("reality key_share \"hybrid\": fingerprint ", e.uClient.id.Client, " ", e.uClient.id.Version, " carries no X25519MLKEM768 key share")
+		}
 	}
 
 	if len(uConfig.NextProtos) > 0 {
@@ -196,23 +249,13 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 	binary.BigEndian.PutUint64(hello.SessionId, uint64(nowTime.Unix()))
 
-	// lx:begin reality-client-version
-	// The REALITY server compares these three bytes against its configured
-	// minClientVer/maxClientVer and, when the client looks too old, silently
-	// forwards the connection to the decoy site instead of authenticating it —
-	// the client then only sees "reality verification failed" with no hint why.
-	//
-	// Upstream advertises 1.8.1, which is below the minClientVer that current
-	// Xray deployments set (3x-ui exposes the field and panels increasingly
-	// populate it), so those servers reject sing-box outright while Xray-based
-	// clients get through. Advertise a current version instead; the value is
-	// informational for the server and carries no protocol semantics.
-	// Verified against a live Xray 26.7.11 + 3x-ui server with minClientVer
-	// 26.3.27: 25.9.11 is rejected, 26.3.27 and later authenticate.
+	// lx: SPEC 053 — Xray v26.7.11 (XTLS/Xray-core@af7eb68) включил
+	// minClientVer=26.3.27 по умолчанию. Апстримный `1, 8, 1` ниже порога:
+	// сервер не отдаёт ошибку, а молча проксирует на камуфляжный dest.
+	// Объявляем ровно минимум — сравнение там `>=`, выше не нужно.
 	hello.SessionId[0] = 26
-	hello.SessionId[1] = 7
-	hello.SessionId[2] = 11
-	// lx:end reality-client-version
+	hello.SessionId[1] = 3
+	hello.SessionId[2] = 27
 	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
 	if debug.Enabled {
@@ -220,27 +263,33 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 	publicKey, err := ecdh.X25519().NewPublicKey(e.publicKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keyShareKeys := uConn.HandshakeState.State13.KeyShareKeys
 	if keyShareKeys == nil {
-		return nil, E.New("nil KeyShareKeys")
+		return nil, nil, E.New("nil KeyShareKeys")
 	}
+	// lx: SPEC 083 — AuthKey считается по тому же шару, что берёт сервер:
+	// чистый X25519, если он есть в ClientHello, иначе X25519-часть
+	// X25519MLKEM768 (порядок выбора XTLS/REALITY@8cdf7bf, как у Xray-клиента).
 	ecdheKey := keyShareKeys.Ecdhe
 	if ecdheKey == nil {
-		return nil, E.New("nil ecdheKey")
+		ecdheKey = keyShareKeys.MlkemEcdhe
+	}
+	if ecdheKey == nil {
+		return nil, nil, E.New("nil ecdheKey")
 	}
 	authKey, err := ecdheKey.ECDH(publicKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if authKey == nil {
-		return nil, E.New("nil auth_key")
+		return nil, nil, E.New("nil auth_key")
 	}
 	verifier.authKey = authKey
 	_, err = hkdf.New(sha256.New, authKey, hello.Random[:20], []byte("REALITY")).Read(authKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	aesBlock, _ := aes.NewCipher(authKey)
 	aesGcmCipher, _ := cipher.NewGCM(aesBlock)
@@ -250,22 +299,22 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 		fmt.Printf("REALITY hello.sessionId: %v\n", hello.SessionId)
 		fmt.Printf("REALITY uConn.AuthKey: %v\n", authKey)
 	}
+	return uConn, verifier, nil
+}
 
-	err = uConn.HandshakeContext(ctx)
-	if err != nil {
-		return nil, err
+// realityHelloCarriesHybridShare reports whether the built ClientHello offers
+// an X25519MLKEM768 key share — the wire fact the REALITY server checks. lx: SPEC 089.
+func realityHelloCarriesHybridShare(uConn *utls.UConn) bool {
+	for _, extension := range uConn.Extensions {
+		if keyShares, isKeyShares := extension.(*utls.KeyShareExtension); isKeyShares {
+			for _, share := range keyShares.KeyShares {
+				if share.Group == utls.X25519MLKEM768 {
+					return true
+				}
+			}
+		}
 	}
-
-	if debug.Enabled {
-		fmt.Printf("REALITY Conn.Verified: %v\n", verifier.verified)
-	}
-
-	if !verifier.verified {
-		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
-		return nil, E.New("reality verification failed")
-	}
-
-	return &realityClientConnWrapper{uConn}, nil
+	return false
 }
 
 func realityClientFallback(ctx context.Context, uConn net.Conn, serverName string, fingerprint utls.ClientHelloID) {
@@ -298,6 +347,7 @@ func (e *RealityClientConfig) Clone() Config {
 		e.uClient.Clone().(*UTLSClientConfig),
 		e.publicKey,
 		e.shortID,
+		e.keyShare,
 	}
 }
 

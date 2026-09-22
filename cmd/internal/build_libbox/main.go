@@ -87,6 +87,11 @@ func init() {
 	// per-node delay test and rule-table screen would fail. CONSTITUTION §3.6 pt.6.
 	sharedTags = append(sharedTags, "with_lx_command")
 	// lx:end lx_command
+	// lx:begin chain
+	// SPEC 073: outbound `chain` (виртуальная цепочка групп/узлов) — без тега
+	// `type: chain` отвергается на чтении конфига.
+	sharedTags = append(sharedTags, "with_lx_chain")
+	// lx:end chain
 	// lx:begin idle-suspend
 	// SPEC 020 — idle-suspend of unreachable+idle WG/AWG endpoints (device.Down),
 	// a MOBILE-ONLY power/RAM feature: it frees the recv-worker bufsArrs, which are
@@ -99,20 +104,31 @@ func init() {
 	// option anyway. Verified on-device: 8 endpoints suspended → 134 MB freed.
 	sharedTags = append(sharedTags, "with_lx_idle_suspend")
 	// lx:end idle-suspend
-	// lx: with_openvpn / with_openconnect (new in this upstream drift) are
-	// intentionally omitted — both are endpoint/server-capable transports outside
-	// the client-focused fork's scope; LxBox configs never reference them. A
-	// missing tag only yields a stub-registration error if a config uses one,
-	// which lx configs won't. Same rationale as with_usbip / with_clash_api above.
+	// lx:begin openvpn
+	// OpenVPN / OpenConnect as client protocols (owner decision, 2026-08-05). Both
+	// arrived with the 235-commit upstream merge (SPEC 051). Each tag gates one
+	// package holding client AND server behind the same build tag — upstream does
+	// not split them — so shipping the client ships the server side as well; that
+	// is accepted here rather than carrying a downstream split. They register as
+	// endpoint + DNS transport, so a config referencing them now resolves instead
+	// of failing with "not included in this build". Kept in sync with the
+	// desktop/CLI set in Makefile.lx — unlike with_clash_api, this pair does NOT
+	// diverge between the two builds.
+	sharedTags = append(sharedTags, "with_openvpn", "with_openconnect")
+	// lx:end openvpn
 	darwinTags = append(darwinTags, "with_dhcp", "grpcnotrace")
 	// memcTags = append(memcTags, "with_tailscale")
-	// lx:begin no-tailscale
-	// Drop Tailscale from the libbox AAR: the client fork has no tailscale endpoints,
-	// and tailscale is the single largest dependency by size in the APK. Keeps the AAR
-	// aligned with the desktop LX_TAGS set (Makefile.lx). The ts_omit_* tags only trim
-	// with_tailscale, so they go with it. Restore the upstream append below to re-enable.
-	// sharedTags = append(sharedTags, "with_tailscale", "ts_omit_logtail", "ts_omit_ssh", "ts_omit_drive", "ts_omit_taildrop", "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube", "ts_omit_aws", "ts_omit_synology", "ts_omit_bird")
-	// lx:end no-tailscale
+	// lx:begin tailscale
+	// Tailscale ships in the libbox AAR (owner decision, 2026-09-14, LxBox contract
+	// ## 13 / D-103): LxBox receives tailscale nodes from the launcher, so the endpoint,
+	// DNS transport and DERP service have to be present at runtime. This is upstream's
+	// mobile tag set unchanged: with_tailscale plus the ts_omit_* trims (logtail, ssh,
+	// drive, taildrop, webclient, doctor, capture, kube, aws, synology, bird), which
+	// strip client features a VPN app never calls. Tailscale is the single largest
+	// dependency in the APK; the size cost is accepted. The AAR now matches the desktop
+	// LX_TAGS set (Makefile.lx), which carries with_tailscale since 2026-09-04.
+	sharedTags = append(sharedTags, "with_tailscale", "ts_omit_logtail", "ts_omit_ssh", "ts_omit_drive", "ts_omit_taildrop", "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube", "ts_omit_aws", "ts_omit_synology", "ts_omit_bird")
+	// lx:end tailscale
 	notMemcTags = append(notMemcTags, "with_low_memory")
 	debugTags = append(debugTags, "debug")
 }
@@ -209,14 +225,14 @@ func buildAndroid() {
 
 	bindTarget := getAndroidBindTarget()
 
-	// Build main variant (SDK 23)
+	// Build main variant (SDK 24)
 	mainTags := append([]string{}, sharedTags...)
 	// mainTags = append(mainTags, memcTags...)
 	if debugEnabled {
 		mainTags = append(mainTags, debugTags...)
 	}
 	buildAndroidVariant(AndroidBuildConfig{
-		AndroidAPI: 23,
+		AndroidAPI: 24,
 		OutputName: "libbox.aar",
 		Tags:       mainTags,
 	}, bindTarget)

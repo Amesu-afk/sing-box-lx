@@ -20,6 +20,7 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/icmp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
+	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -102,7 +103,7 @@ func (d *stackDevice) UpdateConfiguration(configuration Configuration) error {
 	d.stateAccess.Lock()
 	defer d.stateAccess.Unlock()
 	if d.logRouteOptions && hasRouteOptions(configuration.Routes) {
-		d.options.Logger.Debug("OpenVPN route gateway and metric options are not representable by the gVisor stack device; routes are installed by prefix")
+		d.options.Logger.Debug("route gateway and metric options are not representable by the gVisor stack device; routes are installed by prefix")
 		d.logRouteOptions = false
 	}
 	if configuration.MTU != 0 {
@@ -184,7 +185,7 @@ func (d *stackDevice) writeBuffers(packetBuffers []*buf.Buffer) error {
 
 func (d *stackDevice) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	if destination.IsIPv6() && d.blockIPv6Enabled() {
-		return nil, E.New("IPv6 blocked by pushed OpenVPN block-ipv6")
+		return nil, E.New("IPv6 blocked by pushed block-ipv6")
 	}
 	inet4Address, inet6Address := d.PortAddresses()
 	address := tcpip.FullAddress{
@@ -211,7 +212,12 @@ func (d *stackDevice) DialContext(ctx context.Context, network string, destinati
 	}
 	switch N.NetworkName(network) {
 	case N.NetworkTCP:
-		return gonet.DialTCPWithBind(ctx, d.stack, bind, address, networkProtocol)
+		// lx: SPEC 052 — bound the connect phase (~127s of gVisor SYN backoff
+		// otherwise); one-shot, dies with this dial, never reaches the returned
+		// conn. Rationale: transport/wireguard/connect_deadline_lx.go.
+		connectCtx, cancel := context.WithTimeout(ctx, C.TCPTimeout)
+		defer cancel()
+		return gonet.DialTCPWithBind(connectCtx, d.stack, bind, address, networkProtocol)
 	case N.NetworkUDP:
 		return gonet.DialUDP(d.stack, &bind, &address, networkProtocol)
 	default:
@@ -221,7 +227,7 @@ func (d *stackDevice) DialContext(ctx context.Context, network string, destinati
 
 func (d *stackDevice) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	if destination.IsIPv6() && d.blockIPv6Enabled() {
-		return nil, E.New("IPv6 blocked by pushed OpenVPN block-ipv6")
+		return nil, E.New("IPv6 blocked by pushed block-ipv6")
 	}
 	inet4Address, inet6Address := d.PortAddresses()
 	bind := tcpip.FullAddress{

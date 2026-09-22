@@ -4,6 +4,7 @@ import (
 	"net"
 
 	"github.com/sagernet/sing/common/bufio"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
 )
 
@@ -27,10 +28,11 @@ type Conn struct {
 	c.element.Value.internal = true
 }*/
 
+// lx: SPEC 084 — detach under the lock, close after it (see Group.Interrupt).
 func (c *Conn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
+	c.group.access.Unlock()
 	return c.Conn.Close()
 }
 
@@ -56,10 +58,11 @@ type PacketConn struct {
 	c.element.Value.internal = true
 }*/
 
+// lx: SPEC 084 — detach under the lock, close after it (see Group.Interrupt).
 func (c *PacketConn) Close() error {
 	c.group.access.Lock()
-	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
+	c.group.access.Unlock()
 	return c.PacketConn.Close()
 }
 
@@ -73,4 +76,31 @@ func (c *PacketConn) WriterReplaceable() bool {
 
 func (c *PacketConn) Upstream() any {
 	return bufio.NewPacketConn(c.PacketConn)
+}
+
+// lx: SPEC 064 — wrapper over sing's N.PacketConn (ported from upstream PR #4285).
+type SingPacketConn struct {
+	N.PacketConn
+	group   *Group
+	element *list.Element[*groupConnItem]
+}
+
+// lx: SPEC 084 — detach under the lock, close after it (see Group.Interrupt).
+func (c *SingPacketConn) Close() error {
+	c.group.access.Lock()
+	c.group.connections.Remove(c.element)
+	c.group.access.Unlock()
+	return c.PacketConn.Close()
+}
+
+func (c *SingPacketConn) ReaderReplaceable() bool {
+	return true
+}
+
+func (c *SingPacketConn) WriterReplaceable() bool {
+	return true
+}
+
+func (c *SingPacketConn) Upstream() any {
+	return c.PacketConn
 }

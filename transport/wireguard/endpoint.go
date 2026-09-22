@@ -8,13 +8,13 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/service/powerreport"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -41,6 +41,15 @@ type Endpoint struct {
 	egressPool     *tun.UDPEgressPool
 	pause          pause.Manager
 	pauseCallback  *list.Element[pause.Callback]
+	// lx: SPEC 071 — detached pause application. onPauseUpdated must never
+	// block inside the pause manager's lock; events apply asynchronously,
+	// serialized by pauseOpAccess, latest pauseSeq stamp wins. Close/Teardown
+	// bump the stamp under the same mutex so a queued application can never
+	// touch a device that is being shut down. pauseApplyHookForTest replaces
+	// the device side effect in unit tests (seam precedent: resumeErrHook).
+	pauseOpAccess         sync.Mutex
+	pauseSeq              atomic.Uint64
+	pauseApplyHookForTest func(int)
 	// lx: SPEC 020 — true while the protocol layer holds this device down for
 	// idle-suspend. onPauseUpdated must not Up() a suspended device: a
 	// screen-off/on or network pause/wake cycle would otherwise resurrect it
@@ -55,6 +64,14 @@ type Endpoint struct {
 	deviceOptions DeviceOptions
 	inet4Address  netip.Addr
 	inet6Address  netip.Addr
+	// lx: SPEC 020 — test seam standing in for a device.Up() failure, which needs
+	// a real bind to reproduce. Nil in production.
+	resumeErrHook func() error
+}
+
+// SetResumeErrHookForTest injects a Resume failure. Test-only.
+func (e *Endpoint) SetResumeErrHookForTest(hook func() error) {
+	e.resumeErrHook = hook
 }
 
 func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
@@ -82,9 +99,15 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 	// lx:end awg
 	var peers []peerConfig
 	for peerIndex, rawPeer := range options.Peers {
+		// lx: awg — the keepalive is a spec string ("N" / "min-max" / "");
+		// the range form is AWG 3.x and tag-gated like the other AWG fields.
+		keepalive, err := awgKeepaliveSpec(rawPeer.PersistentKeepaliveInterval)
+		if err != nil {
+			return nil, E.Cause(err, "persistent_keepalive_interval for peer ", peerIndex)
+		}
 		peer := peerConfig{
 			allowedIPs: rawPeer.AllowedIPs,
-			keepalive:  rawPeer.PersistentKeepaliveInterval,
+			keepalive:  keepalive,
 		}
 		if rawPeer.Endpoint.Addr.IsValid() {
 			peer.endpoint = rawPeer.Endpoint.AddrPort()
@@ -204,15 +227,17 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 // Idempotent; the endpoint stays flagged suspended (only a dial rebuilds it).
 func (e *Endpoint) Teardown() {
 	e.suspended.Store(true)
+	// lx: SPEC 071 — same shutdown guard as Close: invalidate queued pause
+	// applications and release the device under pauseOpAccess.
+	e.pauseOpAccess.Lock()
+	e.pauseSeq.Add(1)
 	if e.device != nil {
 		e.device.Down()
 		e.device.Close()
 		e.device = nil
 	}
-	if e.tunDevice != nil {
-		e.tunDevice.Close()
-		e.tunDevice = nil
-	}
+	e.pauseOpAccess.Unlock()
+	e.closeTunDevice()
 	e.allowedIPs = nil
 	if e.pauseCallback != nil {
 		e.pause.UnregisterCallback(e.pauseCallback)
@@ -254,24 +279,11 @@ func (e *Endpoint) TornDown() bool {
 
 // lx:end idle-suspend
 
-func (e *Endpoint) Start(resolve bool) error {
-	if common.Any(e.peers, func(peer peerConfig) bool {
-		return !peer.endpoint.IsValid() && peer.destination.IsDomain()
-	}) {
-		if !resolve {
-			return nil
-		}
-		for peerIndex, peer := range e.peers {
-			if peer.endpoint.IsValid() || !peer.destination.IsDomain() {
-				continue
-			}
-			destinationAddress, err := e.options.ResolvePeer(peer.destination.Fqdn)
-			if err != nil {
-				return E.Cause(err, "resolve endpoint domain for peer[", peerIndex, "]: ", peer.destination)
-			}
-			e.peers[peerIndex].endpoint = netip.AddrPortFrom(destinationAddress, peer.destination.Port)
-		}
-	} else if resolve {
+func (e *Endpoint) Start(postStart bool) error {
+	hasDomainPeer := common.Any(e.peers, func(peer peerConfig) bool {
+		return peer.destination.IsDomain()
+	})
+	if postStart != hasDomainPeer {
 		return nil
 	}
 	var bind conn.Bind
@@ -288,6 +300,18 @@ func (e *Endpoint) Start(resolve bool) error {
 			e.egressPool = tun.NewUDPEgressPool(egressPoolOptions)
 			standardBind.SetEgressProvider(e.egressPool)
 		}
+		powerManager := service.FromContext[*powerreport.Manager](e.options.Context)
+		if powerManager != nil {
+			recorder := powerManager.Recorder()
+			if recorder != nil {
+				attribution := &powerreport.Attribution{Endpoint: e.options.Tag}
+				standardBind.SetIOActivityFuncs(func(size int) {
+					recorder.Touch(powerreport.DirectionInbound, size, attribution)
+				}, func(size int) {
+					recorder.Touch(powerreport.DirectionOutbound, size, attribution)
+				})
+			}
+		}
 		bind = standardBind
 	} else {
 		var (
@@ -295,16 +319,18 @@ func (e *Endpoint) Start(resolve bool) error {
 			connectAddr netip.AddrPort
 			reserved    [3]uint8
 		)
-		if len(e.peers) == 1 && e.peers[0].endpoint.IsValid() {
-			isConnect = true
-			connectAddr = e.peers[0].endpoint
+		if len(e.peers) == 1 {
 			reserved = e.peers[0].reserved
+			if e.peers[0].endpoint.IsValid() {
+				isConnect = true
+				connectAddr = e.peers[0].endpoint
+			}
 		}
 		bind = NewClientBind(e.options.Context, e.options.Logger, e.options.Dialer, isConnect, connectAddr, reserved)
 	}
 	if isUDPListener || len(e.peers) > 1 {
 		for _, peer := range e.peers {
-			if peer.reserved != [3]uint8{} {
+			if peer.endpoint.IsValid() && peer.reserved != [3]uint8{} {
 				bind.SetReservedForEndpoint(peer.endpoint, peer.reserved)
 			}
 		}
@@ -322,6 +348,11 @@ func (e *Endpoint) Start(resolve bool) error {
 		},
 	}
 	wgDevice := device.NewDevice(e.options.Context, e.returnDevice, bind, logger, e.options.Workers)
+	// lx: SPEC 041 — passive self-heal: on handshake give-up the device rebinds
+	// its socket (fresh ephemeral port unless the user pinned listen_port) and
+	// re-initiates, so a dead NAT/DPI flow entry cannot hold the endpoint in
+	// ERR until a manual reconnect.
+	wgDevice.SetGiveUpRebind(true, e.options.ListenPort == 0)
 	e.tunDevice.SetDevice(wgDevice)
 	var ipcConf strings.Builder
 	ipcConf.WriteString(e.ipcConf)
@@ -333,12 +364,43 @@ func (e *Endpoint) Start(resolve bool) error {
 		wgDevice.Close()
 		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
 	}
+	for _, peer := range e.peers {
+		if !peer.destination.IsDomain() {
+			continue
+		}
+		var publicKey device.NoisePublicKey
+		common.Must(publicKey.FromHex(peer.publicKeyHex))
+		wgPeer, found := wgDevice.LookupActivePeer(publicKey)
+		if !found {
+			wgDevice.Close()
+			return E.New("missing configured peer: ", peer.destination)
+		}
+		wgPeer.SetEndpointResolver(func() ([]conn.Endpoint, error) {
+			addresses, lookupErr := e.options.ResolvePeer(peer.destination.Fqdn)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			endpoints := make([]conn.Endpoint, 0, len(addresses))
+			for _, address := range addresses {
+				destination := netip.AddrPortFrom(address, peer.destination.Port)
+				if peer.reserved != ([3]uint8{}) {
+					bind.SetReservedForEndpoint(destination, peer.reserved)
+				}
+				endpoint, parseErr := bind.ParseEndpoint(destination.String())
+				if parseErr != nil {
+					return nil, parseErr
+				}
+				endpoints = append(endpoints, endpoint)
+			}
+			return endpoints, nil
+		})
+	}
 	e.device = wgDevice
 	e.pause = service.FromContext[pause.Manager](e.options.Context)
 	if e.pause != nil {
 		e.pauseCallback = e.pause.RegisterCallback(e.onPauseUpdated)
 	}
-	e.allowedIPs = (*device.AllowedIPs)(unsafe.Pointer(reflect.Indirect(reflect.ValueOf(wgDevice)).FieldByName("allowedips").UnsafeAddr()))
+	e.allowedIPs = wgDevice.AllowedIPs()
 	return nil
 }
 
@@ -373,22 +435,21 @@ func (e *Endpoint) Close() error {
 		e.egressPool.Close()
 		e.egressPool = nil
 	}
+	// lx: SPEC 071 — shut the device down under pauseOpAccess with the stamp
+	// bumped, so a queued pause application (now asynchronous) can never run
+	// against a device that is being closed. The synchronous callback got this
+	// guarantee implicitly from UnregisterCallback waiting out the in-flight
+	// emit; detaching the work moves the guarantee here.
+	e.pauseOpAccess.Lock()
+	defer e.pauseOpAccess.Unlock()
+	e.pauseSeq.Add(1)
 	if e.device != nil {
 		e.device.Down()
 		e.device.Close()
 		e.device = nil
 		return nil
 	}
-	// lx: SPEC 020 level 3 — Teardown may already have released the tun device
-	// (nil = torn down, nothing to close). Closing it here too keeps a
-	// teardown/rebuild cycle leak-free: Rebuild installs a fresh tun device and
-	// the old one is gone by then. Guards against the nil-panic upstream's bare
-	// `return e.tunDevice.Close()` would hit on our teardown path.
-	if e.tunDevice != nil {
-		e.tunDevice.Close()
-		e.tunDevice = nil
-	}
-	return nil
+	return e.closeTunDevice() // lx: SPEC 020 level 3 — see endpoint_close_lx.go
 }
 
 // lx:begin awg
@@ -412,11 +473,22 @@ func (e *Endpoint) Suspend() {
 // socket, re-spawns the recv-workers (re-allocating bufsArrs), and initiates a
 // fresh handshake on the next packet. Idempotent and nil-safe. Used by SPEC 020
 // idle-suspend to wake an endpoint lazily on the next dial through it.
-func (e *Endpoint) Resume() {
+//
+// The error is returned, not swallowed: device.Up() runs BindUpdate as its first
+// step, so it fails whenever the UDP socket cannot be re-opened (a network
+// transition racing the wake, a protect callback refusing the fd). wireguard-go
+// then falls back to deviceStateDown, and a caller that assumed success would
+// leave the endpoint marked live over a device that is down — silently
+// black-holing every packet routed through it, with no path back up.
+func (e *Endpoint) Resume() error {
 	e.suspended.Store(false)
-	if e.device != nil {
-		e.device.Up()
+	if e.resumeErrHook != nil { // tests only: stand in for a device.Up() failure
+		return e.resumeErrHook()
 	}
+	if e.device != nil {
+		return e.device.Up()
+	}
+	return nil
 }
 
 // ActiveTCPFlows reports the number of ESTABLISHED TCP connections inside the
@@ -468,7 +540,7 @@ func (e *Endpoint) Lookup(address netip.Addr) *device.Peer {
 	if e.allowedIPs == nil {
 		return nil
 	}
-	return e.allowedIPs.Lookup(address.AsSlice())
+	return e.allowedIPs.LookupFromPacket(netip.Addr{}, address, nil)
 }
 
 func (e *Endpoint) BindUpdate() error {
@@ -478,7 +550,45 @@ func (e *Endpoint) BindUpdate() error {
 	return e.device.BindUpdate()
 }
 
+// lx: SPEC 041 v2 — wake-nudge passthrough: rebind the device's socket now if
+// its session is provably dead (see device.RebindIfSessionStale). Nil-safe
+// over a torn-down endpoint (SPEC 020 level 3 releases the device).
+func (e *Endpoint) RebindIfSessionStale() bool {
+	wgDevice := e.device
+	if wgDevice == nil {
+		return false
+	}
+	return wgDevice.RebindIfSessionStale()
+}
+
 func (e *Endpoint) onPauseUpdated(event int) {
+	// lx: SPEC 071 — the pause manager invokes callbacks while still holding
+	// its own lock (sing service/pause), and Down()/Up() can block on device
+	// mutexes for as long as a bind close takes (field dump: 54 minutes behind
+	// a dead-detour dial). Blocking here therefore freezes pause/wake/network
+	// delivery for the whole process. Detach: apply asynchronously with
+	// latest-event-wins — pauseSeq stamps the event, and only the goroutine
+	// carrying the newest stamp applies under pauseOpAccess, so out-of-order
+	// scheduling cannot park the device in a stale state and a burst of
+	// pause/wake flips coalesces to its final state.
+	seq := e.pauseSeq.Add(1)
+	go func() {
+		e.pauseOpAccess.Lock()
+		defer e.pauseOpAccess.Unlock()
+		if e.pauseSeq.Load() != seq {
+			return // superseded by a newer event (or invalidated by Close/Teardown)
+		}
+		e.applyPauseEvent(event)
+	}()
+}
+
+// applyPauseEvent is the former synchronous body of onPauseUpdated. Runs only
+// under pauseOpAccess (lx: SPEC 071).
+func (e *Endpoint) applyPauseEvent(event int) {
+	if e.pauseApplyHookForTest != nil {
+		e.pauseApplyHookForTest(event)
+		return
+	}
 	// lx: SPEC 020 level 3 — a torn-down endpoint has no device at all; the
 	// callback is unregistered by Teardown, but a pause event already in flight
 	// must not nil-deref.
@@ -486,9 +596,9 @@ func (e *Endpoint) onPauseUpdated(event int) {
 		return
 	}
 	switch event {
-	case pause.EventDevicePaused, pause.EventNetworkPause:
+	case pause.EventNetworkPause:
 		e.device.Down()
-	case pause.EventDeviceWake, pause.EventNetworkWake:
+	case pause.EventNetworkWake:
 		// lx: SPEC 020/007 — a suspended device (idle-suspend or AWG guard) stays
 		// down through pause/wake cycles; the owning state machine wakes it
 		// (resumeOnDial) or keeps it down (guard) on its own terms.
@@ -505,7 +615,7 @@ type peerConfig struct {
 	publicKeyHex    string
 	preSharedKeyHex string
 	allowedIPs      []netip.Prefix
-	keepalive       uint16
+	keepalive       string // lx: awg — canonical spec, "" = off
 	reserved        [3]uint8
 }
 
@@ -521,8 +631,8 @@ func (c peerConfig) GenerateIpcLines() string {
 	for _, allowedIP := range c.allowedIPs {
 		ipcLines.WriteString("\nallowed_ip=" + allowedIP.String())
 	}
-	if c.keepalive > 0 {
-		ipcLines.WriteString("\npersistent_keepalive_interval=" + F.ToString(c.keepalive))
+	if c.keepalive != "" {
+		ipcLines.WriteString("\npersistent_keepalive_interval=" + c.keepalive)
 	}
 	return ipcLines.String()
 }

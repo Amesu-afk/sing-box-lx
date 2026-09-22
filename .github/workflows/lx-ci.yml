@@ -1,14 +1,18 @@
 name: lx-ci
 
-# Fast per-commit gate for sing-box-lx. See docs-lx/lx-config.md and SPECS/004.
+# Fast per-commit gate for sing-box-lx. See docs-lx/lx-config.md and SPECS/TASKS/004.
 #
-# Trigger policy (keep per-commit cost low — see SPECS/004 §2.2):
+# Trigger policy (keep per-commit cost low — see SPECS/TASKS/004 §2.2):
+#   * Branches: `lx` plus the `lx-*` pattern. Release work happens on the version
+#     line (`lx-1.14`), NOT on `lx` — pinning the trigger to `lx` alone silently
+#     left ten release tags (lx.8…lx.16-rc.1) ungated. The pattern also covers
+#     experimental `lx-*` branches, which is the point: they are where unproven
+#     code lives. Doc-only commits are skipped anyway (paths-ignore below).
 #   * Doc-only commits (md/docs/SPECS/LICENSE) skip CI entirely (paths-ignore).
 #   * push / pull_request → only the cheap jobs:
 #       - `lint`        : go vet (lx packages) + gofmt on lx-owned files
-#       - `build-check` : LX unit tests, one native build (with_xhttp,with_awg) +
-#                         sing-box check, plus a tagless baseline build for the
-#                         negative check.
+#       - `build-check` : one native build (with_xhttp,with_awg) + sing-box check,
+#                         plus a tagless baseline build for the negative check.
 #   * `cross` (6 platforms) and `android` (gomobile AAR) are HEAVY → they run only
 #     on a manual `workflow_dispatch` (Actions → lx-ci → Run workflow, or
 #     `gh workflow run lx-ci.yml --ref lx`). They are NEVER on push.
@@ -18,10 +22,10 @@ name: lx-ci
 
 on:
   push:
-    branches: [lx]
+    branches: [lx, 'lx-*']
     paths-ignore: [ '**.md', 'docs/**', 'SPECS/**', 'LICENSE', '.gitignore' ]
   pull_request:
-    branches: [lx]
+    branches: [lx, 'lx-*']
     paths-ignore: [ '**.md', 'docs/**', 'SPECS/**', 'LICENSE', '.gitignore' ]
   workflow_dispatch:
 
@@ -33,11 +37,15 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Client feature set: upstream release/DEFAULT_BUILD_TAGS minus tailscale/ccm/ocm/acme
+  # Client feature set: upstream release/DEFAULT_BUILD_TAGS minus ccm/ocm/acme
   # (irrelevant to a VPN client), + with_purego for the CGO-free cross matrix. The two
   # lx features (with_xhttp/with_awg) toggle on top. Mirrors Makefile.lx LX_TAGS minus
   # the features. -checklinkname=0 is supplied by LX_LDFLAGS (jobs build via Makefile.lx).
-  BASE_TAGS: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0
+  # with_openvpn/with_openconnect: client protocols enabled 2026-08-05 (owner decision).
+  # Each gates one package carrying client AND server behind the same tag upstream.
+  # with_tailscale: desktop + router binaries since 2026-09-04 (owner decision); the
+  # Android AAR carries it too since 2026-09-14 (build_libbox, lx:tailscale, + ts_omit_*).
+  BASE_TAGS: with_gvisor,with_quic,with_dhcp,with_wireguard,with_utls,with_clash_api,with_naive_outbound,with_purego,badlinkname,tfogo_checklinkname0,with_openvpn,with_openconnect,with_tailscale
 
 jobs:
   # ---- Cheap (runs on every push / PR) -------------------------------------
@@ -45,10 +53,13 @@ jobs:
     name: lint (vet + gofmt)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { submodules: recursive, fetch-depth: 0 }
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, check-latest: true }
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
 
       - name: go vet (lx packages, full tags)
         run: |
@@ -60,18 +71,18 @@ jobs:
           # §zero-diff), so only those two packages drop the analyzer; every other
           # lx package keeps the full set.
           go vet \
-            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
             ./option/ ./constant/ ./transport/v2ray/ ./transport/v2rayxhttp/ \
-            ./protocol/wireguard/ ./transport/wireguard/
+            ./protocol/wireguard/ ./transport/wireguard/ ./lxd/
           go vet -unsafeptr=false \
-            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
             ./daemon/ ./experimental/libbox/
 
       - name: gofmt (lx-owned files only)
         run: |
           # Only our downstream files — never the whole upstream tree.
           # Generated *.pb.go are excluded (machine output, not hand-edited).
-          files=$(git ls-files '*.go' | grep -E 'v2rayxhttp|_xhttp|_awg|_lx\.go|_command_lx' | grep -v '\.pb\.go' || true)
+          files=$(git ls-files '*.go' | grep -E 'v2rayxhttp|_xhttp|_awg|_lx(_test)?\.go|_command_lx|^lxd/' | grep -v '\.pb\.go' || true)
           echo "checking:"; echo "$files"
           if [ -n "$files" ]; then
             bad=$(gofmt -l $files)
@@ -81,40 +92,36 @@ jobs:
           fi
           echo "OK: lx files are gofmt-clean"
 
+      # The lxd daemon package only exists behind with_lxd — without an
+      # explicit test step its suite is "[no test files]" everywhere and rots
+      # silently (review 055-057 finding). -race keeps the two-mutex controller
+      # honest. cmd/sing-box rides along for the service-args regression tests.
+      # -checklinkname=0 mirrors LX_LDFLAGS: badlinkname/with_purego need it, and
+      # unlike the plain build the test linker enforces it (badtls fails to link
+      # without it on go1.25).
+      - name: go test (lxd daemon + cli, race)
+        run: |
+          go test -race -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
+            ./lxd/ ./cmd/sing-box/
+
   build-check:
-    name: build-check (test + native build + check + negative)
+    name: build-check (native build + check + negative)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive     # with_awg needs submodules/wireguard-go
-          fetch-depth: 0            # tags for the -lx version (git describe)
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, check-latest: true }
+          fetch-depth: 0            # full history (version comes from upstream.version, not tags)
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
 
-      - name: Test LX packages (full tags)
-        run: |
-          go test -count=1 \
-            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
-            -ldflags "-checklinkname=0" \
-            ./option/ ./common/tls/ ./transport/v2rayxhttp/ \
-            ./protocol/wireguard/ ./transport/wireguard/
-
-      # The XHTTP client is the one lx package built around concurrent state: the pool
-      # swaps members under atomic.Pointer while dials hold their own reference, the
-      # handshake guard races a timer against RoundTrip, and the stream conn hands the
-      # reader over between goroutines. A data race there is a heisenbug on someone's
-      # phone, so it is worth the extra minute here — this is also the only place it
-      # can run, since -race needs cgo and the usual dev box is Windows without gcc.
-      - name: Race-test XHTTP client
-        run: |
-          CGO_ENABLED=1 go test -count=1 -race \
-            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
-            -ldflags "-checklinkname=0" \
-            ./transport/v2rayxhttp/
-
-      - name: Build (full lx — with_xhttp,with_awg,with_lx_command)
-        run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS},with_xhttp,with_awg,with_lx_command"
+      - name: Build (full lx — with_xhttp,with_awg,with_lx_command,with_lxd)
+        run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd"
 
       - name: Version
         run: ./sing-box version
@@ -124,7 +131,7 @@ jobs:
           ./sing-box check -c lx-test/config/xhttp_reality.json
           ./sing-box check -c lx-test/config/awg2_basic.json
           ./sing-box check -c lx-test/config/awg2_ranged.json
-          ./sing-box check -c lx-test/config/tarn_client_raw_dns.json
+          ./sing-box check -c lx-test/config/awg3_full.json
 
       - name: Build baseline (no lx features) for the negative check
         run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS}" LX_OUTPUT=sing-box-baseline
@@ -138,7 +145,8 @@ jobs:
           ./sing-box-baseline check -c lx-test/config/xhttp_reality.json; x=$?
           ./sing-box-baseline check -c lx-test/config/awg2_basic.json; a=$?
           ./sing-box-baseline check -c lx-test/config/awg2_ranged.json; r=$?
-          if [ $x -eq 0 ] || [ $a -eq 0 ] || [ $r -eq 0 ]; then
+          ./sing-box-baseline check -c lx-test/config/awg3_full.json; f=$?
+          if [ $x -eq 0 ] || [ $a -eq 0 ] || [ $r -eq 0 ] || [ $f -eq 0 ]; then
             echo "FAIL: a feature config was accepted without its build tag"; exit 1
           fi
           echo "OK: xhttp/awg configs correctly rejected without their tags"
@@ -180,10 +188,13 @@ jobs:
         goos: [linux, darwin, windows]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { submodules: recursive, fetch-depth: 0 }
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, check-latest: true }
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
       - name: Cross-build (full lx)
         env:
           GOOS: ${{ matrix.goos }}
@@ -193,7 +204,7 @@ jobs:
             LX_TAGS="${BASE_TAGS},with_xhttp,with_awg" \
             LX_OUTPUT="sing-box-${{ matrix.goos }}-${{ matrix.goarch }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}
           path: sing-box-${{ matrix.goos }}-${{ matrix.goarch }}*
@@ -208,14 +219,24 @@ jobs:
     name: android libbox.aar
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { submodules: recursive, fetch-depth: 0 }
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, check-latest: true }
+      # SPEC 044: AAR must be built with Go >= 1.25 — a go1.24-built libbox
+      # kills all quic-go outbounds on some vendor Android kernels (see
+      # lx-release.yml build_android for the full story).
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
       - name: Setup Android NDK
         id: setup-ndk
         uses: nttld/setup-ndk@v1
-        with: { ndk-version: r28 }
+        # lx: r28c = 28.2.13676358 — та же ревизия, что у сопровождающего локально.
+        # Прежнее `r28` — НЕ алиас на последнюю: это отдельный архив от 05.02.2025
+        # (r28/r28b/r28c — три разных файла), т.е. CI собирал AAR на две ревизии
+        # старше локальной сборки. Бампить только после прогона AAR на девайсе.
+        with: { ndk-version: r28c }
       - name: Setup OpenJDK 17
         run: sudo apt-get update && sudo apt-get install -y openjdk-17-jdk-headless
       - name: Build libbox.aar + libbox-legacy.aar
@@ -226,7 +247,7 @@ jobs:
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: libbox-aar
           path: |
@@ -238,7 +259,7 @@ jobs:
   # Router musl builds: prove the static-musl + naive pipeline compiles and links
   # statically (no libdl.so.2) for the router arches. Build + verify only, no
   # publish — the release is lx-release.yml's build_linux_musl. Keep the toolchain
-  # steps here in sync with that job. See SPECS/006.
+  # steps here in sync with that job. See SPECS/TASKS/006.
   linux_musl:
     if: github.event_name == 'workflow_dispatch'
     name: linux-musl ${{ matrix.asset }}
@@ -252,10 +273,13 @@ jobs:
           - { arch: arm,    goarm: "7",        asset: linux-armv7 }
           - { arch: mipsle, gomips: softfloat, asset: linux-mipsle-softfloat }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with: { submodules: recursive, fetch-depth: 0 }
-      - uses: actions/setup-go@v5
-        with: { go-version-file: go.mod, check-latest: true }
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
 
       - name: Clone cronet-go
         run: |
@@ -275,7 +299,7 @@ jobs:
           GPG_TTY=/dev/null ./naiveproxy/src/build/linux/sysroot_scripts/generate_keyring.sh
 
       - name: Cache Chromium toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/cronet-go/naiveproxy/src/third_party/llvm-build/
@@ -321,7 +345,7 @@ jobs:
           fi
           echo "OK: statically linked, no libdl.so.2"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sing-box-${{ matrix.asset }}
           path: sing-box-${{ matrix.asset }}

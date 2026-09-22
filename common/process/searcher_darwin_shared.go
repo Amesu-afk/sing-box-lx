@@ -267,8 +267,7 @@ func getExecPathFromPID(pid uint32) (string, error) {
 		procpidpathinfo,
 		0,
 		uintptr(unsafe.Pointer(&buf[0])),
-		procpidpathinfosize,
-	)
+		procpidpathinfosize)
 	if errno != 0 {
 		return "", errno
 	}

@@ -4,13 +4,25 @@ package daemon
 
 import (
 	"context"
+	"crypto/tls"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptrace"
 	"os"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/certificate"
 	"github.com/sagernet/sing-box/common/dnstrack"
 	"github.com/sagernet/sing-box/common/urltest"
+	C "github.com/sagernet/sing-box/constant"
+	dnsgroup "github.com/sagernet/sing-box/dns/transport/group"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
+	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
 
@@ -80,7 +92,7 @@ func (s *StartedService) URLTestOutbound(ctx context.Context, request *URLTestOu
 
 	delay, err := urltest.URLTest(testCtx, request.Link, detour)
 
-	realTag := group.RealTag(realTagSource)
+	realTag := group.RealTag(boxService.outboundManager, realTagSource)
 	if err != nil {
 		boxService.urlTestHistoryStorage.DeleteURLTestHistory(realTag)
 		return &URLTestOutboundResponse{Error: err.Error()}, nil
@@ -92,10 +104,153 @@ func (s *StartedService) URLTestOutbound(ctx context.Context, request *URLTestOu
 	return &URLTestOutboundResponse{Delay: uint32(delay)}, nil
 }
 
+// Body limits for GetURLViaOutbound (SPEC 058). The clamp lives in the core, not the
+// caller: a diagnostic probe must not be able to pull an unbounded response into the
+// memory of a gomobile process.
+const (
+	getURLDefaultMaxBytes = 256 * 1024
+	getURLMaxBytesCeiling = 1024 * 1024
+)
+
+// GetURLViaOutbound performs a diagnostic HTTP GET through a single node — an outbound OR
+// an endpoint (WG/AWG/Tailscale) — and returns the response body (SPEC 058). It answers the
+// class of question URLTestOutbound cannot: not "is this node alive" but "what does the
+// world look like through it" — exit IP, geo, warp state (api.ip2location.io,
+// 1.1.1.1/cdn-cgi/trace). Synchronous and unary; cancellation is by dropping the call.
+//
+// Deliberate differences from URLTestOutbound, its neighbour and donor:
+//
+//   - The urltest history is NOT touched. elapsedMs covers the whole exchange including
+//     body read over a caller-chosen URL, so writing it into urlTestHistoryStorage would
+//     corrupt the delay figures the UI shows for that node.
+//   - A non-2xx status is a RESULT, not an error: a 403 from Cloudflare is exactly the
+//     kind of answer this probe exists to surface. error is reserved for an exchange that
+//     never happened (unknown tag, dial/TLS failure, timeout).
+//
+// GET only, by design (SPEC 058 §5): an arbitrary-method HTTP client reachable through
+// every tunnel of the user is a much larger surface than diagnostics needs.
+func (s *StartedService) GetURLViaOutbound(ctx context.Context, request *GetURLViaOutboundRequest) (*GetURLViaOutboundResponse, error) {
+	s.serviceAccess.RLock()
+	if s.serviceStatus.Status != ServiceStatus_STARTED {
+		s.serviceAccess.RUnlock()
+		return nil, os.ErrInvalid
+	}
+	boxService := s.instance
+	s.serviceAccess.RUnlock()
+
+	// Resolve in BOTH managers, exactly as URLTestOutbound does: adapter.Endpoint embeds
+	// adapter.Outbound, so a WG/AWG node yields an N.Dialer just like a plain outbound.
+	tag := request.OutboundTag
+	var detour N.Dialer
+	if outbound, isLoaded := boxService.outboundManager.Outbound(tag); isLoaded {
+		detour = outbound
+	} else if endpoint, isLoaded := boxService.endpointManager.Get(tag); isLoaded {
+		detour = endpoint
+	} else {
+		return &GetURLViaOutboundResponse{Error: "outbound or endpoint not found: " + tag}, nil
+	}
+
+	// Same cancellation model as URLTestOutbound: parented to the per-call ctx so a client
+	// dropping the call aborts the fetch at its dial, without touching other streams.
+	fetchCtx := ctx
+	if request.Timeout > 0 {
+		var cancel context.CancelFunc
+		fetchCtx, cancel = context.WithTimeout(ctx, time.Duration(request.Timeout)*time.Millisecond)
+		defer cancel()
+	}
+
+	maxBytes := int64(request.MaxBytes)
+	if maxBytes <= 0 {
+		maxBytes = getURLDefaultMaxBytes
+	} else if maxBytes > getURLMaxBytesCeiling {
+		maxBytes = getURLMaxBytesCeiling
+	}
+
+	httpRequest, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, request.Link, nil)
+	if err != nil {
+		return &GetURLViaOutboundResponse{Error: err.Error()}, nil
+	}
+	for _, header := range request.Headers {
+		// Host is a dedicated field in net/http; setting it through Header is ignored.
+		if http.CanonicalHeaderKey(header.Key) == "Host" {
+			httpRequest.Host = header.Value
+			continue
+		}
+		httpRequest.Header.Set(header.Key, header.Value)
+	}
+
+	// remoteAddr is captured from the connection actually established inside the tunnel —
+	// this is where the target resolved to through THIS node, not the node's own exit IP
+	// (that one is carried by the body).
+	var remoteAddr string
+	httpRequest = httpRequest.WithContext(httptrace.WithClientTrace(httpRequest.Context(), &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			if info.Conn != nil {
+				remoteAddr = info.Conn.RemoteAddr().String()
+			}
+		},
+	}))
+
+	transport := &http.Transport{
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: C.TCPTimeout,
+		DisableKeepAlives:   true, // a probe must not keep a socket (or a WG tunnel) alive afterwards
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return detour.DialContext(ctx, network, M.ParseSocksaddr(addr))
+		},
+	}
+	// The system x509 pool is empty inside a mobile process, so HTTPS needs the same
+	// certificate store libbox's own HTTP client uses — without it every https:// probe
+	// would fail verification on Android regardless of the node.
+	if C.IsAndroid {
+		store, err := certificate.NewStore(boxService.ctx, logger.NOP(), option.CertificateOptions{})
+		if err != nil {
+			return &GetURLViaOutboundResponse{Error: E.Cause(err, "initialize certificate store").Error()}, nil
+		}
+		defer store.Close()
+		transport.TLSClientConfig = &tls.Config{RootCAs: store.Pool()}
+	}
+	defer transport.CloseIdleConnections()
+
+	started := time.Now()
+	httpResponse, err := (&http.Client{Transport: transport}).Do(httpRequest)
+	if err != nil {
+		return &GetURLViaOutboundResponse{Error: err.Error()}, nil
+	}
+	defer httpResponse.Body.Close()
+
+	// Read one byte past the limit: that extra byte is what distinguishes "body ended
+	// exactly at the limit" from "body was cut", so truncation is never silent.
+	body, err := io.ReadAll(io.LimitReader(httpResponse.Body, maxBytes+1))
+	if err != nil {
+		return &GetURLViaOutboundResponse{Error: err.Error()}, nil
+	}
+	var truncated bool
+	if int64(len(body)) > maxBytes {
+		body = body[:maxBytes]
+		truncated = true
+	}
+
+	return &GetURLViaOutboundResponse{
+		HttpStatus:  uint32(httpResponse.StatusCode),
+		Body:        body,
+		Truncated:   truncated,
+		ContentType: httpResponse.Header.Get("Content-Type"),
+		RemoteAddr:  remoteAddr,
+		ElapsedMs:   uint32(time.Since(started).Milliseconds()),
+	}, nil
+}
+
 // GetRules returns a snapshot of the routing rule table — route rules and DNS rules,
 // distinguished by isDNS. Rules are static for the lifetime of a config, so this is a
 // unary snapshot (no stream). Route fields match the Clash /rules shape; DNS rules go
 // further than Clash, which does not expose them at all.
+//
+// The router is read from instance.router — resolved from the service context by both
+// constructors — and never through instance.instance.Router(): the attached-service path
+// (services: [{type: "api"}]) leaves the *box.Box nil, so that call panicked instead of
+// answering. A nil router degrades to Unavailable, the same discipline GetRunningConfig
+// follows for its missing snapshot.
 func (s *StartedService) GetRules(ctx context.Context, empty *emptypb.Empty) (*RuleList, error) {
 	s.serviceAccess.RLock()
 	if s.serviceStatus.Status != ServiceStatus_STARTED {
@@ -105,7 +260,11 @@ func (s *StartedService) GetRules(ctx context.Context, empty *emptypb.Empty) (*R
 	boxService := s.instance
 	s.serviceAccess.RUnlock()
 
-	routeRules := boxService.instance.Router().Rules()
+	router := boxService.router
+	if router == nil {
+		return nil, status.Error(codes.Unavailable, "router is not available for this service")
+	}
+	routeRules := router.Rules()
 	rules := make([]*Rule, 0, len(routeRules))
 	for _, rule := range routeRules {
 		rules = append(rules, &Rule{
@@ -167,7 +326,7 @@ func (s *StartedService) GetOutbounds(ctx context.Context, empty *emptypb.Empty)
 	var list OutboundList
 	appendItem := func(detour adapter.Outbound) {
 		item := &GroupItem{Tag: detour.Tag(), Type: detour.Type()}
-		if history := historyStorage.LoadURLTestHistory(adapter.OutboundTag(detour)); history != nil {
+		if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, detour)); history != nil {
 			item.UrlTestTime = history.Time.Unix()
 			item.UrlTestDelay = int32(history.Delay)
 		}
@@ -219,6 +378,99 @@ func (s *StartedService) GetPool(ctx context.Context, request *GetPoolRequest) (
 		})
 	}
 	return &list, nil
+}
+
+// dnsGroupStateProvider is the DNS-group transport's health snapshot hook (SPEC 035).
+// Discovered by type-assertion over the transport manager's list — mirrors poolProvider:
+// any transport not implementing it (every non-group type) is silently skipped.
+type dnsGroupStateProvider interface {
+	GroupState() dnsgroup.State
+}
+
+// GetDNSGroups returns a point-in-time record snapshot of every DNS group in the
+// running config (SPEC 035 v3): mode, sticky target, and per-member records
+// (clean, live errors with the age of the newest, live wins, last rtt). Groups
+// are few and the UI draws them all, so there is no per-tag request. No groups
+// (or no DNS transport manager) yields an empty list, not an error.
+func (s *StartedService) GetDNSGroups(ctx context.Context, empty *emptypb.Empty) (*DnsGroupList, error) {
+	s.serviceAccess.RLock()
+	if s.serviceStatus.Status != ServiceStatus_STARTED {
+		s.serviceAccess.RUnlock()
+		return nil, status.Error(codes.FailedPrecondition, "service is not started")
+	}
+	boxService := s.instance
+	s.serviceAccess.RUnlock()
+
+	var list DnsGroupList
+	transportManager := service.FromContext[adapter.DNSTransportManager](boxService.ctx)
+	if transportManager == nil {
+		return &list, nil
+	}
+	for _, transport := range transportManager.Transports() {
+		provider, isGroup := transport.(dnsGroupStateProvider)
+		if !isGroup {
+			continue
+		}
+		snapshot := provider.GroupState()
+		groupProto := &DnsGroupState{
+			Tag:     snapshot.Tag,
+			Mode:    snapshot.Mode,
+			Current: snapshot.Current,
+		}
+		for _, memberSnapshot := range snapshot.Members {
+			memberProto := &DnsGroupMember{
+				Tag:            memberSnapshot.Tag,
+				ServerType:     memberSnapshot.ServerType,
+				Clean:          memberSnapshot.Clean,
+				LiveErrors:     uint32(memberSnapshot.LiveErrors),
+				LastErrorAgeMs: -1,
+				LiveWins:       uint32(memberSnapshot.LiveWins),
+				Current:        memberSnapshot.Current,
+				LastRttMs:      clampRttMs(memberSnapshot.LastRTT),
+			}
+			if memberSnapshot.HasError {
+				memberProto.LastErrorAgeMs = memberSnapshot.LastErrorAge.Milliseconds()
+			}
+			groupProto.Members = append(groupProto.Members, memberProto)
+		}
+		list.Groups = append(list.Groups, groupProto)
+	}
+	return &list, nil
+}
+
+// GetRunningConfig returns the canonical serialization of the options the running box
+// was actually built from (SPEC 037) — the post-override struct captured once in
+// newInstance, NOT the profile text the client sent: tun AutoRedirect/packages and the
+// injected OOM-killer service are included, field order / omitempty / [] -> null follow
+// the re-marshal. This is the single source of truth for "what is running" — the client
+// derives per-node JSON ("View details" / "Copy JSON") by extracting the tag from this
+// document instead of a per-tag RPC. Unavailable (not FailedPrecondition) distinguishes
+// "started but no snapshot" — the attached-service path (service/api) never captures one.
+func (s *StartedService) GetRunningConfig(ctx context.Context, empty *emptypb.Empty) (*RunningConfig, error) {
+	s.serviceAccess.RLock()
+	if s.serviceStatus.Status != ServiceStatus_STARTED {
+		s.serviceAccess.RUnlock()
+		return nil, status.Error(codes.FailedPrecondition, "service is not started")
+	}
+	content := s.instance.runningConfig
+	s.serviceAccess.RUnlock()
+	if content == "" {
+		return nil, status.Error(codes.Unavailable, "running config was not captured for this service")
+	}
+	return &RunningConfig{Content: content}, nil
+}
+
+// clampRttMs converts a measured rtt to ms, clamping sub-millisecond
+// measurements to 1 so that 0 unambiguously means "never measured"
+// (precedent: GetPool clamps live-node delay 0->1).
+func clampRttMs(rtt time.Duration) uint32 {
+	if rtt <= 0 {
+		return 0
+	}
+	if ms := rtt.Milliseconds(); ms > 0 {
+		return uint32(ms)
+	}
+	return 1
 }
 
 // SubscribeDNSQueries streams structured, process-attributed DNS resolutions (SPEC 018).
@@ -282,6 +534,17 @@ func dnsQueryEventToProto(event dnstrack.QueryEvent, includeAnswers bool, outbou
 		DnsServer:     event.DNSServer,
 		DnsServerType: event.DNSServerType,
 		Outbound:      resolveOutboundChain(event.Outbound, outboundManager),
+		DnsGroupPath:  event.GroupPath,
+		Fanned:        event.Fanned,
+		Survival:      event.Survival,
+	}
+	for _, attempt := range event.Attempts { // SPEC 035 — probe trace, vocabulary passed through verbatim
+		proto.Attempts = append(proto.Attempts, &DnsGroupAttempt{
+			Server:     attempt.Server,
+			ServerType: attempt.ServerType,
+			Outcome:    attempt.Outcome,
+			RttMs:      attempt.RTTMs,
+		})
 	}
 	if event.ProcessInfo != nil {
 		proto.ProcessInfo = &ProcessInfo{

@@ -50,6 +50,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if err != nil {
 		return nil, err
 	}
+	// lx:begin socks-udp-bind
+	if version == socks.Version5 {
+		outboundDialer = newRelayDialer(outboundDialer, options.ServerOptions.Build()) // SPEC 085: BND.ADDR 0.0.0.0/:: → адрес сервера
+	}
+	// lx:end socks-udp-bind
 	outbound := &Outbound{
 		Adapter:   outbound.NewAdapterWithDialerOptions(C.TypeSOCKS, tag, options.Network.Build(), options.DialerOptions),
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),

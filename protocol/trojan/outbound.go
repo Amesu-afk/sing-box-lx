@@ -26,6 +26,8 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.TrojanOutboundOptions](registry, C.TypeTrojan, NewOutbound)
 }
 
+var _ adapter.OutboundWithMultiplex = (*Outbound)(nil)
+
 type Outbound struct {
 	outbound.Adapter
 	logger          logger.ContextLogger
@@ -58,11 +60,20 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			Options:       common.PtrValueOrDefault(options.TLS),
 			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
 				!common.PtrValueOrDefault(options.Multiplex).Enabled,
+			// lx: SPEC 060 — see the vless outbound.
+			DialedThroughDetour: tls.DialedThroughDetour(options.DialerOptions),
 		})
 		if err != nil {
 			return nil, err
 		}
-		outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
+		// lx:begin tls-disabled-dialer
+		// NewClientWithOptions returns (nil, nil) for `"tls": {"enabled": false}`;
+		// an unconditional NewDialer here wraps that nil config and SIGSEGVs on the
+		// first handshake (SPEC 045). Same guard as vmess.
+		if outbound.tlsConfig != nil {
+			outbound.tlsDialer = tls.NewDialer(outboundDialer, outbound.tlsConfig)
+		}
+		// lx:end tls-disabled-dialer
 	}
 	if options.Transport != nil {
 		outbound.transport, err = v2ray.NewClientTransport(ctx, outbound.dialer, outbound.serverAddr, common.PtrValueOrDefault(options.Transport), outbound.tlsConfig)
@@ -107,7 +118,11 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	}
 }
 
-func (h *Outbound) InterfaceUpdated() {
+func (h *Outbound) MultiplexEnabled() bool {
+	return h.multiplexDialer != nil
+}
+
+func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	if h.transport != nil {
 		h.transport.Close()
 	}

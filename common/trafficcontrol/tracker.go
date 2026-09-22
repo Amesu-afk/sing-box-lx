@@ -45,15 +45,9 @@ func (m *Manager) RoutedConnection(ctx context.Context, conn net.Conn, metadata 
 	upload := new(atomic.Int64)
 	download := new(atomic.Int64)
 	tracker := &connTracker{
-		ExtendedConn: bufio.NewCounterConn(conn, []N.CountFunc{func(n int64) {
-			upload.Add(n)
-			m.uploadTotal.Add(n)
-		}}, []N.CountFunc{func(n int64) {
-			download.Add(n)
-			m.downloadTotal.Add(n)
-		}}),
-		metadata: m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download),
-		manager:  m,
+		ExtendedConn: bufio.NewInt64CounterConn(conn, []*atomic.Int64{upload}, []*atomic.Int64{download}),
+		metadata:     m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download),
+		manager:      m,
 	}
 	m.join(tracker)
 	return tracker
@@ -63,15 +57,9 @@ func (m *Manager) RoutedPacketConnection(ctx context.Context, conn N.PacketConn,
 	upload := new(atomic.Int64)
 	download := new(atomic.Int64)
 	tracker := &packetConnTracker{
-		PacketConn: bufio.NewCounterPacketConn(conn, []N.CountFunc{func(n int64) {
-			upload.Add(n)
-			m.uploadTotal.Add(n)
-		}}, []N.CountFunc{func(n int64) {
-			download.Add(n)
-			m.downloadTotal.Add(n)
-		}}),
-		metadata: m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download),
-		manager:  m,
+		PacketConn: bufio.NewInt64CounterPacketConn(conn, []*atomic.Int64{upload}, nil, []*atomic.Int64{download}, nil),
+		metadata:   m.newTrackerMetadata(metadata, matchedRule, matchOutbound, upload, download),
+		manager:    m,
 	}
 	m.join(tracker)
 	return tracker
@@ -125,6 +113,14 @@ func (m *Manager) newTrackerMetadata(metadata adapter.InboundContext, matchedRul
 	// points at a group is descended via Now() against this same snapshot. seen
 	// guards against detour cycles. Order: final outbound → outward.
 	var detourChain []string
+	// lx:begin chain
+	// SPEC 073: финальный outbound-цепочка отдаёт разрешённый путь сам (по
+	// позициям, вход первым); Dependencies()[0] у неё — вход, а не detour.
+	if pathProvider, isChain := finalOutbound.(adapter.ChainPathProvider); isChain {
+		detourChain = common.Reverse(pathProvider.ChainPath())
+		finalOutbound = nil
+	}
+	// lx:end chain
 	for cur := finalOutbound; cur != nil; {
 		deps := cur.Dependencies()
 		if len(deps) == 0 || seen[deps[0]] {
@@ -216,12 +212,10 @@ func (t *flowTracker) AttachFlow(handle tun.FlowHandle) {
 
 func (t *flowTracker) CountForward(n int) {
 	t.metadata.Upload.Add(int64(n))
-	t.manager.uploadTotal.Add(int64(n))
 }
 
 func (t *flowTracker) CountReverse(n int) {
 	t.metadata.Download.Add(int64(n))
-	t.manager.downloadTotal.Add(int64(n))
 }
 
 func (t *flowTracker) FlowEstablished() {
