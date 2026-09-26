@@ -17,20 +17,17 @@ import (
 // emptier member exists — that drift is what round-robin could not see.
 func TestAcquireSlotPrefersLeastLoaded(t *testing.T) {
 	c := newTestClient(4)
-	c.slots[0].inflight.Store(9)
-	c.slots[1].inflight.Store(3)
-	c.slots[2].inflight.Store(7)
-	c.slots[3].inflight.Store(5)
+	c.slots[0].get().inflight.Store(9)
+	c.slots[1].get().inflight.Store(3)
+	c.slots[2].get().inflight.Store(7)
+	c.slots[3].get().inflight.Store(5)
 
 	lease := c.acquireSlot()
-	if lease.slot != c.slots[1] {
+	if lease.rt != c.slots[1].get() {
 		t.Fatalf("acquired a slot other than the least loaded one")
 	}
-	if got := c.slots[1].inflight.Load(); got != 4 {
+	if got := c.slots[1].get().inflight.Load(); got != 4 {
 		t.Fatalf("inflight = %d, want 4 (the lease must be counted)", got)
-	}
-	if lease.rt != c.slots[1].get() {
-		t.Fatal("lease captured a transport other than the slot's current member")
 	}
 }
 
@@ -41,13 +38,48 @@ func TestAcquireSlotSpreadsOverAnIdlePool(t *testing.T) {
 	const size = 4
 	c := newTestClient(size)
 
-	seen := make(map[*transportSlot]bool)
+	seen := make(map[*poolTransport]bool)
 	for i := 0; i < size; i++ {
-		seen[c.acquireSlot().slot] = true
+		seen[c.acquireSlot().rt] = true
 	}
 	if len(seen) != size {
 		t.Fatalf("%d distinct members used for %d dials on an idle pool", len(seen), size)
 	}
+}
+
+// A refresh replaces the HTTP/2 connections while existing streams may still
+// drain on the old transports. Their load must not make the fresh members look
+// busy or concentrate subsequent video dials on one new connection.
+func TestRefreshCountsOnlyStreamsOnFreshMembers(t *testing.T) {
+	c := newTestClient(2)
+	oldLeases := []*slotLease{c.acquireSlot(), c.acquireSlot(), c.acquireSlot()}
+	oldMembers := [2]*poolTransport{c.slots[0].get(), c.slots[1].get()}
+	if got := [2]int64{oldMembers[0].inflight.Load(), oldMembers[1].inflight.Load()}; got != [2]int64{2, 1} {
+		t.Fatalf("unexpected old load: %v", got)
+	}
+
+	c.refreshAllSlots()
+	freshMembers := [2]*poolTransport{c.slots[0].get(), c.slots[1].get()}
+	for i, member := range freshMembers {
+		if member == oldMembers[i] || member.inflight.Load() != 0 {
+			t.Fatalf("slot %d did not start with an empty fresh member", i)
+		}
+	}
+
+	first, second := c.acquireSlot(), c.acquireSlot()
+	if first.rt == second.rt {
+		t.Fatal("new dials concentrated on one member after refresh")
+	}
+	for _, lease := range oldLeases {
+		lease.release()
+	}
+	for i, member := range freshMembers {
+		if got := member.inflight.Load(); got != 1 {
+			t.Fatalf("old lease release changed fresh member %d load to %d", i, got)
+		}
+	}
+	first.release()
+	second.release()
 }
 
 // A lease is the only thing that ever gives capacity back, so a double Close (or a
@@ -56,12 +88,12 @@ func TestAcquireSlotSpreadsOverAnIdlePool(t *testing.T) {
 func TestSlotLeaseReleasesExactlyOnce(t *testing.T) {
 	c := newTestClient(1)
 	lease := c.acquireSlot()
-	if got := c.slots[0].inflight.Load(); got != 1 {
+	if got := lease.rt.inflight.Load(); got != 1 {
 		t.Fatalf("inflight = %d after acquire, want 1", got)
 	}
 	lease.release()
 	lease.release()
-	if got := c.slots[0].inflight.Load(); got != 0 {
+	if got := lease.rt.inflight.Load(); got != 0 {
 		t.Fatalf("inflight = %d after two releases, want 0", got)
 	}
 }
@@ -78,7 +110,7 @@ func TestConnCloseReturnsCapacity(t *testing.T) {
 	stream := newStreamConn(pipeReader, pipeWriter, M.Socksaddr{}, streamLease)
 	stream.setupReader(io.NopCloser(strings.NewReader("")), nil)
 	stream.Close()
-	if got := c.slots[0].inflight.Load(); got != 0 {
+	if got := streamLease.rt.inflight.Load(); got != 0 {
 		t.Fatalf("streamConn.Close left inflight at %d, want 0", got)
 	}
 
@@ -87,7 +119,7 @@ func TestConnCloseReturnsCapacity(t *testing.T) {
 	defer splitReader.Close()
 	split := newSplitConn(io.NopCloser(strings.NewReader("")), splitReader, splitWriter, M.Socksaddr{}, splitLease)
 	split.Close()
-	if got := c.slots[0].inflight.Load(); got != 0 {
+	if got := splitLease.rt.inflight.Load(); got != 0 {
 		t.Fatalf("splitConn.Close left inflight at %d, want 0", got)
 	}
 
@@ -95,7 +127,7 @@ func TestConnCloseReturnsCapacity(t *testing.T) {
 	packet := newTestPacketConn(t, c, packetLease)
 	packet.Close()
 	packet.Close() // idempotent: a second Close must not double-release
-	if got := c.slots[0].inflight.Load(); got != 0 {
+	if got := packetLease.rt.inflight.Load(); got != 0 {
 		t.Fatalf("packetConn.Close left inflight at %d, want 0", got)
 	}
 }
@@ -115,8 +147,8 @@ func TestPacketUploadTimesOutAndRetiresMember(t *testing.T) {
 			return nil, req.Context().Err()
 		},
 	}
-	lease := &slotLease{slot: c.slots[0], rt: &poolTransport{rt: zombie}}
-	c.slots[0].inflight.Add(1)
+	lease := &slotLease{rt: &poolTransport{rt: zombie}}
+	lease.rt.inflight.Add(1)
 	conn := newTestPacketConn(t, c, lease)
 	defer conn.Close()
 
@@ -155,8 +187,8 @@ func TestPacketConnCloseAbortsInFlightUpload(t *testing.T) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
 	})
-	lease := &slotLease{slot: c.slots[0], rt: &poolTransport{rt: blocking}}
-	c.slots[0].inflight.Add(1)
+	lease := &slotLease{rt: &poolTransport{rt: blocking}}
+	lease.rt.inflight.Add(1)
 	conn := newTestPacketConn(t, c, lease)
 
 	done := make(chan struct{})
@@ -173,7 +205,7 @@ func TestPacketConnCloseAbortsInFlightUpload(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not abort the in-flight upload")
 	}
-	if got := c.slots[0].inflight.Load(); got != 0 {
+	if got := lease.rt.inflight.Load(); got != 0 {
 		t.Fatalf("inflight = %d after Close, want 0", got)
 	}
 }

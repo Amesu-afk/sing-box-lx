@@ -116,8 +116,8 @@ var slowWarmThreshold = 5 * time.Second
 // their own reference, so a false positive costs a few extra connections, never
 // a healthy-stream teardown. That is the property the per-conn ping lacked.
 
-// poolTransport is a pool member plus the one bit of state the dial budget needs:
-// whether this transport has ever produced a response header.
+// poolTransport owns both the dial budget state and the number of live streams
+// on this particular HTTP/2 transport.
 //
 // A member that has answered before owns a live TCP+TLS session, so the next dial
 // over it is a single round trip and anything slower means the connection died.
@@ -134,6 +134,7 @@ var slowWarmThreshold = 5 * time.Second
 type poolTransport struct {
 	rt                http.RoundTripper
 	warm              atomic.Bool
+	inflight          atomic.Int64
 	connectionsMu     sync.Mutex
 	activeConnections map[*trackedPoolConn]struct{}
 }
@@ -221,13 +222,11 @@ func (c *trackedPoolConn) Close() error {
 // a member whose connection has gone stale can be replaced without disturbing an
 // in-flight dial that already captured the old transport.
 //
-// inflight counts the proxied connections currently leased to this slot — not the
-// dials it has served. That distinction is the whole point: dials are short, the
-// streams they open are not, and it is the live stream count that decides how much
-// a member's single TCP connection has to carry (see [Client.acquireSlot]).
+// The live stream count belongs to the poolTransport, not this slot: after a
+// refresh, old streams may still be using the retired transport, while the new
+// member starts empty (see [Client.acquireSlot]).
 type transportSlot struct {
-	ptr      atomic.Pointer[poolTransport]
-	inflight atomic.Int64
+	ptr atomic.Pointer[poolTransport]
 }
 
 func (s *transportSlot) get() *poolTransport { return s.ptr.Load() }
@@ -237,7 +236,6 @@ func (s *transportSlot) get() *poolTransport { return s.ptr.Load() }
 // proxied connection ends. Every conn type owns its lease and releases it exactly
 // once from Close.
 type slotLease struct {
-	slot *transportSlot
 	rt   *poolTransport
 	once sync.Once
 }
@@ -246,7 +244,7 @@ func (l *slotLease) release() {
 	if l == nil {
 		return
 	}
-	l.once.Do(func() { l.slot.inflight.Add(-1) })
+	l.once.Do(func() { l.rt.inflight.Add(-1) })
 }
 
 type Client struct {
@@ -499,18 +497,28 @@ func (c *Client) Close() error {
 // the lease captures the *transport*, not the slot — a concurrent refresh must
 // never split a dial's halves across two connections.
 func (c *Client) acquireSlot() *slotLease {
-	start := c.slotIdx.Add(1) - 1
-	size := uint64(len(c.slots))
-	best := c.slots[start%size]
-	bestLoad := best.inflight.Load()
-	for i := uint64(1); i < size && bestLoad > 0; i++ {
-		candidate := c.slots[(start+i)%size]
-		if load := candidate.inflight.Load(); load < bestLoad {
-			best, bestLoad = candidate, load
+	for {
+		start := c.slotIdx.Add(1) - 1
+		size := uint64(len(c.slots))
+		bestSlot := c.slots[start%size]
+		best := bestSlot.get()
+		bestLoad := best.inflight.Load()
+		for i := uint64(1); i < size && bestLoad > 0; i++ {
+			candidateSlot := c.slots[(start+i)%size]
+			candidate := candidateSlot.get()
+			if load := candidate.inflight.Load(); load < bestLoad {
+				bestSlot, best, bestLoad = candidateSlot, candidate, load
+			}
 		}
+		best.inflight.Add(1)
+		// A refresh may have replaced this member during the scan. Do not send a
+		// new dial to a transport that has already left the pool.
+		if bestSlot.get() != best {
+			best.inflight.Add(-1)
+			continue
+		}
+		return &slotLease{rt: best}
 	}
-	best.inflight.Add(1)
-	return &slotLease{slot: best, rt: best.get()}
 }
 
 // refreshAllSlots swaps every pool member for a fresh transport, dropping the
