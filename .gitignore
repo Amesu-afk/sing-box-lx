@@ -24,3 +24,6 @@ AGENTS.md
 /test/cache.db
 /.audit-go-cache/
 /.codex-go-cache/
+/.gocache/
+/.gomodcache/
+/.gotmp/

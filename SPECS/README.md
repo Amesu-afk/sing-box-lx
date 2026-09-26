@@ -143,6 +143,10 @@ DoD-чеклистом и статусом `C`.
 
 | # | Задача | Статус | Суть |
 |---|--------|--------|------|
+| **061** | OLCRTC_LEGACY_HANDSHAKE | **I** | Android: совместимый manager handshake v1 и DeviceID для legacy QR. [SPEC.md](TASKS/061-OLCRTC_LEGACY_HANDSHAKE/SPEC.md) |
+| **060** | OLCRTC_MANAGER_QR_URI | **C** | Android: manager QR URI `provider@room:1`, runtime-параметры, 107 тестов и release alpha.54 (706). [SPEC.md](TASKS/060-OLCRTC_MANAGER_QR_URI/SPEC.md) |
+| **059** | OLCRTC_QR_SUBSCRIPTION_IMPORT | **C** | Android: импорт одиночного URI и HTTPS-подписки olcRTC через QR-код; 104 unit-теста и debug APK зелёные. [SPEC.md](TASKS/059-OLCRTC_QR_SUBSCRIPTION_IMPORT/SPEC.md) |
+| **058** | OLCRTC_ANDROID_CLIENT | **C** | Android: импорт `olcrtc://` и `sub.md`, общий gomobile runtime и lifecycle WebRTC-клиента. [SPEC.md](TASKS/058-OLCRTC_ANDROID_CLIENT/SPEC.md) |
 | **001** | FORK_BOOTSTRAP | **C** | Remotes, ветка `lx`, `Makefile.lx`, версия `-lx` (ldflags), CI-скелет, `lx-test/config` — ✅ собрано/проверено |
 | **002** | XHTTP_CLIENT_TRANSPORT | **C** | ✅ **live-validated** против Xray (3x-ui): packet-up/auto работают (handshake+DNS+HTTPS+download); stream-one — был баг, **исправлен в 011** |
 | **003** | AWG2_CLIENT_ENDPOINT | **C** | ✅ **Функционален, проверен живым AWG2-сервером** (handshake+keepalive+трафик). merged-форк Leadaxe/wireguard-go (sagernet+обфускация) через submodule; S1–S4/H1–H4/I1–I5 |
