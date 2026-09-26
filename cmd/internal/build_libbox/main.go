@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -80,6 +81,11 @@ func init() {
 	// rejects any wireguard-with-AWG or xhttp config at runtime ("support not built").
 	sharedTags = append(sharedTags, "with_xhttp", "with_awg")
 	// lx:end awg,xhttp
+	// lx:begin olcrtc
+	// The Android builder binds the olcRTC mobile package into the same AAR as
+	// libbox. Two gomobile AARs cannot coexist because both package one Go runtime.
+	sharedTags = append(sharedTags, "with_olcrtc")
+	// lx:end olcrtc
 	// lx:begin lx_command
 	// SPEC 014 — bake the libbox command-protocol extensions (URLTestOutbound, GetRules)
 	// into the AAR. Without the tag the generated RPCs are still registered but the
@@ -157,8 +163,8 @@ func checkJavaVersion() {
 	if err != nil {
 		log.Fatal(E.Cause(err, "check java version"))
 	}
-	if !strings.Contains(javaVersion, "openjdk 17") {
-		log.Fatal("java version should be openjdk 17")
+	if !strings.Contains(javaVersion, "openjdk 17") && !strings.Contains(javaVersion, "openjdk 21") {
+		log.Fatal("java version should be openjdk 17 or 21")
 	}
 }
 
@@ -190,6 +196,11 @@ func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 
 	args = append(args, "-tags", strings.Join(config.Tags, ","))
 	args = append(args, "./experimental/libbox")
+	// lx:begin olcrtc
+	if slices.Contains(config.Tags, "with_olcrtc") {
+		args = append(args, "github.com/openlibrecommunity/olcrtc/mobile")
+	}
+	// lx:end olcrtc
 
 	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
 	command.Stdout = os.Stdout
