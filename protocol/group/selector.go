@@ -168,7 +168,11 @@ func (s *Selector) NewConnection(ctx context.Context, conn net.Conn, metadata ad
 	if outboundHandler, isHandler := selected.(adapter.ConnectionHandler); isHandler {
 		outboundHandler.NewConnection(ctx, conn, metadata, onClose)
 	} else {
-		s.connection.NewConnection(ctx, selected, conn, metadata, onClose)
+		// lx:begin selector-interrupt-backport
+		// Register the selector as the dialer so SelectOutbound can interrupt this
+		// routed connection too. Mirrors sing-box upstream commit 515a73e4e.
+		s.connection.NewConnection(ctx, s, conn, metadata, onClose)
+		// lx:end selector-interrupt-backport
 	}
 }
 
@@ -178,7 +182,11 @@ func (s *Selector) NewPacketConnection(ctx context.Context, conn N.PacketConn, m
 	if outboundHandler, isHandler := selected.(adapter.PacketConnectionHandler); isHandler {
 		outboundHandler.NewPacketConnection(ctx, conn, metadata, onClose)
 	} else {
-		s.connection.NewPacketConnection(ctx, selected, conn, metadata, onClose)
+		// lx:begin selector-interrupt-backport
+		// See the TCP branch above: packet connections must belong to the selector
+		// interrupt group rather than directly to the currently selected outbound.
+		s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
+		// lx:end selector-interrupt-backport
 	}
 }
 
