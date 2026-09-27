@@ -7,7 +7,7 @@
 > described below.** For the real project, its issues and its releases, go there.
 >
 > This copy exists for one reason: **[TarnVPN](https://github.com/Amesu-afk/TarnVPN)** ships a
-> `libbox.aar` built from it, with a small number of extra patches on top (`git log --author=vanek`
+> `libbox.aar` built from it, with a small number of extra patches on top (`git log --author=Amesu`
 > — `override_destination` on the sniff action; the XHTTP and REALITY patches that used to live
 > here were superseded by the same fixes in upstream lx), and GPLv3 requires the source of what is actually
 > distributed. The Android app itself lives in `clients/android` as a submodule.
