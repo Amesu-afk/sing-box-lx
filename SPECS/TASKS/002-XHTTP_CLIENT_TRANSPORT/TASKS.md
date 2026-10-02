@@ -52,3 +52,16 @@
 - [x] lean-native клиент (`client.go`/`conn.go`/`register.go`) — `d1b434fc`
 - [x] padding в Referer, sessionId path-layout, stream-one bare-path fix (задача 011) — `5a398a5e`
 - [x] Лайв packet-up/auto против Xray/3x-ui (см. IMPLEMENTATION_REPORT v1)
+
+## Восстановление после сна — 2026-10-01
+
+- [x] Реестр физических сокетов переживает замену участников пула.
+- [x] Silent retirement очищает заменённых соседей и сохраняет принимающие трафик соединения.
+- [x] Полный reset закрывает активные/старые сокеты; завершившийся поздно dial старого поколения отвергается.
+- [x] HTTP/2 получает настоящий Close тела upload pipe и освобождает зависшее чтение ответа.
+- [x] Общий Android-планировщик учитывает screen/deep/light idle, отмену и wake cooldown.
+- [x] Обычное восстановление выполняет native network/DNS reset вместо полного reload ядра.
+- [x] Безопасный единичный DoH retry при пересечении reset, без продления caller deadline.
+- [x] Локальные HTTP/2-регрессии и Android policy/scheduler-тесты.
+- [x] Сборка/проверка обоих AAR и обоих вариантов APK на итоговом дереве: четыре ABI, 10 подписанных APK, Android 23/21.
+- [ ] Цикл сон → Telegram/YouTube на физическом телефоне, Wi-Fi и handover.

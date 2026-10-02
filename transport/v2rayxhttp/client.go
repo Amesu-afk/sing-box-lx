@@ -23,6 +23,7 @@ package v2rayxhttp
 
 import (
 	"context"
+	"io"
 	"math/big"
 	"math/rand"
 	"net"
@@ -111,10 +112,10 @@ var slowWarmThreshold = 5 * time.Second
 // until its first response header (handshakeRoundTrip). A miss means the pooled
 // connection is dead — the classic post-idle zombie, where the phone slept, NAT
 // dropped the silent TCP connections, and nothing tore them down. On a miss the
-// whole pool is swapped for fresh transports (refreshAllSlots). Crucially the
-// swap only redirects NEW dials; goroutines already relaying over a member keep
-// their own reference, so a false positive costs a few extra connections, never
-// a healthy-stream teardown. That is the property the per-conn ping lacked.
+// whole pool is swapped for fresh transports (refreshAllSlots). Existing streams
+// retain their member; retirement closes silent sockets across old members but
+// preserves connections with recent inbound traffic. An explicit network reset
+// closes every owned socket and invalidates unfinished dials from the old network.
 
 // poolTransport owns both the dial budget state and the number of live streams
 // on this particular HTTP/2 transport.
@@ -134,12 +135,18 @@ var slowWarmThreshold = 5 * time.Second
 type poolTransport struct {
 	rt                http.RoundTripper
 	warm              atomic.Bool
+	retired           atomic.Bool
 	inflight          atomic.Int64
+	pool              *poolConnections
+	generation        uint64
 	connectionsMu     sync.Mutex
 	activeConnections map[*trackedPoolConn]struct{}
 }
 
 func (t *poolTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.pool != nil && t.generation != t.pool.currentGeneration() {
+		return nil, net.ErrClosed
+	}
 	return t.rt.RoundTrip(req)
 }
 
@@ -158,8 +165,13 @@ func (t *poolTransport) CloseIdleConnections() {
 // non-idle. Without tracking, the pool can route new dials elsewhere but cannot
 // wake the app-side connection that remains pinned to the dead member.
 func (t *poolTransport) trackConnection(conn net.Conn) net.Conn {
-	tracked := &trackedPoolConn{Conn: conn, owner: t}
+	tracked := &trackedPoolConn{Conn: conn, owner: t, createdAt: time.Now()}
 	t.connectionsMu.Lock()
+	if t.pool != nil && !t.pool.register(tracked) {
+		t.connectionsMu.Unlock()
+		_ = tracked.Close()
+		return tracked
+	}
 	if t.activeConnections == nil {
 		t.activeConnections = make(map[*trackedPoolConn]struct{})
 	}
@@ -172,6 +184,9 @@ func (t *poolTransport) forgetConnection(conn *trackedPoolConn) {
 	t.connectionsMu.Lock()
 	delete(t.activeConnections, conn)
 	t.connectionsMu.Unlock()
+	if t.pool != nil {
+		t.pool.forget(conn)
+	}
 }
 
 // forceCloseConnections is reserved for a member that has already failed its
@@ -199,9 +214,10 @@ func (t *poolTransport) forceCloseConnections() int {
 
 type trackedPoolConn struct {
 	net.Conn
-	owner    *poolTransport
-	once     sync.Once
-	lastRead atomic.Int64
+	owner     *poolTransport
+	once      sync.Once
+	lastRead  atomic.Int64
+	createdAt time.Time
 }
 
 func (c *trackedPoolConn) Read(p []byte) (int, error) {
@@ -259,6 +275,7 @@ type Client struct {
 	slotIdx         atomic.Uint64
 	refreshMu       sync.Mutex
 	lastRefresh     time.Time
+	connections     *poolConnections
 	scheme          string
 	host            string
 	path            string
@@ -378,15 +395,6 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 			return member
 		}
 	}
-	slots := make([]*transportSlot, transportPoolSize)
-	for i := range slots {
-		s := &transportSlot{}
-		// Cold by construction: none of these has dialed yet, so the first dial over
-		// each gets freshHandshakeTimeout.
-		s.ptr.Store(newTransport())
-		slots[i] = s
-	}
-
 	var host string
 	if options.Host != "" {
 		host = options.Host
@@ -421,12 +429,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		plog = factory.NewLogger("xhttp-pool")
 	}
 
-	return &Client{
+	client := &Client{
 		ctx:             ctx,
 		dialer:          dialer,
 		serverAddr:      serverAddr,
 		newTransport:    newTransport,
-		slots:           slots,
+		connections:     &poolConnections{},
 		scheme:          scheme,
 		host:            host,
 		path:            path,
@@ -439,7 +447,14 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		realityEnabled:  tlsConfigIsReality(tlsConfig),
 		noGRPCHeader:    options.NoGRPCHeader,
 		plog:            plog,
-	}, nil
+	}
+	client.slots = make([]*transportSlot, transportPoolSize)
+	for i := range client.slots {
+		s := &transportSlot{}
+		s.ptr.Store(client.newPoolTransport())
+		client.slots[i] = s
+	}
+	return client, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
@@ -466,10 +481,26 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 }
 
 func (c *Client) Close() error {
+	// InterfaceUpdated also calls Close, then reuses this client. Replace the
+	// slots while invalidating captured old members and every outstanding dial.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	closed := 0
+	if c.connections != nil {
+		for _, conn := range c.connections.snapshot(true) {
+			_ = conn.Close()
+			closed++
+		}
+	}
 	for _, s := range c.slots {
-		if tr := s.get(); tr != nil {
+		if tr := s.ptr.Swap(c.newPoolTransport()); tr != nil {
+			tr.retired.Store(true)
 			tr.CloseIdleConnections()
 		}
+	}
+	c.lastRefresh = time.Time{}
+	if c.plog != nil && closed > 0 {
+		c.plog.Info("xhttp-pool: network reset closed ", closed, " owned socket(s), including replaced members")
 	}
 	return nil
 }
@@ -546,6 +577,7 @@ func (c *Client) refreshAllSlots() {
 	for _, s := range c.slots {
 		old := s.ptr.Swap(c.newPoolTransport())
 		if old != nil {
+			old.retired.Store(true)
 			old.CloseIdleConnections()
 		}
 	}
@@ -554,7 +586,13 @@ func (c *Client) refreshAllSlots() {
 // newPoolTransport wraps a freshly built transport as a cold pool member, so its
 // first dial is measured against freshHandshakeTimeout rather than the warm one.
 func (c *Client) newPoolTransport() *poolTransport {
-	return c.newTransport()
+	if c.connections == nil {
+		c.connections = &poolConnections{}
+	}
+	member := c.newTransport()
+	member.pool = c.connections
+	member.generation = c.connections.currentGeneration()
+	return member
 }
 
 // handshakeVia runs one handshake-bounded round trip over a pool member, giving a
@@ -609,8 +647,8 @@ func (c *Client) handshakeVia(pt *poolTransport, req *http.Request) (*http.Respo
 // and at the instant it runs rt still owns the stream that is in the middle of
 // timing out — so the connection is not idle and CloseIdleConnections skips it.
 // Moments later the cancelled stream is removed and rt becomes idle, but by then
-// rt is unreachable from the slots, so no future refresh will ever revisit it:
-// the swap only ever closes the pointer it just replaced. The zombie TCP
+// rt is unreachable from the slots, so CloseIdleConnections alone cannot revisit
+// it. The client-wide socket registry retains ownership of replaced members. A zombie TCP
 // connection and its http2 readLoop goroutine would then stay for as long as the
 // peer keeps them (on a NAT-dropped link: forever). The debounce widens the same
 // hole — a sibling dial timing out inside the window skips the refresh entirely.
@@ -618,15 +656,21 @@ func (c *Client) handshakeVia(pt *poolTransport, req *http.Request) (*http.Respo
 // Calling it after refreshAllSlots is what makes the ordering work: by then rt is
 // out of rotation. A production poolTransport reaps silent sockets but preserves
 // sockets with recent inbound traffic, where congestion may explain the timeout.
-// Other members' live streams are also preserved. The generic fallback keeps
+// Silent sockets on replaced siblings are reaped too. The generic fallback keeps
 // tests and alternate round-trippers reapable through CloseIdleConnections.
 func (c *Client) retireTransport(rt http.RoundTripper) {
 	c.refreshAllSlots()
 	if member, ok := rt.(*poolTransport); ok {
-		closed := member.forceCloseConnections()
+		closed := 0
+		if c.connections != nil {
+			closed = c.connections.reapRetired(member)
+		}
+		if member.pool != c.connections || member.pool == nil {
+			closed += member.forceCloseConnections()
+		}
 		if closed > 0 && c.plog != nil {
 			c.plog.Warn("xhttp-pool: force-closed ", closed,
-				" active socket(s) on the timed-out member so pinned app connections can reopen")
+				" silent socket(s) across retired members so pinned app connections can reopen")
 		}
 		member.CloseIdleConnections()
 		return
@@ -679,7 +723,14 @@ func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr strin
 	c.applyMeta(request, basePath, sessionID, seqStr)
 	c.applyXPadding(request)
 	if body != nil {
-		request.Body = readCloser{body}
+		// HTTP/2 closes the upload body when its connection dies. Preserve the
+		// pipe's Close so a blocked upload reader can exit and publish the error
+		// to the response body; a no-op Close leaves both halves stuck forever.
+		if closer, ok := body.(io.ReadCloser); ok {
+			request.Body = closer
+		} else {
+			request.Body = readCloser{body}
+		}
 	}
 	return request.WithContext(ctx), nil
 }
