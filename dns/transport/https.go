@@ -170,7 +170,15 @@ func (t *HTTPSTransport) resetTransportLocked() {
 
 func (t *HTTPSTransport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	startAt := time.Now()
+	// lx:begin xhttp-recovery
+	initialTransport := t.recoveryTransport()
+	// lx:end xhttp-recovery
 	response, err := t.exchange(ctx, message)
+	// lx:begin xhttp-recovery
+	if err != nil {
+		response, err = t.exchangeAfterNetworkReset(ctx, message, initialTransport, err)
+	}
+	// lx:end xhttp-recovery
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			t.transportAccess.Lock()
