@@ -196,3 +196,22 @@ Xray/REALITY, Wi-Fi/NAT, поведение приложений и работа
 Таймауты рукопожатия, общий HTTP/2 ping и протокольные параметры не менялись.
 Единственное новое касание upstream Go — маркеры в `dns/transport/https.go`;
 Go dependencies и build wiring не менялись.
+
+
+## Кандидат точечного retirement — 2026-10-19
+
+Один timeout заменяет только отказавший элемент. Идентичность под refreshMu объединяет конкурентные ошибки и защищает новый пул от старых timeout. Quiet healthy siblings сохраняются, независимые отказы обрабатываются отдельно. Полный reset и socket ownership сохранены; история решения — HISTORY.md.
+
+Проверены 55 Go-тестов, vet, tagged CLI/config и untagged build; 255 Android unit-тестов; обе release-сборки и lintVital; восемь native payload и подписи v1/v2/v3 с прежним сертификатом. Alpha.67/code719/minSdk23/21. Новых upstream-правок/deps/wiring нет.
+
+Отчёт и команды: D:/TarnVpn/output/youtube-buffering-candidate-20261019/REPORT.md. Физическая проверка остаётся открытой. Установка и публикация не выполнялись.
+
+## Общая надёжность XHTTP — 2026-10-21
+
+В новом handshake_budget.go ожидание вызывающего ограничено независимо от реакции HTTP/2 RoundTrip на отмену. Unbuffered handoff определяет владельца ответа; поздние, отклонённые и ненужные packet-up ack тела очищаются отдельно. Warm-state снимается после последнего physical socket, без отмены статуса другого активного сокета. Lifecycle установленных upload и освобождение protocol Write сопровождаются в существующей задаче 050.
+
+Новый handshake_observation.go добавляет request ID через WarnContext, stable member/generation и httptrace-этапы TCP/HTTP2/headers/ответа. URL/credentials/payload в WARN не добавляются. Ошибка больше не объявляет непроверенную причину stale pooled connection. Размер пула 8 и budgets 10/15/60s сохранены; blanket ping и повтор уже переданных stream-one данных не введены.
+
+Проверены 70 Go-тестов, vet, tagged CLI/config и полный untagged build; 255 Android unit-тестов, обе release-сборки и lintVital; оба AAR и восемь native payload в APK после стандартного strip; подписи v1/v2/v3 прежним сертификатом alpha.67, package/version/minSdk и SHA-256. Race-прогон не стартовал из-за отсутствия gcc; установленный APK на телефоне не проверен. Новых upstream-правок, deps или build wiring нет; APK alpha.68/code720 сохранены локально, без публикации.
+
+Подробный анализ, пределы доказательств, источники и команды: D:/TarnVpn/output/xhttp-general-reliability-20261021/REPORT.md. Причина пользовательской задержки 6.099s остаётся открытой; эти исправления подтверждены локальными воспроизведениями общих дефектов клиента, а не объявлены доказанным устранением любого сетевого зависания.

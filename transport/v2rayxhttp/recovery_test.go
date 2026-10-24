@@ -180,7 +180,7 @@ func TestHTTP2WakeResetAvoidsWarmBlackholeTimeout(t *testing.T) {
 	}
 }
 
-func TestHTTP2RetirementReapsSilentSibling(t *testing.T) {
+func TestHTTP2RetirementReapsEachFailedMember(t *testing.T) {
 	defer swapHandshakeTimeout(100 * time.Millisecond)()
 	client, dialer := recoveryClient(t, 2)
 	_ = recoveryStream(t, client)
@@ -192,6 +192,10 @@ func TestHTTP2RetirementReapsSilentSibling(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	done := recoveryRead(sibling)
 	client.retireTransport(failed)
+	if dialer.snapshot()[1].closed.Load() {
+		t.Fatal("sibling was closed without its own failure")
+	}
+	client.retireTransport(client.slots[1].get())
 	for index, socket := range dialer.snapshot() {
 		if !socket.closed.Load() {
 			t.Fatalf("silent socket %d survived retirement", index)

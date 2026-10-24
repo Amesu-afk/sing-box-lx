@@ -58,7 +58,8 @@ func TestRefreshCountsOnlyStreamsOnFreshMembers(t *testing.T) {
 		t.Fatalf("unexpected old load: %v", got)
 	}
 
-	c.refreshAllSlots()
+	c.retireTransport(oldMembers[0])
+	c.retireTransport(oldMembers[1])
 	freshMembers := [2]*poolTransport{c.slots[0].get(), c.slots[1].get()}
 	for i, member := range freshMembers {
 		if member == oldMembers[i] || member.inflight.Load() != 0 {

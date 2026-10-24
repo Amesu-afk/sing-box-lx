@@ -143,6 +143,7 @@ DoD-чеклистом и статусом `C`.
 
 | # | Задача | Статус | Суть |
 |---|--------|--------|------|
+| **062** | ANDROID_NETWORK_RECOVERY_HANDOVER | **C** | Android: смена сети во время recovery сохраняется, отмена не теряет новое событие; 255 тестов и локальные подписанные APK alpha.66 / 718 проверены. Повторные уведомления интерфейса сохранены, поскольку native callback не даёт подтверждение. Поведение на телефоне отдельно. [SPEC.md](TASKS/062-ANDROID_NETWORK_RECOVERY_HANDOVER/SPEC.md) |
 | **061** | OLCRTC_LEGACY_HANDSHAKE | **I** | Android: совместимый manager handshake v1 и DeviceID для legacy QR. [SPEC.md](TASKS/061-OLCRTC_LEGACY_HANDSHAKE/SPEC.md) |
 | **060** | OLCRTC_MANAGER_QR_URI | **C** | Android: manager QR URI `provider@room:1`, runtime-параметры, 107 тестов и release alpha.54 (706). [SPEC.md](TASKS/060-OLCRTC_MANAGER_QR_URI/SPEC.md) |
 | **059** | OLCRTC_QR_SUBSCRIPTION_IMPORT | **C** | Android: импорт одиночного URI и HTTPS-подписки olcRTC через QR-код; 104 unit-теста и debug APK зелёные. [SPEC.md](TASKS/059-OLCRTC_QR_SUBSCRIPTION_IMPORT/SPEC.md) |

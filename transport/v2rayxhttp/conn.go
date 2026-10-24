@@ -60,13 +60,13 @@ var handshakeTimeout = 10 * time.Second
 // a phone on a weak uplink can legitimately spend tens of seconds on that. The
 // number is chosen to be unreachable by a working link rather than tight — the
 // win is turning an unbounded stall into a bounded one that ends with the pool
-// being refreshed. A var so tests can shrink it, mirroring handshakeTimeout.
+// being replaced. A var so tests can shrink it, mirroring handshakeTimeout.
 var uploadTimeout = 60 * time.Second
 
 // errHandshakeTimeout signals that a pooled connection produced no response
-// header in time — the caller refreshes the pool and, for an idempotent GET
+// header in time — the caller replaces that member and, for an idempotent GET
 // dial, retries once on a fresh connection.
-var errHandshakeTimeout = E.New("v2ray-xhttp: handshake timed out (stale pooled connection)")
+var errHandshakeTimeout = E.New("v2ray-xhttp: handshake timed out before response headers")
 
 // handshakeRoundTrip runs rt.RoundTrip(req) but bounds only the time until the
 // response headers arrive; once they do, the stream may live indefinitely. On a
@@ -79,42 +79,7 @@ var errHandshakeTimeout = E.New("v2ray-xhttp: handshake timed out (stale pooled 
 // are routinely cancelled once DialContext returns, while the XHTTP stream must
 // remain alive until the proxied connection itself closes (SPEC 050).
 func handshakeRoundTrip(rt http.RoundTripper, req *http.Request, timeout time.Duration) (*http.Response, error) {
-	parentCtx := req.Context()
-	reqCtx, cancel := context.WithCancel(context.WithoutCancel(parentCtx))
-	stopParent := context.AfterFunc(parentCtx, cancel)
-	var timedOut atomic.Bool
-	timer := time.AfterFunc(timeout, func() {
-		timedOut.Store(true)
-		cancel()
-	})
-	resp, err := rt.RoundTrip(req.WithContext(reqCtx))
-	if err != nil {
-		stopParent()
-		timer.Stop()
-		cancel()
-		if timedOut.Load() {
-			return nil, errHandshakeTimeout
-		}
-		return nil, err
-	}
-	if !stopParent() {
-		// Parent cancellation won the race before the response was published.
-		// Treat this as a cancelled dial; only cancellation after this handoff is
-		// detached from the long-lived stream.
-		timer.Stop()
-		resp.Body.Close()
-		cancel()
-		return nil, parentCtx.Err()
-	}
-	if !timer.Stop() {
-		// The timer fired in the narrow window between headers arriving and this
-		// Stop, so the context is already cancelled and the stream is unusable.
-		resp.Body.Close()
-		cancel()
-		return nil, errHandshakeTimeout
-	}
-	resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
-	return resp, nil
+	return boundedHeaderRoundTrip(rt, req, timeout)
 }
 
 // cancelBody defers a context cancel to body Close, so the handshake-timeout
@@ -126,9 +91,8 @@ type cancelBody struct {
 }
 
 func (b *cancelBody) Close() error {
-	err := b.ReadCloser.Close()
 	b.once.Do(b.cancel)
-	return err
+	return b.ReadCloser.Close()
 }
 
 // dialDownloadStream opens the download side (a GET whose response body is the
@@ -158,7 +122,7 @@ func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (*slo
 			return nil, nil, E.Cause(err, "open download")
 		}
 		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
+			discardHeaderResponse(resp)
 			lease.release()
 			return nil, nil, E.New("v2ray-xhttp: unexpected download status: ", resp.Status)
 		}
@@ -205,7 +169,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 		if err != nil {
 			stopGuard()
 			// stream-one carries its upload body on the same stream, so it can't
-			// be replayed on a fresh connection here; refresh the pool so the
+			// be replayed on a fresh connection here; replace the failed member so the
 			// app's immediate reopen lands on a live member, and fail this dial.
 			if err == errHandshakeTimeout {
 				c.retireTransport(lease.rt)
@@ -223,7 +187,7 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 		// where ctx.Done could close the upload pipe after the stream was live.
 		stopGuard()
 		if response.StatusCode != http.StatusOK {
-			response.Body.Close()
+			discardHeaderResponse(response)
 			lease.release()
 			conn.setupReader(nil, E.New("v2ray-xhttp: unexpected status: ", response.Status))
 			return
@@ -274,18 +238,29 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string) (net.Conn, 
 	if err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		discardHeaderResponse(downResp)
+		lease.release()
+		return nil, err
+	}
 
 	// Upload: streamed body request using the configured upload method.
 	pipeReader, pipeWriter := io.Pipe()
-	upReq, err := c.newRequest(ctx, c.meta.uplinkHTTPMethod, sessionID, "", pipeReader)
+	uploadCtx, cancelUpload := context.WithCancel(context.WithoutCancel(ctx))
+	upReq, err := c.newRequest(uploadCtx, c.meta.uplinkHTTPMethod, sessionID, "", pipeReader)
 	if err != nil {
-		downResp.Body.Close()
+		cancelUpload()
+		pipeReader.Close()
+		pipeWriter.Close()
+		discardHeaderResponse(downResp)
 		lease.release()
 		return nil, err
 	}
 	c.applyGRPCHeader(upReq)
 	conn := newSplitConn(downResp.Body, pipeReader, pipeWriter, c.serverAddr, lease)
+	conn.cancelUpload = cancelUpload
 	go func() {
+		defer cancelUpload()
 		// Deliberately not handshake-bounded, unlike the packet-up uploads: this
 		// request body stays open for the life of the connection, so there is no
 		// guarantee about when its response headers arrive and any budget here
@@ -312,7 +287,12 @@ func (c *Client) dialPacketUp(ctx context.Context, sessionID string) (net.Conn, 
 	// in flight. Without it a POST left blocked on a dead pooled connection keeps
 	// its goroutine and its HTTP/2 stream after the proxied connection is long
 	// gone, and the stream is only reclaimed when the peer or the OS gives up.
-	uploadCtx, cancelUploads := context.WithCancel(ctx)
+	if err := ctx.Err(); err != nil {
+		discardHeaderResponse(downResp)
+		lease.release()
+		return nil, err
+	}
+	uploadCtx, cancelUploads := context.WithCancel(context.WithoutCancel(ctx))
 	return &packetConn{
 		ctx:           uploadCtx,
 		cancelUploads: cancelUploads,
@@ -486,6 +466,11 @@ func (c *streamConn) setupReader(reader io.ReadCloser, err error) {
 	c.reader = reader
 	c.readerErr = err
 	close(c.created)
+	if err != nil {
+		// A transport can be stuck before reading the upload pipe. Publishing
+		// the read error must also release a pending VLESS/encryption Write.
+		c.writeDeadline.reader.CloseWithError(err)
+	}
 	// Close() may have already run and skipped the body because RoundTrip had
 	// not produced one yet; in that case it is ours to release.
 	if reader != nil && c.closed.Load() {
@@ -590,11 +575,12 @@ func (c *streamConn) NeedAdditionalReadDeadline() bool { return true }
 // mode). The download body is ready immediately; the upload POST is driven by
 // the caller in a goroutine.
 type splitConn struct {
-	reader     io.ReadCloser
-	writer     *io.PipeWriter
-	serverAddr M.Socksaddr
-	lease      *slotLease
-	closeOnce  sync.Once
+	reader       io.ReadCloser
+	writer       *io.PipeWriter
+	serverAddr   M.Socksaddr
+	lease        *slotLease
+	closeOnce    sync.Once
+	cancelUpload context.CancelFunc
 	// lx: 050 — same unkillable-Write exposure as streamConn; the reader here is
 	// bound up front, so an expired read deadline just closes it.
 	writeDeadline writeDeadline
@@ -618,7 +604,8 @@ func newSplitConn(reader io.ReadCloser, uploadReader *io.PipeReader, writer *io.
 }
 
 func (c *splitConn) uploadFailed(err error) {
-	c.writer.CloseWithError(err)
+	c.writeDeadline.reader.CloseWithError(err)
+	_ = c.Close()
 }
 
 func (c *splitConn) Read(b []byte) (int, error) {
@@ -629,6 +616,9 @@ func (c *splitConn) Write(b []byte) (int, error) { return c.writer.Write(b) }
 
 func (c *splitConn) Close() error {
 	c.closeOnce.Do(func() {
+		if c.cancelUpload != nil {
+			c.cancelUpload()
+		}
 		// lx: 050 — drop armed timers before closing, as in streamConn.
 		c.writeDeadline.stop()
 		c.readDeadline.stop()
@@ -746,10 +736,12 @@ func (c *packetConn) sendPacket(b []byte) error {
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
-		response.Body.Close()
+		discardHeaderResponse(response)
 		return E.New("v2ray-xhttp: unexpected upload status: ", response.Status)
 	}
-	drainAndClose(response.Body)
+	// Successful headers acknowledge this finite packet. There is no response
+	// payload to consume; a peer/proxy can leave its body open indefinitely.
+	discardHeaderResponse(response)
 	return nil
 }
 

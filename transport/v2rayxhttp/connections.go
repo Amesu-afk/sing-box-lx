@@ -53,7 +53,8 @@ func (p *poolConnections) snapshot(reset bool) []*trackedPoolConn {
 }
 
 // reapRetired preserves receiving streams and cold sibling handshakes. Only
-// members removed from rotation, or the member that actually timed out, qualify.
+// members removed from rotation by their own timeout, or the member that actually
+// timed out, qualify. A quiet current sibling is never evidence of a failure.
 func (p *poolConnections) reapRetired(failed *poolTransport) int {
 	closed := 0
 	for _, conn := range p.snapshot(false) {

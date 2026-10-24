@@ -154,10 +154,9 @@ func TestHandshakeViaGivesColdMemberTheLargerBudget(t *testing.T) {
 	}
 }
 
-// refreshAllSlots swaps every member for a fresh transport, and a second call
-// inside the debounce window is a no-op (so the burst of stalled initial dials
-// after wake rebuilds the pool exactly once).
-func TestRefreshAllSlotsSwapsThenDebounces(t *testing.T) {
+// Independent failed members must each be replaced immediately; duplicate
+// failures of an old member must not disturb its replacement or any sibling.
+func TestRetireMembersReplacesIndependentFailures(t *testing.T) {
 	c := newTestClient(3)
 
 	before := make([]*poolTransport, len(c.slots))
@@ -165,10 +164,10 @@ func TestRefreshAllSlotsSwapsThenDebounces(t *testing.T) {
 		before[i] = s.get()
 	}
 
-	c.refreshAllSlots()
+	c.retireTransport(before[0])
 	for i, s := range c.slots {
-		if s.get() == before[i] {
-			t.Fatalf("slot %d was not swapped by refreshAllSlots", i)
+		if (s.get() != before[i]) != (i == 0) {
+			t.Fatalf("slot %d was not isolated from the failed member", i)
 		}
 	}
 
@@ -176,28 +175,33 @@ func TestRefreshAllSlotsSwapsThenDebounces(t *testing.T) {
 	for i, s := range c.slots {
 		afterFirst[i] = s.get()
 	}
-	c.refreshAllSlots() // within slotRefreshDebounce → must not swap again
+	c.retireTransport(before[0])
 	for i, s := range c.slots {
 		if s.get() != afterFirst[i] {
-			t.Fatalf("slot %d swapped again inside the debounce window", i)
+			t.Fatalf("slot %d swapped again after a duplicate failure", i)
 		}
+	}
+	c.retireTransport(before[1])
+	if c.slots[1].get() == before[1] || c.slots[0].get() != afterFirst[0] || c.slots[2].get() != before[2] {
+		t.Fatal("second independent failure was not isolated")
 	}
 }
 
 // A member rebuilt by a refresh must come back cold, or the dial that follows a
 // pool swap — the one that has to redo the whole TLS/REALITY handshake — would be
 // judged against the warm budget and fail on exactly the slow link this protects.
-func TestRefreshAllSlotsYieldsColdMembers(t *testing.T) {
+func TestRetireMemberYieldsColdReplacement(t *testing.T) {
 	c := newTestClient(2)
 	for _, s := range c.slots {
 		s.get().warm.Store(true)
 	}
 
-	c.refreshAllSlots()
-	for i, s := range c.slots {
-		if s.get().warm.Load() {
-			t.Fatalf("slot %d came back warm from refreshAllSlots", i)
-		}
+	c.retireTransport(c.slots[0].get())
+	if c.slots[0].get().warm.Load() {
+		t.Fatal("replacement member came back warm")
+	}
+	if !c.slots[1].get().warm.Load() {
+		t.Fatal("healthy sibling lost its warm state")
 	}
 }
 
@@ -210,18 +214,11 @@ type recordingTransport struct {
 
 func (t *recordingTransport) CloseIdleConnections() { t.closed.Add(1) }
 
-// The regression this pins: a transport that timed out is NOT closed by the pool
-// refresh (at swap time its dying stream still holds the connection, so it is not
-// idle), and once swapped out it is unreachable from the slots, so no later
-// refresh can ever revisit it. retireTransport must therefore close it directly —
-// including when the debounce suppresses the refresh entirely, which is exactly
-// the case a sibling dial hits during a post-wake storm.
-func TestRetireTransportClosesTimedOutMemberDespiteDebounce(t *testing.T) {
+// A detached transport must still release its connections, without replacing
+// unrelated current members just because its old request has timed out.
+func TestRetireTransportClosesDetachedTransport(t *testing.T) {
 	c := newTestClient(2)
 
-	// Burn the debounce window, so the refresh inside retireTransport is a no-op and
-	// only the direct close can account for the connection being reaped.
-	c.refreshAllSlots()
 	sealed := make([]*poolTransport, len(c.slots))
 	for i, s := range c.slots {
 		sealed[i] = s.get()
@@ -237,7 +234,7 @@ func TestRetireTransportClosesTimedOutMemberDespiteDebounce(t *testing.T) {
 	}
 	for i, s := range c.slots {
 		if s.get() != sealed[i] {
-			t.Fatalf("slot %d was swapped inside the debounce window", i)
+			t.Fatalf("slot %d was swapped for an unrelated detached transport", i)
 		}
 	}
 }
