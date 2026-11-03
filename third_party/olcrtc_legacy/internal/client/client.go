@@ -110,16 +110,16 @@ type HealthFunc func(control.Status)
 
 // Config holds runtime configuration for [Run] and [RunWithReady].
 type Config struct {
-	Transport        string
-	Carrier          string
-	RoomURL          string
-	ChannelID        string
-	KeyHex           string
-	LocalAddr        string
-	DNSServer        string
-	Insecure         bool
-	SOCKSUser        string
-	SOCKSPass        string
+	Transport string
+	Carrier   string
+	RoomURL   string
+	ChannelID string
+	KeyHex    string
+	LocalAddr string
+	DNSServer string
+	Insecure  bool
+	SOCKSUser string
+	SOCKSPass string
 	// UDPEnabled gates UDP ASSOCIATE: when false, UDP ASSOCIATE requests are
 	// refused with ErrUDPDisabled (SOCKS reply 0x07). Default off until the
 	// relay proves itself on device; flip via the app's UDP toggle.
@@ -243,8 +243,9 @@ func (c *Client) bringUpLink(
 		cancel()
 	})
 	ln.SetShouldReconnect(func() bool { return ctx.Err() == nil })
+	var startupReady atomic.Bool
 	ln.SetReconnectCallback(func() {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !startupReady.Load() {
 			return
 		}
 		// Carrier callback fires after the link is back up. If handshake
@@ -257,25 +258,9 @@ func (c *Client) bringUpLink(
 	if err := ln.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect link: %w", err)
 	}
-	if err := waitForPeer(ctx, ln); err != nil {
-		return err
-	}
-
-	if err := waitForSendable(ctx, ln); err != nil {
-		return err
-	}
-
-	c.conn = muxconn.New(ln, c.cipher)
-	sess, err := smux.Client(c.conn, runtime.SmuxConfigFor(ln))
+	sess, control, sid, err := c.openInitialSession(ctx)
 	if err != nil {
-		return fmt.Errorf("smux client: %w", err)
-	}
-
-	control, sid, err := openControlStream(ctx, sess, c.deviceID, c.claims)
-	if err != nil {
-		_ = sess.Close()
-		_ = c.conn.Close()
-		return fmt.Errorf("handshake: %w", err)
+		return err
 	}
 	logger.Infof("session %s opened (device=%s)", sid, c.deviceID)
 
@@ -286,6 +271,7 @@ func (c *Client) bringUpLink(
 	c.sessMu.Unlock()
 	c.recordSession(sid)
 	c.startControlLoop(ctx, cfg, cancel, control)
+	startupReady.Store(true)
 
 	go ln.WatchConnection(ctx)
 	return nil

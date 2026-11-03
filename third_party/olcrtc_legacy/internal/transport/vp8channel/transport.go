@@ -868,7 +868,6 @@ func (s *vp8FrameState) processRTPPacket(pkt *rtp.Packet) []byte {
 
 func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
 	var state vp8FrameState
-	reorder := newReorderBuffer()
 	buf := make([]byte, rtpBufSize)
 
 	for {
@@ -882,11 +881,10 @@ func (p *streamTransport) readVP8Track(track *webrtc.TrackRemote) {
 			continue
 		}
 
-		for _, ordered := range reorder.push(pkt) {
-			frame := state.processRTPPacket(ordered)
-			if frame == nil {
-				continue
-			}
+		// Recover lost payloads through KCP rather than holding every later
+		// frame behind a missing RTP packet during low-rate startup traffic.
+		frame := state.processRTPPacket(pkt)
+		if frame != nil {
 			p.handleIncomingFrame(frame)
 		}
 	}

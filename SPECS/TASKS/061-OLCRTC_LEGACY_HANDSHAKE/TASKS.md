@@ -21,3 +21,11 @@
   ten classes.
 - Live manager handshake remains device-unverified because no ADB device was
   connected during the build.
+
+## Восстановление после перезапуска сервера
+
+- [x] Воспроизвести таймаут Jitsi и блокировку очереди Telemost на мобильном runtime.
+- [x] Исправить ожидание удалённого bridge, начальный EOF и потерю RTP.
+- [x] Проверить пакеты Go и собрать обе AAR и подписанные APK alpha.69.
+- [x] Проверить HTTPS до/после простоя и повторный вход Jitsi на живом сервере.
+- [x] Пользователь подтвердил установку APK alpha.69: оба профиля подключаются, сайты открываются на физическом Android.
