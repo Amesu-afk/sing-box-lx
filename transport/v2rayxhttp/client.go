@@ -297,6 +297,7 @@ type Client struct {
 	path            string
 	mode            string
 	headers         http.Header
+	download        *downloadConfig
 	paddingRange    intRange
 	sessionIDTable  string
 	sessionIDLength intRange
@@ -328,6 +329,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	mode := options.Mode
 	if mode == "" {
 		mode = modeAuto
+	}
+	if mode == modeAuto && options.DownloadSettings != nil {
+		// Xray resolves auto to stream-up when a download block is present: its
+		// upload and download halves are independent requests, which is what an
+		// asymmetric download needs.
+		mode = modeStreamUp
 	}
 	switch mode {
 	case modeAuto, modePacketUp, modeStreamUp, modeStreamOne:
@@ -476,6 +483,17 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		client.slots[i] = s
 	}
 	client.applyXMuxConfig(xmux)
+	client.download, err = buildDownloadConfig(
+		options.DownloadSettings,
+		serverAddr,
+		tlsConfig != nil,
+		host,
+		path,
+		headers,
+	)
+	if err != nil {
+		return nil, err
+	}
 	return client, nil
 }
 
@@ -724,11 +742,15 @@ func (c *Client) retireTransport(rt http.RoundTripper) {
 // as configured; applyXPadding attaches the padding. The base path is set via
 // sHTTP.URLSetPath so percent-encoding matches the rest of sing-box.
 func (c *Client) baseURL() (*url.URL, error) {
+	return c.baseURLFor(c.path)
+}
+
+func (c *Client) baseURLFor(path string) (*url.URL, error) {
 	u := &url.URL{
 		Scheme: c.scheme,
 		Host:   c.serverAddr.String(),
 	}
-	if err := sHTTP.URLSetPath(u, c.path); err != nil {
+	if err := sHTTP.URLSetPath(u, path); err != nil {
 		return nil, E.Cause(err, "parse path")
 	}
 	if !strings.HasPrefix(u.Path, "/") {
@@ -743,7 +765,36 @@ func (c *Client) baseURL() (*url.URL, error) {
 // bare path with no sessionId, which is how the server routes the bidirectional
 // branch). An empty seqStr emits no seq (stream modes).
 func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr string, body interface{ Read([]byte) (int, error) }) (*http.Request, error) {
-	u, err := c.baseURL()
+	return c.newRequestWith(ctx, method, sessionID, seqStr, body, c.host, c.path, c.headers)
+}
+
+// newDownloadRequest builds the GET half of a packet-up/stream-up session. With
+// a download block configured it uses the alternate Host/path/headers (the CDN
+// routing case); otherwise it is byte-for-byte what newRequest produces.
+func (c *Client) newDownloadRequest(ctx context.Context, sessionID string) (*http.Request, error) {
+	if c.download == nil {
+		return c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
+	}
+	return c.newRequestWith(
+		ctx,
+		http.MethodGet,
+		sessionID,
+		"",
+		nil,
+		c.download.host,
+		c.download.path,
+		c.download.headers,
+	)
+}
+
+func (c *Client) newRequestWith(
+	ctx context.Context,
+	method, sessionID, seqStr string,
+	body interface{ Read([]byte) (int, error) },
+	host, path string,
+	headers http.Header,
+) (*http.Request, error) {
+	u, err := c.baseURLFor(path)
 	if err != nil {
 		return nil, err
 	}

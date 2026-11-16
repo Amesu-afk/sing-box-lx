@@ -103,7 +103,7 @@ func (b *cancelBody) Close() error {
 // connection and the slot's capacity is returned when the conn closes.
 func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (*slotLease, *http.Response, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		req, err := c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
+		req, err := c.newDownloadRequest(ctx, sessionID)
 		if err != nil {
 			return nil, nil, err
 		}
