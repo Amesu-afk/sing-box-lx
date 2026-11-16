@@ -1,6 +1,7 @@
 package v2rayxhttp
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net"
@@ -39,13 +40,15 @@ func (c *Client) applyGRPCHeader(request *http.Request) {
 // send buffer for seconds, so a merely-slow warm member tripped the budget, was
 // declared dead, and refreshed the WHOLE pool — a mass reconnect of all REALITY
 // handshakes that the user feels as a stutter, and one latency spike could cascade.
-// 10s still caps the post-idle zombie stall well under the tens-of-seconds a dead
-// socket runs to, and stays below the cold [freshHandshakeTimeout]. A warm handshake
-// that comes back slower than the old budget is logged (slowWarmThreshold) so a
-// device test can show how much churn the old value was causing. A cold member is
+// Tightened 10s→7s (12.11.2026): the field log of 21.10 showed a successful warm
+// handshake at 6.099s, so 10s was buying almost no extra safety but made every
+// genuinely dead warm member cost the user a full ~10s pause before single-member
+// retirement could replace it. 7s keeps a margin over that measured success,
+// remains above [slowWarmThreshold] (so slow-but-live links are still logged, not
+// churned) and stays below the cold [freshHandshakeTimeout]. A cold member is
 // measured against [freshHandshakeTimeout] instead — it has a TLS/REALITY handshake
 // to pay for first. A var (not const) so tests can shrink it, mirroring timeNow.
-var handshakeTimeout = 10 * time.Second
+var handshakeTimeout = 7 * time.Second
 
 // uploadTimeout bounds one packet-up upload POST: a finite body posted to
 // "<path>/<sessionId>/<seq>", answered by a short ack. Until it existed this was
@@ -143,6 +146,11 @@ func (c *Client) dialDownloadStream(ctx context.Context, sessionID string) (*slo
 func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn, error) {
 	_ = sessionID // intentionally unused: stream-one sends no sessionId on the wire
 	pipeReader, pipeWriter := io.Pipe()
+	// The recorder owns the upload side for the conn's whole life: writes made
+	// before the first response headers are buffered, so a dial that lands on
+	// a dead pool member is replayed on a fresh one instead of failing.
+	// lx: SPEC 050 follow-up — single replay, see retryStreamOneAttempt.
+	rec := newUploadRecorder(pipeWriter, pipeReader)
 	// stream-one carries a body, so it uses the configured upload method (default
 	// POST); the empty sessionID keeps the request on the bare path.
 	request, err := c.newRequest(ctx, c.meta.uplinkHTTPMethod, "", "", pipeReader)
@@ -152,25 +160,27 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 	c.applyGRPCHeader(request)
 
 	lease := c.acquireSlot()
-	conn := newStreamConn(pipeReader, pipeWriter, c.serverAddr, lease)
+	conn := newStreamConn(pipeReader, rec, rec, c.serverAddr, lease)
 	// lx: 050 — the conn is handed up before RoundTrip has raised the stream, so
 	// anything written meanwhile (the VLESS/encryption handshake) blocks on an
 	// unread pipe. Until the stream is up, cancelling the dial context must free
 	// that write. The guard is stopped immediately before `setupReader`: waiting
 	// for it there makes the handoff and cancellation mutually exclusive, so a
 	// cancellation that races with the response cannot tear down a live stream.
-	stopGuard := watchDialContext(ctx, conn.created, func(err error) {
-		// Break the pipe from the read half so the blocked Write sees this error
-		// rather than a bare ErrClosedPipe (see writeDeadline).
-		pipeReader.CloseWithError(err)
-	})
+	// It follows the recorder, so it still releases writers after a retry moved
+	// them onto the replay pipe.
+	stopGuard := watchDialContext(ctx, conn.created, conn.breakUpload)
 	go func() {
 		response, err := c.handshakeVia(lease.rt, request)
+		if err == errHandshakeTimeout && ctx.Err() == nil {
+			response, err = c.retryStreamOneAttempt(ctx, conn, rec, request, lease)
+			lease = conn.currentLease()
+		}
 		if err != nil {
 			stopGuard()
-			// stream-one carries its upload body on the same stream, so it can't
-			// be replayed on a fresh connection here; replace the failed member so the
-			// app's immediate reopen lands on a live member, and fail this dial.
+			// A timeout retires the member it landed on. The first attempt's
+			// member was already retired inside the retry; a timeout here
+			// means the replacement is dead too.
 			if err == errHandshakeTimeout {
 				c.retireTransport(lease.rt)
 			}
@@ -192,9 +202,52 @@ func (c *Client) dialStreamOne(ctx context.Context, sessionID string) (net.Conn,
 			conn.setupReader(nil, E.New("v2ray-xhttp: unexpected status: ", response.Status))
 			return
 		}
+		rec.discard()
 		conn.setupReader(response.Body, nil)
 	}()
 	return conn, nil
+}
+
+// retryStreamOneAttempt replays a timed-out stream-one dial on a fresh pool
+// member. The recorder kept every pre-headers upload byte, so the retry body
+// is the full handshake followed by the live tail of the new pipe —
+// indistinguishable on the wire from a first attempt that had landed on a
+// live member. Single attempt, mirroring the download GET's `attempt < 2`:
+// a second timeout fails the dial instead of looping.
+//
+// The conn moves to the replacement lease; on failure the replacement is
+// already released here, so the shared outcome path only accounts for what
+// the conn actually holds.
+func (c *Client) retryStreamOneAttempt(ctx context.Context, conn *streamConn, rec *uploadRecorder, request *http.Request, oldLease *slotLease) (*http.Response, error) {
+	oldLease.release()
+	c.retireTransport(oldLease.rt)
+	newLease := c.acquireSlot()
+	if !conn.adoptLease(newLease) {
+		newLease.release()
+		return nil, net.ErrClosed
+	}
+	snapshot, newReader, _ := rec.rotate()
+	// Deadlines must break writers on the live tail, not the abandoned pipe.
+	conn.writeDeadline.access.Lock()
+	conn.writeDeadline.reader = newReader
+	conn.writeDeadline.access.Unlock()
+	retryReq, err := c.newStreamOneRequest(ctx, io.MultiReader(bytes.NewReader(snapshot), newReader))
+	if err != nil {
+		return nil, err
+	}
+	return c.handshakeVia(newLease.rt, retryReq)
+}
+
+// newStreamOneRequest builds a bare-path stream-one request around an explicit
+// body: the original pipe reader on first attempt, the replay composite on a
+// retry. Padding and the gRPC marker are regenerated per request.
+func (c *Client) newStreamOneRequest(ctx context.Context, body io.Reader) (*http.Request, error) {
+	request, err := c.newRequest(ctx, c.meta.uplinkHTTPMethod, "", "", body)
+	if err != nil {
+		return nil, err
+	}
+	c.applyGRPCHeader(request)
+	return request, nil
 }
 
 // watchDialContext releases a pending write on the upload pipe if the dial
@@ -425,13 +478,19 @@ func (d *readDeadline) stop() {
 // side is a late-bound response body (download). It mirrors the late-binding
 // pattern of v2rayhttp.HTTP2Conn but is self-contained here.
 type streamConn struct {
-	writer     *io.PipeWriter
-	reader     io.ReadCloser
-	created    chan struct{}
-	readerErr  error
+	writer     io.WriteCloser
+	rec        *uploadRecorder
 	serverAddr M.Socksaddr
+	created    chan struct{}
+	reader     io.ReadCloser
+	readerErr  error
 	lease      *slotLease
-	closeOnce  sync.Once
+	// leaseMu serializes the single ownership handoff in dialStreamOne's
+	// retry: either Close runs first (the retry then aborts) or the retry
+	// swaps the lease first (Close then releases the new one). Without it the
+	// release could land on the wrong member.
+	leaseMu   sync.Mutex
+	closeOnce sync.Once
 	// lx: 050 — deadlines; without them a blocked Write/Read is unkillable.
 	writeDeadline writeDeadline
 	readDeadline  *readDeadline
@@ -440,9 +499,10 @@ type streamConn struct {
 	closed atomic.Bool
 }
 
-func newStreamConn(reader *io.PipeReader, writer *io.PipeWriter, serverAddr M.Socksaddr, lease *slotLease) *streamConn {
+func newStreamConn(reader *io.PipeReader, writer io.WriteCloser, rec *uploadRecorder, serverAddr M.Socksaddr, lease *slotLease) *streamConn {
 	conn := &streamConn{
 		writer:     writer,
+		rec:        rec,
 		created:    make(chan struct{}),
 		serverAddr: serverAddr,
 		lease:      lease,
@@ -469,13 +529,44 @@ func (c *streamConn) setupReader(reader io.ReadCloser, err error) {
 	if err != nil {
 		// A transport can be stuck before reading the upload pipe. Publishing
 		// the read error must also release a pending VLESS/encryption Write.
-		c.writeDeadline.reader.CloseWithError(err)
+		c.breakUpload(err)
 	}
 	// Close() may have already run and skipped the body because RoundTrip had
 	// not produced one yet; in that case it is ours to release.
 	if reader != nil && c.closed.Load() {
 		reader.Close()
 	}
+}
+
+// breakUpload releases writers blocked in the upload pipe. It follows the
+// recorder, so after a stream-one retry it breaks the live replay tail
+// instead of the abandoned pipe.
+func (c *streamConn) breakUpload(err error) {
+	if c.rec != nil {
+		c.rec.breakWrites(err)
+		return
+	}
+	c.writeDeadline.reader.CloseWithError(err)
+}
+
+// adoptLease moves the conn to a replacement pool member (stream-one retry).
+// It fails when Close already ran, so the retry aborts instead of handing
+// out capacity on a dead conn.
+func (c *streamConn) adoptLease(lease *slotLease) bool {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	if c.closed.Load() {
+		return false
+	}
+	c.lease = lease
+	return true
+}
+
+// currentLease reports the member the conn currently holds capacity on.
+func (c *streamConn) currentLease() *slotLease {
+	c.leaseMu.Lock()
+	defer c.leaseMu.Unlock()
+	return c.lease
 }
 
 func (c *streamConn) Read(b []byte) (int, error) {
@@ -537,6 +628,9 @@ func (c *streamConn) Close() error {
 		// peer's max-concurrent-streams and every new dial stalls.
 		c.closed.Store(true)
 		c.writer.Close()
+		c.leaseMu.Lock()
+		lease := c.lease
+		c.leaseMu.Unlock()
 		select {
 		case <-c.created:
 			if c.reader != nil {
@@ -544,7 +638,7 @@ func (c *streamConn) Close() error {
 			}
 		default:
 		}
-		c.lease.release()
+		lease.release()
 	})
 	return nil
 }

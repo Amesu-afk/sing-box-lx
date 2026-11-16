@@ -177,6 +177,16 @@ func getAndroidBindTarget() string {
 	return "android"
 }
 
+func newGomobileCommand(args []string) *exec.Cmd {
+	if exe := os.Getenv("TARN_GOMOBILE_EXE"); exe != "" {
+		return exec.Command(exe, args...)
+	}
+	if os.Getenv("TARN_GOMOBILE_GO_RUN") == "1" {
+		return exec.Command("go", append([]string{"run", "github.com/sagernet/gomobile/cmd/gomobile"}, args...)...)
+	}
+	return exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+}
+
 func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 	args := []string{
 		"bind",
@@ -202,7 +212,7 @@ func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 	}
 	// lx:end olcrtc
 
-	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+	command := newGomobileCommand(args)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	err := command.Run()
@@ -299,7 +309,7 @@ func buildApple() {
 	args = append(args, "-tags", strings.Join(tags, ","))
 	args = append(args, "./experimental/libbox")
 
-	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+	command := newGomobileCommand(args)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	err := command.Run()

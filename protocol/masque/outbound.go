@@ -172,6 +172,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	if network == "h2" && mtu > maxH2MTU {
 		return nil, E.New("masque: mtu ", mtu, " too large for h2 (max ", maxH2MTU, ")")
 	}
+	// lx: any transport allocates mtu+80 per pump buffer, so an unbounded MTU
+	// is an OOM vector from a hostile or mistyped config.
+	if mtu > maxH2MTU {
+		return nil, E.New("masque: mtu ", mtu, " too large (max ", maxH2MTU, ")")
+	}
 
 	// lx: SPEC 028 — QUIC parity with hysteria2/tuic: leave the outer UDP
 	// socket free to fragment instead of forcing DF. Matters when this outbound

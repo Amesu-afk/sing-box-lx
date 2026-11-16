@@ -245,7 +245,7 @@ func TestWatchDialContextStopBeforeHandoffKeepsLaterCancellationOut(t *testing.T
 
 func TestStreamOneDeadlineDoesNotBreakLiveConn(t *testing.T) {
 	pipeReader, pipeWriter := io.Pipe()
-	conn := newStreamConn(pipeReader, pipeWriter, M.ParseSocksaddr("example.com:443"), nil)
+	conn := newStreamConn(pipeReader, pipeWriter, nil, M.ParseSocksaddr("example.com:443"), nil)
 	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 		t.Fatalf("clearing the write deadline must be accepted: %v", err)
 	}

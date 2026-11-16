@@ -319,6 +319,10 @@ type Client struct {
 	coldTimeouts    atomic.Int64
 	slowWarm        atomic.Int64
 	memberRefreshes atomic.Int64
+	// warmReplacements enables background warmup of replacement members (see
+	// warmMember). On in production clients built by NewClient; unit-test
+	// harnesses built by hand leave it off unless the test is about warmup.
+	warmReplacements bool
 }
 
 // NewClient builds an XHTTP client transport. The tlsConfig (possibly Reality)
@@ -458,23 +462,24 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 
 	client := &Client{
-		ctx:             ctx,
-		dialer:          dialer,
-		serverAddr:      serverAddr,
-		newTransport:    newTransport,
-		connections:     &poolConnections{},
-		scheme:          scheme,
-		host:            host,
-		path:            path,
-		mode:            mode,
-		headers:         headers,
-		paddingRange:    paddingRange,
-		sessionIDTable:  sessionIDTable,
-		sessionIDLength: sessionIDLength,
-		meta:            meta,
-		realityEnabled:  tlsConfigIsReality(tlsConfig),
-		noGRPCHeader:    options.NoGRPCHeader,
-		plog:            plog,
+		ctx:              ctx,
+		dialer:           dialer,
+		serverAddr:       serverAddr,
+		newTransport:     newTransport,
+		connections:      &poolConnections{},
+		scheme:           scheme,
+		host:             host,
+		path:             path,
+		mode:             mode,
+		headers:          headers,
+		paddingRange:     paddingRange,
+		sessionIDTable:   sessionIDTable,
+		sessionIDLength:  sessionIDLength,
+		meta:             meta,
+		realityEnabled:   tlsConfigIsReality(tlsConfig),
+		noGRPCHeader:     options.NoGRPCHeader,
+		plog:             plog,
+		warmReplacements: true,
 	}
 	client.slots = make([]*transportSlot, transportPoolSize)
 	for i := range client.slots {
@@ -625,13 +630,41 @@ func (c *Client) retireMember(failed *poolTransport) {
 		if s.get() != failed {
 			continue
 		}
-		s.ptr.Store(c.newPoolTransport())
+		fresh := c.newPoolTransport()
+		s.ptr.Store(fresh)
 		if n := c.memberRefreshes.Add(1); c.plog != nil {
 			c.plog.Warn("xhttp-pool: replaced one timed-out member (member-refreshes=", n,
 				"); other pool members preserved")
 		}
+		// Warm the replacement in the background: without it the next dial
+		// very likely lands on this least-loaded slot and pays the full cold
+		// budget (TCP + TLS/REALITY + H2 preface) on live user traffic.
+		if c.warmReplacements {
+			go c.warmMember(fresh)
+		}
 		return
 	}
+}
+
+// warmMember puts one handshake-bounded GET through a fresh pool member so it
+// proves its TCP+TLS/H2 path before live traffic lands on it. Success
+// promotes it to warm via the normal handshakeVia path; failure leaves it
+// cold, which is exactly the no-worse-than-before state. No lease is taken:
+// the probe is a single throwaway stream, not a proxied connection.
+func (c *Client) warmMember(member *poolTransport) {
+	if c.ctx == nil {
+		return // Hand-built unit-test client; NewClient always sets it.
+	}
+	sessionID := newSessionID(c.sessionIDTable, c.sessionIDLength)
+	req, err := c.newRequest(c.ctx, http.MethodGet, sessionID, "", nil)
+	if err != nil {
+		return
+	}
+	resp, err := c.handshakeVia(member, req)
+	if err != nil {
+		return
+	}
+	discardHeaderResponse(resp)
 }
 
 // newPoolTransport wraps a freshly built transport as a cold pool member, so its
@@ -802,8 +835,8 @@ func (c *Client) newRequestWith(
 	request := &http.Request{
 		Method: method,
 		URL:    u,
-		Header: c.headers.Clone(),
-		Host:   c.host,
+		Header: headers.Clone(),
+		Host:   host,
 	}
 	if request.Header == nil {
 		request.Header = make(http.Header)

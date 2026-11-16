@@ -66,11 +66,23 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			}
 			var splitIndexes []int
 			for i, split := range splits {
+				if len(split) == 0 {
+					currentIndex++
+					continue
+				}
 				splitAt := rand.Intn(len(split))
 				splitIndexes = append(splitIndexes, currentIndex+splitAt)
 				currentIndex += len(split)
 				if i != len(splits)-1 {
 					currentIndex++
+				}
+			}
+			if len(splitIndexes) == 0 || len(b) < recordLayerHeaderLen {
+				return c.Conn.Write(b)
+			}
+			for _, idx := range splitIndexes {
+				if idx <= recordLayerHeaderLen || idx >= len(b) {
+					return c.Conn.Write(b)
 				}
 			}
 			var buffer bytes.Buffer

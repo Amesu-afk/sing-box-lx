@@ -108,7 +108,7 @@ func TestConnCloseReturnsCapacity(t *testing.T) {
 	streamLease := c.acquireSlot()
 	pipeReader, pipeWriter := io.Pipe()
 	defer pipeReader.Close()
-	stream := newStreamConn(pipeReader, pipeWriter, M.Socksaddr{}, streamLease)
+	stream := newStreamConn(pipeReader, pipeWriter, nil, M.Socksaddr{}, streamLease)
 	stream.setupReader(io.NopCloser(strings.NewReader("")), nil)
 	stream.Close()
 	if got := streamLease.rt.inflight.Load(); got != 0 {

@@ -61,8 +61,9 @@ func TestStreamUpUploadFailureUnblocksDownload(t *testing.T) {
 func TestStreamOneHandshakeTimeoutUnblocksPendingWrite(t *testing.T) {
 	defer swapFreshHandshakeTimeout(30 * time.Millisecond)()
 	c, rt := hangingClient(t)
+	// The retry's replacement member hangs too.
 	c.newTransport = func() *poolTransport {
-		return &poolTransport{rt: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, io.EOF })}
+		return &poolTransport{rt: rt}
 	}
 	t.Cleanup(func() { _ = rt.Close() })
 	conn, err := c.dialStreamOne(context.Background(), "")
@@ -70,15 +71,21 @@ func TestStreamOneHandshakeTimeoutUnblocksPendingWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	done := make(chan error, 1)
-	go func() { _, err := conn.Write([]byte("VLESS handshake")); done <- err }()
+	// The first timeout rotates the upload onto a replay pipe: the pending
+	// write is accepted there (its bytes ride the retry) instead of staying
+	// blocked on the dead member.
 	select {
-	case err := <-done:
-		if err != errHandshakeTimeout {
-			t.Fatalf("got %v, want handshake timeout", err)
+	case result := <-writeAsync(conn):
+		if result.err != nil {
+			t.Fatalf("write released by the rotation: %v", result.err)
 		}
 	case <-time.After(300 * time.Millisecond):
-		t.Fatal("handshake timed out but pending protocol write remained blocked")
+		t.Fatal("rotation did not release the pending write")
+	}
+	// Both members hang, so the dial still dies on the second budget — and the
+	// failure surfaces on Read, which is what the relay reacts to.
+	if _, err := conn.Read(make([]byte, 1)); err != errHandshakeTimeout {
+		t.Fatalf("got %v, want handshake timeout", err)
 	}
 }
 

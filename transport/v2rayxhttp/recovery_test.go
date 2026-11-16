@@ -183,6 +183,10 @@ func TestHTTP2WakeResetAvoidsWarmBlackholeTimeout(t *testing.T) {
 func TestHTTP2RetirementReapsEachFailedMember(t *testing.T) {
 	defer swapHandshakeTimeout(100 * time.Millisecond)()
 	client, dialer := recoveryClient(t, 2)
+	// This test counts every socket the dialer ever opened; the background
+	// warmup probe would add one of its own, so it stays off here (it has its
+	// own test in pool_warmup_test.go).
+	client.warmReplacements = false
 	_ = recoveryStream(t, client)
 	sibling := recoveryStream(t, client)
 	failed := client.slots[0].get()
