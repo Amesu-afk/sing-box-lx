@@ -133,8 +133,10 @@ type poolTransport struct {
 	warm              atomic.Bool
 	retired           atomic.Bool
 	inflight          atomic.Int64
+	uses              atomic.Int64
 	pool              *poolConnections
 	generation        uint64
+	createdAt         time.Time
 	connectionsMu     sync.Mutex
 	activeConnections map[*trackedPoolConn]struct{}
 }
@@ -251,15 +253,24 @@ func (s *transportSlot) get() *poolTransport { return s.ptr.Load() }
 // proxied connection ends. Every conn type owns its lease and releases it exactly
 // once from Close.
 type slotLease struct {
-	rt   *poolTransport
-	once sync.Once
+	rt     *poolTransport
+	client *Client
+	once   sync.Once
 }
 
 func (l *slotLease) release() {
 	if l == nil {
 		return
 	}
-	l.once.Do(func() { l.rt.inflight.Add(-1) })
+	l.once.Do(func() {
+		l.rt.inflight.Add(-1)
+		// The reuse limit counts finished streams on one member: past it, the
+		// member is swapped out so a long session cannot pin one TCP connection
+		// forever. Retirement is routine rotation, not a failure.
+		if l.client != nil && l.client.reuseTimes > 0 && l.rt.uses.Add(1) >= l.client.reuseTimes {
+			go l.client.retireMemberOnLimit(l.rt)
+		}
+	})
 }
 
 type Client struct {
@@ -269,12 +280,18 @@ type Client struct {
 	// newTransport builds a fresh HTTP/2 transport (and therefore a fresh
 	// underlying TLS/REALITY connection on first use). Held so a stale slot can
 	// be swapped for a live one.
-	newTransport    func() *poolTransport
-	slots           []*transportSlot
-	slotIdx         atomic.Uint64
-	memberSequence  atomic.Uint64
-	refreshMu       sync.Mutex
-	connections     *poolConnections
+	newTransport   func() *poolTransport
+	slots          []*transportSlot
+	slotIdx        atomic.Uint64
+	memberSequence atomic.Uint64
+	refreshMu      sync.Mutex
+	connections    *poolConnections
+	// Pool tuning parsed from the config's xmux block (see [xmuxConfig]); zero
+	// values keep the built-in behaviour of a config without xmux.
+	poolSize        int
+	maxConcurrency  int64
+	reuseTimes      int64
+	maxReusableAge  time.Duration
 	scheme          string
 	host            string
 	path            string
@@ -344,6 +361,11 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		ScMaxEachPostBytes:   options.ScMaxEachPostBytes,
 		ScMinPostsIntervalMs: options.ScMinPostsIntervalMs,
 	}, mode)
+	if err != nil {
+		return nil, err
+	}
+
+	xmux, err := newXMuxConfig(options.XMux)
 	if err != nil {
 		return nil, err
 	}
@@ -453,6 +475,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		s.ptr.Store(client.newPoolTransport())
 		client.slots[i] = s
 	}
+	client.applyXMuxConfig(xmux)
 	return client, nil
 }
 
@@ -535,7 +558,18 @@ func (c *Client) acquireSlot() *slotLease {
 		for i := uint64(1); i < size && bestLoad > 0; i++ {
 			candidateSlot := c.slots[(start+i)%size]
 			candidate := candidateSlot.get()
-			if load := candidate.inflight.Load(); load < bestLoad {
+			load := candidate.inflight.Load()
+			// A member below the configured concurrency cap always wins over one
+			// that is over it, even when the over-cap member is otherwise less
+			// loaded: the cap is what keeps one TCP connection's head-of-line
+			// blocking away from new streams.
+			if c.belowConcurrencyCap(load) {
+				if !c.belowConcurrencyCap(bestLoad) || load < bestLoad {
+					bestSlot, best, bestLoad = candidateSlot, candidate, load
+				}
+			} else if c.belowConcurrencyCap(bestLoad) {
+				continue
+			} else if load < bestLoad {
 				bestSlot, best, bestLoad = candidateSlot, candidate, load
 			}
 		}
@@ -546,8 +580,18 @@ func (c *Client) acquireSlot() *slotLease {
 			best.inflight.Add(-1)
 			continue
 		}
-		return &slotLease{rt: best}
+		if c.maxReusableAge > 0 && time.Since(best.createdAt) > c.maxReusableAge {
+			// Age limit: this dial may still use the member (its lease is counted
+			// normally), but the member has to leave the pool so later dials land
+			// on a fresh connection.
+			go c.retireMemberOnLimit(best)
+		}
+		return &slotLease{rt: best, client: c}
 	}
+}
+
+func (c *Client) belowConcurrencyCap(load int64) bool {
+	return c.maxConcurrency <= 0 || load < c.maxConcurrency
 }
 
 // retireMember replaces only the member whose request timed out. Quiet siblings
@@ -582,6 +626,7 @@ func (c *Client) newPoolTransport() *poolTransport {
 	member.id = c.memberSequence.Add(1)
 	member.pool = c.connections
 	member.generation = c.connections.currentGeneration()
+	member.createdAt = time.Now()
 	return member
 }
 

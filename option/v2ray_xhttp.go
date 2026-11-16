@@ -115,6 +115,13 @@ type V2RayXHTTPOptions struct {
 	// to "30-30".
 	ScMinPostsIntervalMs string `json:"sc_min_posts_interval_ms,omitempty"`
 
+	// ---- pool tuning (xmux) --------------------------------------------------
+
+	// XMux tunes the client connection pool, the counterpart of Xray's `xmux`
+	// block for XHTTP. Absent means the built-in defaults, which every config
+	// written before this field existed already runs on.
+	XMux *V2RayXHTTPXMuxOptions `json:"xmux,omitempty"`
+
 	// ---- legacy / accepted-but-ignored -------------------------------------
 
 	// ScMaxConcurrentPosts is a legacy Xray knob (removed from current Xray-core
@@ -140,4 +147,34 @@ type V2RayXHTTPOptions struct {
 	// server-injected keepalive padding from the stream-up download — verify against
 	// the target server if it emits any.
 	ScStreamUpServerSecs string `json:"sc_stream_up_server_secs,omitempty"`
+}
+
+// V2RayXHTTPXMuxOptions is the client pool tuning block (Xray's `xmux` for
+// XHTTP), spelled snake_case like the rest of this option layer. Every field is
+// optional; zero or empty keeps the built-in behaviour of a config without
+// xmux.
+type V2RayXHTTPXMuxOptions struct {
+	// MaxConnections caps how many independent HTTP/2 transports (and therefore
+	// TCP+TLS sessions) the pool keeps. 0 keeps the default of 8 (bounded to
+	// 1..32), matching the size every existing config already runs on.
+	MaxConnections int `json:"max_connections,omitempty"`
+	// MaxConcurrency is the "min-max" range of live streams one pooled
+	// connection may carry before the scheduler prefers a member below the cap.
+	// It is a soft cap: when every member is at the limit, the least-loaded one
+	// still takes the dial. Empty/0 means no cap.
+	MaxConcurrency string `json:"max_concurrency,omitempty"`
+	// CMaxReuseTimes retires a pooled member after this many finished streams,
+	// so a long session cannot pin one TCP connection forever. 0 = unlimited.
+	CMaxReuseTimes int `json:"c_max_reuse_times,omitempty"`
+	// HMaxRequestTimes bounds requests per member the same way CMaxReuseTimes
+	// bounds streams; when both are set the smaller limit wins. Empty/0 =
+	// unlimited.
+	HMaxRequestTimes string `json:"h_max_request_times,omitempty"`
+	// HMaxReusableSecs retires a member once it is older than this "min-max"
+	// range, regardless of load. Empty/0 = unlimited.
+	HMaxReusableSecs string `json:"h_max_reusable_secs,omitempty"`
+	// HKeepAlivePeriod (seconds) is accepted for Xray config symmetry; keepalive
+	// on the pooled sockets stays with the dialer stack, which already probes
+	// through the transport's cold/warm handshake budgets.
+	HKeepAlivePeriod int `json:"h_keep_alive_period,omitempty"`
 }
