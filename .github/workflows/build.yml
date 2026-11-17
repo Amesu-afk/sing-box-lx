@@ -57,13 +57,13 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
       - name: Cache Go tool builds
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/.cache/go-build
           key: go-build-tools-linux-${{ hashFiles('go.sum') }}
@@ -148,7 +148,7 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
@@ -156,7 +156,7 @@ jobs:
       - name: Cache Go for Windows 7
         if: matrix.legacy_win7
         id: cache-go-for-windows7
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/go/go_win7
@@ -491,7 +491,7 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-macos-${{ hashFiles('go.sum') }}
@@ -499,7 +499,7 @@ jobs:
       - name: Cache Go for macOS 10.13
         if: matrix.legacy_osx
         id: cache-go-for-macos1013
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/go/go_osx
@@ -590,7 +590,7 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-windows-${{ hashFiles('go.sum') }}
@@ -693,7 +693,7 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
@@ -757,13 +757,13 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
       - name: Cache Go tool builds
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/go-build
           key: go-build-tools-linux-${{ hashFiles('go.sum') }}
@@ -865,13 +865,13 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-linux-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-linux-
       - name: Cache Go tool builds
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/go-build
           key: go-build-tools-linux-${{ hashFiles('go.sum') }}
@@ -978,7 +978,7 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-desktop-windows-${{ hashFiles('go.sum') }}
@@ -988,7 +988,7 @@ jobs:
         with:
           targets: ${{ matrix.rust_target }}
       - name: Cache Windows sharing module
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/git
@@ -1090,7 +1090,7 @@ jobs:
           go-version: 1.26.8
           cache: false
       - name: Cache Go modules
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-desktop-linux-${{ hashFiles('go.sum') }}
@@ -1251,14 +1251,14 @@ jobs:
         run: .github/patch_go_for_ios.sh
       - name: Cache Go modules
         if: matrix.build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-macos-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-macos-
       - name: Cache Go build
         if: matrix.build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/go-build
           key: libbox-go-build-${{ matrix.artifact }}-1.26.8-${{ hashFiles('go.sum') }}
@@ -1335,14 +1335,14 @@ jobs:
           cache: false
       - name: Cache Go modules
         if: matrix.if
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: ~/go/pkg/mod
           key: go-mod-macos-${{ hashFiles('go.sum') }}
           restore-keys: go-mod-macos-
       - name: Cache Go tool builds
         if: matrix.if
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/go-build
           key: go-build-tools-macos-${{ hashFiles('go.sum') }}
@@ -1365,14 +1365,14 @@ jobs:
           git checkout dev
       - name: Cache Swift packages
         if: matrix.if
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}/SourcePackages
           key: apple-spm-${{ hashFiles('clients/apple/sing-box.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
           restore-keys: apple-spm-
       - name: Cache Xcode build data
         if: matrix.if
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ matrix.type == 'standalone' && 'clients/apple/build/SFM.System-*.dd' || matrix.type == 'jailbreak' && 'clients/apple/build/jailbreak/DerivedData' || format('{0}/DerivedData', runner.temp) }}
           key: apple-derived-data-${{ matrix.type }}-${{ matrix.platform }}-${{ matrix.variant || 'default' }}-${{ github.ref_name }}-${{ hashFiles('clients/apple/sing-box.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}-${{ github.sha }}
@@ -1688,7 +1688,7 @@ jobs:
         with:
           fetch-depth: 1
       - name: Cache ghr
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         id: cache-ghr
         with:
           path: |
