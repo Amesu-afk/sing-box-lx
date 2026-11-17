@@ -25,7 +25,7 @@ require (
 	github.com/libdns/cloudflare v0.2.2
 	github.com/libdns/libdns v1.1.1
 	github.com/logrusorgru/aurora v2.0.3+incompatible
-	github.com/mattn/go-runewidth v0.0.27
+	github.com/mattn/go-runewidth v0.0.31
 	github.com/mdlayher/netlink v1.11.2
 	github.com/metacubex/utls v1.8.7
 	github.com/mholt/acmez/v3 v3.1.6
