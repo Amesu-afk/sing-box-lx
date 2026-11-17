@@ -5,7 +5,7 @@
 | Поле | Значение |
 |------|----------|
 | Тип | B (bug) — неотменяемая блокировка в связке XHTTP-транспорта, VLESS-encryption и urltest-прогона |
-| Статус | O (open) — все уровни в дереве, включая отменяемость `encryption`-хендшейка (критерий 2, `guardHandshake`); стенд `lx-test/zombie` зелёный, red/green проверен откатом фикса, `-race` чистый. Остаток: живой XHTTP-узел + device-верификация по `dumpStacks()` (критерии 3–5) |
+| Статус | D (done) — все уровни в дереве, включая отменяемость `encryption`-хендшейка (критерий 2, `guardHandshake`); стенд `lx-test/zombie` зелёный, red/green проверен откатом фикса, `-race` чистый; критерии 3–5 (живой XHTTP-узел, device-верификация по `dumpStacks()`) не гонялись; уровни в поле с `v1.14.0-lx.20-rc.4`, `guardHandshake` — с `v1.14.1-lx.2`, жалоб нет; закрыта владельцем 2026-09-24 |
 | Ветка | `lx` |
 | Base | `137890db7` (v1.14.0-lx.20-rc.3) |
 | Связанные | Полевой дамп LxBox 2026-08-04 (Android arm64, ядро `1.14.0-lx.17-rc.3`, подписка на 2806 узлов); код фичей [002 XHTTP](../../FEATURES/002-XHTTP/FEATURE.md), [007 URLTEST_BALANCE](../../FEATURES/007-URLTEST_BALANCE/FEATURE.md), [012 VLESS_ENCRYPTION](../../FEATURES/012-VLESS_ENCRYPTION/FEATURE.md) |
@@ -197,7 +197,7 @@ QUIC-хендшейк поверх xhttp-хопа, которому эндпои
 2. **`transportResponseBody.Close` блокируется сам по себе — ОТКРЫТО.**
    `x/net/http2` завершает `Close` ожиданием `<-cs.donec`, который не закроется,
    пока не выйдет write-цикл request-body — а в stream-one это наш бесконечный
-   upload-пайп с заблокированным Read (в апстриме рядом честный
+   upload-пайп с заблокированным Read (в апстриме рядом настоящий
    `TODO: Acquiring this mutex can block indefinitely`). По доктрине этого SPEC
    «рвать пайп с читающей половины» правильное направление — на expiry рвать
    соединение/writer, а не вежливо закрывать тело; требует аккуратного прохода

@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/dns"
+	"github.com/sagernet/sing-box/dns/transport/hosts"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -21,6 +22,10 @@ import (
 
 func testLogger() log.ContextLogger {
 	return log.NewNOPFactory().NewLogger("group-test")
+}
+
+func testScope() *adapter.Scope {
+	return adapter.NewScope(context.Background(), testLogger())
 }
 
 func testQuery() *mDNS.Msg {
@@ -54,9 +59,9 @@ func newFakeMember(tag string, exchange func(ctx context.Context, message *mDNS.
 	}
 }
 
-func (f *fakeMember) Start(stage adapter.StartStage) error { return nil }
-func (f *fakeMember) Close() error                         { return nil }
-func (f *fakeMember) Reset()                               {}
+func (f *fakeMember) Start(stage adapter.StartStage, _ *adapter.Scope) error { return nil }
+func (f *fakeMember) Close() error                                           { return nil }
+func (f *fakeMember) Reset()                                                 {}
 
 func (f *fakeMember) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	f.calls.Add(1)
@@ -84,6 +89,20 @@ func delayed(tag string, d time.Duration) *fakeMember {
 	return newFakeMember(tag, func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 		select {
 		case <-time.After(d):
+			return okResponse(message), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+}
+
+// held answers successfully once release is closed (or fails with the
+// context's error). It orders fan members deterministically: a held member
+// cannot answer before the test releases it, whatever the scheduler does.
+func held(tag string, release <-chan struct{}) *fakeMember {
+	return newFakeMember(tag, func(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+		select {
+		case <-release:
 			return okResponse(message), nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -332,6 +351,15 @@ func TestErrorTTLExpiryReturnsToCleanSet(t *testing.T) {
 	require.True(t, memberClean(group, "a"), "error must expire by error_ttl")
 }
 
+func liveErrors(group *Transport, tag string) int {
+	for _, memberState := range group.GroupState().Members {
+		if memberState.Tag == tag {
+			return memberState.LiveErrors
+		}
+	}
+	return -1
+}
+
 func memberClean(group *Transport, tag string) bool {
 	for _, memberState := range group.GroupState().Members {
 		if memberState.Tag == tag {
@@ -447,13 +475,23 @@ func registerFakeType(registry *dns.TransportRegistry, transportType string, ada
 		})
 }
 
+// fakeFakeIP stands in for a fakeip server: the manager requires Store().
+type fakeFakeIP struct{ *fakeMember }
+
+func (f fakeFakeIP) Store() adapter.FakeIPStore { return nil }
+
 func newTestManager(t *testing.T, defaultTag string) (*dns.TransportManager, context.Context) {
 	t.Helper()
 	registry := dns.NewTransportRegistry()
 	RegisterTransport(registry)
+	hosts.RegisterTransport(registry)
 	registerFakeType(registry, "fakeudp", C.DNSTypeUDP)
 	registerFakeType(registry, "fakehosts", C.DNSTypeHosts)
-	manager := dns.NewTransportManager(testLogger(), registry, nil, defaultTag)
+	dns.RegisterTransport[fakeTransportOptions](registry, "fakefakeip",
+		func(ctx context.Context, logger log.ContextLogger, tag string, options fakeTransportOptions) (adapter.DNSTransport, error) {
+			return fakeFakeIP{&fakeMember{TransportAdapter: dns.NewTransportAdapter(C.DNSTypeFakeIP, tag, nil)}}, nil
+		})
+	manager := dns.NewTransportManager(registry, nil, defaultTag)
 	ctx := service.ContextWith[adapter.DNSTransportManager](context.Background(), manager)
 	return manager, ctx
 }
@@ -463,7 +501,7 @@ func TestManagerRejectsGroupCycle(t *testing.T) {
 	logger := testLogger()
 	require.NoError(t, manager.Create(ctx, logger, "g1", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"g2"}}))
 	require.NoError(t, manager.Create(ctx, logger, "g2", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"g1"}}))
-	err := manager.Start(adapter.StartStateStart)
+	err := manager.Start(adapter.StartStateStart, testScope())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "circular server dependency")
 }
@@ -471,19 +509,32 @@ func TestManagerRejectsGroupCycle(t *testing.T) {
 func TestManagerRejectsMissingMember(t *testing.T) {
 	manager, ctx := newTestManager(t, "g1")
 	require.NoError(t, manager.Create(ctx, testLogger(), "g1", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"missing"}}))
-	err := manager.Start(adapter.StartStateStart)
+	err := manager.Start(adapter.StartStateStart, testScope())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
 }
 
 func TestManagerRejectsLocalSourceMember(t *testing.T) {
-	manager, ctx := newTestManager(t, "g1")
-	logger := testLogger()
-	require.NoError(t, manager.Create(ctx, logger, "h", "fakehosts", &fakeTransportOptions{}))
-	require.NoError(t, manager.Create(ctx, logger, "g1", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"h"}}))
-	err := manager.Start(adapter.StartStateStart)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "is not allowed in a group")
+	cases := []struct {
+		name          string
+		transportType string
+		err           string
+	}{
+		// SPEC 143: hosts belongs under the `hosts` key, the error says so.
+		{"hosts", "fakehosts", `server type hosts is not allowed in servers, put it under "hosts": h`},
+		{"fakeip", "fakefakeip", "server type fakeip is not allowed in a group: h"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			manager, ctx := newTestManager(t, "g1")
+			logger := testLogger()
+			require.NoError(t, manager.Create(ctx, logger, "h", testCase.transportType, &fakeTransportOptions{}))
+			require.NoError(t, manager.Create(ctx, logger, "g1", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"h"}}))
+			err := manager.Start(adapter.StartStateStart, testScope())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), testCase.err)
+		})
+	}
 }
 
 func TestManagerStartsGroupAndNestedGroup(t *testing.T) {
@@ -493,11 +544,57 @@ func TestManagerStartsGroupAndNestedGroup(t *testing.T) {
 	require.NoError(t, manager.Create(ctx, logger, "u2", "fakeudp", &fakeTransportOptions{}))
 	require.NoError(t, manager.Create(ctx, logger, "inner", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"u1", "u2"}}))
 	require.NoError(t, manager.Create(ctx, logger, "outer", C.DNSTypeGroup, &option.GroupDNSServerOptions{Servers: []string{"inner", "u1"}}))
-	require.NoError(t, manager.Start(adapter.StartStateStart))
+	require.NoError(t, manager.Start(adapter.StartStateStart, testScope()))
 	outer, loaded := manager.Transport("outer")
 	require.True(t, loaded)
 	response, err := outer.Exchange(context.Background(), testQuery())
 	require.NoError(t, err)
 	require.Equal(t, mDNS.RcodeSuccess, response.Rcode)
 	require.Equal(t, C.DNSTypeGroup, outer.Type())
+}
+
+// A query abandoned by its caller is not evidence about the server: a slow
+// but healthy sticky member stays clean and current, in the normal path and
+// in survival alike.
+func TestCancelledQueryLeavesMemberHealthIntact(t *testing.T) {
+	cancelled := func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		time.AfterFunc(50*time.Millisecond, cancel)
+		return ctx, cancel
+	}
+	t.Run("single", func(t *testing.T) {
+		group := newTestGroup(t, ModeStable, time.Hour, 0, delayed("a", time.Second), answering("b"))
+		group.access.Lock()
+		group.current = "a"
+		group.access.Unlock()
+
+		ctx, cancel := cancelled()
+		defer cancel()
+		_, err := group.Exchange(ctx, testQuery())
+		require.ErrorIs(t, err, context.Canceled)
+		require.True(t, memberClean(group, "a"), "a cancelled query must not mark the member dirty")
+		require.Equal(t, "a", group.GroupState().Current)
+	})
+	t.Run("survival", func(t *testing.T) {
+		group := newTestGroup(t, ModeStable, time.Hour, 0, delayed("a", time.Second))
+		group.noteError("a", group.gen)
+		before := liveErrors(group, "a")
+
+		ctx, cancel := cancelled()
+		defer cancel()
+		_, err := group.Exchange(ctx, testQuery())
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, before, liveErrors(group, "a"), "a cancelled survival attempt must not add an error record")
+	})
+	t.Run("expired budget still counts", func(t *testing.T) {
+		group := newTestGroup(t, ModeStable, time.Hour, 0, blackhole("a"))
+		group.noteError("a", group.gen)
+		before := liveErrors(group, "a")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, err := group.Exchange(ctx, testQuery())
+		require.Error(t, err)
+		require.Greater(t, liveErrors(group, "a"), before, "a member silent for the whole budget did fail")
+	})
 }

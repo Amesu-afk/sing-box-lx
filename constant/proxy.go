@@ -44,6 +44,9 @@ const (
 	TypeHysteriaRealm      = "hysteria-realm"
 	TypeACME               = "acme"
 	TypeCloudflareOriginCA = "cloudflare-origin-ca"
+	// lx:begin trusttunnel
+	TypeTrustTunnel = "trusttunnel"
+	// lx:end trusttunnel
 )
 
 const (
@@ -55,6 +58,7 @@ const (
 const (
 	URLTestModeLeastTest  = "least_test"  // default — pick lowest-delay node (legacy urltest behaviour)
 	URLTestModeRoundRobin = "round_robin" // rotate over a fixed-size pool of live nodes
+	URLTestModeFailover   = "failover"    // lx: SPEC 116 — hold the working node until it fails
 )
 
 // lx: SPEC 019 — balancer.sticky_hash key components.
@@ -142,6 +146,14 @@ func ProxyDisplayName(proxyType string) string {
 		return "Selector"
 	case TypeURLTest:
 		return "URLTest"
+	// lx:begin chain
+	case TypeChain:
+		return "Chain"
+	// lx:end chain
+	// lx:begin trusttunnel
+	case TypeTrustTunnel:
+		return "TrustTunnel"
+	// lx:end trusttunnel
 	default:
 		return "Unknown"
 	}

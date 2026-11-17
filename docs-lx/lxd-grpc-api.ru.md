@@ -56,7 +56,7 @@ lx-расширения (`SubscribeDNSQueries`, `GetRules`, `GetGroups`, `GetOut
 `GetPool`, `GetDNSGroups`, `GetRunningConfig`, `URLTestOutbound`,
 `GetURLViaOutbound`, `GetChains`) реализованы **один раз в ядре** и доступны через любой из
 носителей — семантика полей ниже идентична для обоих. То есть таблица полей здесь
-описывает Android-AAR ровно так же, как удалённую lxd-машину; различаются лишь
+описывает Android-AAR так же, как удалённую lxd-машину; различаются лишь
 обрамление на проводе и синтаксис вызова метода. Где правило транспорт-специфично —
 это отмечено (например, gRPC-код `Unimplemented` не имеет эквивалента в libbox — там
 отсутствие тега проявляется обычной ошибкой).
@@ -84,7 +84,15 @@ REST-ручки для профилирования **самого процес�
 и существуют **только в сборке с `with_lx_command`**:
 
 `URLTestOutbound`, `GetRules`, `GetGroups`, `GetOutbounds`, `SubscribeDNSQueries`,
-`GetPool`, `GetDNSGroups`, `GetRunningConfig`, `GetURLViaOutbound`, `GetChains`.
+`GetPool`, `GetDNSGroups`, `GetRunningConfig`, `GetURLViaOutbound`, `GetChains`,
+`GetWireGuardStatus`, `GetTailscaleStatus`.
+
+В том же блоке — управляющие RPC вне предмета этого документа: `SetChainPositionEnabled`
+и `GetChainCloneConfig` (SPEC 075), `SetEndpointEnabled` (ручное включение и выключение
+WG/AWG-endpoint'а, SPEC 106; см.
+[lx-energy.ru.md §12](lx-energy.ru.md#12-ручной-переключатель-spec-106); и Tailscale-endpoint'а,
+SPEC 149), `TailscaleLogin` (вход Tailscale-endpoint'а с новым auth key без перезапуска
+box, SPEC 149).
 
 Против сборки без тега они возвращают `codes.Unimplemented`. Сгенерированные
 клиентские заглушки методы всё равно содержат — гейт серверный, поэтому это
@@ -214,7 +222,7 @@ ConnectionEvent  { ConnectionEventType type; string id; Connection connection;
 detour пусто. Профайлеру, показывающему «весь путь», нужны оба, склеенные.
 
 **`domain` против `destination`.** Клиенту, которому нужно «что это за хост»,
-следует брать `domain`, а при пустом — хостовую часть `destination`. Ровно так
+следует брать `domain`, а при пустом — хостовую часть `destination`. Так
 делает лаунчер в `ProtoConnToClash`
 (`singbox-launcher/internal/traffic/grpc_tracker.go`).
 
@@ -280,7 +288,10 @@ detour пусто. Профайлеру, показывающему «весь �
 | `GetStartedAt → StartedAt` | время старта ядра, для uptime |
 | `GetRules → RuleList` | **lx**: структурные правила — раскрывает `Connection.rule` |
 | `GetGroups → Groups` / `SubscribeGroups` | **lx** (`GetGroups`) / апстрим (стрим) — состояние групп |
-| `GetOutbounds → OutboundList` | **lx**: теги outbound'ов, чтобы раскрывать элементы цепочки |
+| `GetOutbounds → OutboundList` | **lx**: теги outbound'ов, чтобы раскрывать элементы цепочки; состояние WG/AWG (`endpointState`, SPEC 097); у Tailscale `up`/`disabled`/`down` (SPEC 149) |
+| `GetWireGuardStatus(tag) → WireGuardEndpointStatus` | **lx**: один WG/AWG-endpoint — состояние устройства и по каждому пиру последний хендшейк, адрес, трафик (SPEC 114) |
+| `GetTailscaleStatus(endpointTag) → TailscaleEndpointStatus` | **lx**: один Tailscale-endpoint, свежий снимок — путь к каждому пиру (direct / peer relay / DERP), хендшейк, предупреждения бэкенда (SPEC 115) |
+| `SubscribeTaildropInbox(endpointTag) → stream TaildropInbox` | апстрим; **lx**: у полученного файла `senderID` — stable node ID отправителя, пустой для файлов, лежавших до перезапуска ядра (SPEC 149) |
 | `GetPool(GetPoolRequest) → PoolList` | **lx**: состояние ротации балансируемой urltest-группы (SPEC 019) |
 | `GetDNSGroups → DnsGroupList` | **lx**: полное состояние DNS-групп |
 | `GetRunningConfig → RunningConfig` | **lx**: конфиг, на котором ядро реально работает |
@@ -394,6 +405,7 @@ detour пусто. Профайлеру, показывающему «весь �
 | `SubscribeDNSQueries` | структурный DNS-стрим; ошибки полноправны; заменяет разбор лога | [018](../SPECS/TASKS/018-DNS_QUERY_STREAM/SPEC.md), 035 |
 | `GetRules` | таблица правил, чтобы раскрывать `Connection.rule` | 014/015 |
 | `GetGroups`, `GetOutbounds` | разовое чтение там, где апстрим даёт только стримы | 014/015 |
+| `GetWireGuardStatus`, `GetTailscaleStatus` | статус одного endpoint'а по запросу; `GetOutbounds` остаётся списком узлов | [114](../SPECS/TASKS/114-WG_PEER_STATUS/SPEC.md), [115](../SPECS/TASKS/115-TAILSCALE_PEER_PATH_STATUS/SPEC.md) |
 | `GetPool` | состояние ротации балансируемой urltest-группы | [019](../SPECS/TASKS/019-URLTEST_MODE_STICKY/SPEC.md) |
 | `GetDNSGroups` | состояние DNS-групп | 035 |
 | `GetRunningConfig` | конфиг, реально действующий сейчас | — |
@@ -452,7 +464,7 @@ proto-дополнения: апстримные клиенты их игнор�
    каждом переподключении. Лаунчер отслеживает это флагом `live` в `ConnTracker`.
 4. Интервалы слать как `int64(time.Second)`, а не `1000`.
 
-Рабочий клиент ровно такой формы живёт в лаунчере:
+Рабочий клиент такой формы живёт в лаунчере:
 `internal/traffic/grpc_tracker.go` (таблица),
 `core/services/lxd_remote_transport.go` (удалённый стрим и разбор DNS).
 

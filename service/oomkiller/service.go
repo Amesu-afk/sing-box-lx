@@ -49,18 +49,18 @@ func (s *Service) startTimer() error {
 		return E.New("memory pressure monitoring is not available on this platform without memory_limit")
 	}
 	s.adaptiveTimer = newAdaptiveTimer(s.logger, s.network, s.connections, s.recorder, s.timerConfig)
+	s.logger.Info("memory pressure monitoring started, ", startLogDetails(s.timerConfig, s.adaptiveTimer.limitThresholds)) // lx: SPEC 148 §5
+	var carriedState *timerState
 	if s.recorder != nil {
-		s.recorder.instanceStarted(s.timerConfig, s.adaptiveTimer.limitThresholds)
+		carriedState = s.recorder.instanceStarted(s.timerConfig, s.adaptiveTimer.limitThresholds)
 	}
-	s.adaptiveTimer.start()
+	s.adaptiveTimer.start(carriedState)
 	return nil
 }
 
 func (s *Service) stopTimer() {
-	if s.adaptiveTimer != nil {
-		s.adaptiveTimer.stop()
-	}
+	state := s.adaptiveTimer.stop()
 	if s.recorder != nil {
-		s.recorder.instanceStopped()
+		s.recorder.instanceStopped(state)
 	}
 }

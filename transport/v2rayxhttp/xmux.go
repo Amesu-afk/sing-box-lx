@@ -2,6 +2,7 @@ package v2rayxhttp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,9 @@ type xmuxClient struct {
 	leftUsage    int          // handouts left before retirement; -1 = unlimited
 	leftRequests int32        // HTTP requests left before retirement (atomic)
 	unreusableAt time.Time
+	// createdAt is when the pool opened this connection: the age a connection
+	// test reports for a reused transport (lx: SPEC 139 §5.3).
+	createdAt time.Time
 
 	// lx: SPEC 076 — circuit breaker. consecFails counts consecutive stream
 	// failures (failed round trip, non-200 response, remote death of a download
@@ -171,10 +175,22 @@ func (c *xmuxClient) noteSuccess() {
 // stream failure — every XHTTP endpoint expects exactly 200, all call sites
 // treat anything else as fatal for the stream. Success is deliberately NOT
 // noted here: response headers arriving says nothing about the stream living.
+//
+// lx: SPEC 094 — context.Canceled is neutral. Request contexts are cancelled
+// only by us (the conn-scoped cancel in Close) or by the caller, so a
+// cancelled RoundTrip says nothing about the pooled connection's health;
+// counting it let a burst of Close calls (interrupt_exist_connections)
+// retire a healthy connection and arm the backoff. context.DeadlineExceeded
+// stays a failure on purpose: headers not arriving in time on a pooled
+// connection is exactly the half-dead peer the breaker exists for.
 func (c *xmuxClient) roundTrip(request *http.Request) (*http.Response, error) {
 	c.takeRequest()
 	response, err := c.conn.roundTripper().RoundTrip(request)
-	if err != nil || response.StatusCode != http.StatusOK {
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			c.noteFailure()
+		}
+	} else if response.StatusCode != http.StatusOK {
 		c.noteFailure()
 	}
 	return response, err
@@ -349,6 +365,7 @@ func (m *xmuxManager) newClientLocked() *xmuxClient {
 		conn:      m.newConn(),
 		manager:   m,
 		leftUsage: -1,
+		createdAt: timeNow(),
 	}
 	if x := m.config.cMaxReuseTimes.rand(); x > 0 {
 		client.leftUsage = x - 1
@@ -392,16 +409,23 @@ func (c *xmuxClient) evictCause() string {
 // path is throttled, so the dial storm the breaker exists for is damped while
 // healthy reuse stays untouched.
 func (m *xmuxManager) getContext(ctx context.Context) (*xmuxClient, error) {
+	client, _, err := m.acquireContext(ctx)
+	return client, err
+}
+
+// acquireContext is getContext that also reports whether the connection was
+// opened for this call (created) or is a pooled one handed out again.
+func (m *xmuxManager) acquireContext(ctx context.Context) (*xmuxClient, bool, error) {
 	for {
-		client, wait := m.get()
+		client, created, wait := m.acquire()
 		if client != nil {
-			return client, nil
+			return client, created, nil
 		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, false, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -414,6 +438,13 @@ func (m *xmuxManager) getContext(ctx context.Context) (*xmuxClient, error) {
 // returned client with addOpenUsage(-1) exactly once, via the release function
 // returned by Client.acquireXmux.
 func (m *xmuxManager) get() (*xmuxClient, time.Duration) {
+	client, _, wait := m.acquire()
+	return client, wait
+}
+
+// acquire is get that also reports whether the returned connection was opened
+// by this call.
+func (m *xmuxManager) acquire() (*xmuxClient, bool, time.Duration) {
 	m.access.Lock()
 	defer m.access.Unlock()
 
@@ -442,13 +473,13 @@ func (m *xmuxManager) get() (*xmuxClient, time.Duration) {
 		// healthy dials over trailing errors would be worse than one extra conn.
 		if m.backoffArmed.Load() {
 			if wait := m.blockedUntil.Sub(timeNow()); wait > 0 {
-				return nil, wait
+				return nil, false, wait
 			}
 		}
-		return m.newClientLocked(), 0
+		return m.newClientLocked(), true, 0
 	}
 	if m.connections > 0 && len(m.clients) < m.connections {
-		return m.newClientLocked(), 0
+		return m.newClientLocked(), true, 0
 	}
 
 	candidates := m.clients
@@ -461,24 +492,26 @@ func (m *xmuxManager) get() (*xmuxClient, time.Duration) {
 		}
 	}
 	if len(candidates) == 0 {
-		return m.newClientLocked(), 0
+		return m.newClientLocked(), true, 0
 	}
 
 	client := candidates[randIntn(len(candidates))]
 	if client.leftUsage > 0 {
 		client.leftUsage--
 	}
-	return client, 0
+	return client, false, 0
 }
 
 const maxInt32 = int32(^uint32(0) >> 1)
 
-// Defaults mirror sing-box-extended (option/v2ray_transport.go:312-319), which
-// applies them whenever the xmux section is absent. Keeping that behaviour is
-// the point of the task: a config that says nothing about xmux should still
-// produce an Xray-shaped connection pattern.
+// Defaults mirror Xray-core (infra/conf/transport_method.go, commit 18e2839,
+// XTLS/Xray-core#6376): a config that says nothing about xmux should still
+// produce an Xray-shaped connection pattern. Xray bounds the pool at three
+// connections rather than one connection per stream (the former
+// max_concurrency 1 default): a burst of parallel TLS connections to one server
+// is what TSPU cuts, and three is the count reported to pass (issue #32).
 var (
-	defaultXmuxMaxConcurrency   = intRange{1, 1}
+	defaultXmuxMaxConnections   = intRange{3, 3}
 	defaultXmuxHMaxRequestTimes = intRange{600, 900}
 	defaultXmuxHMaxReusableSecs = intRange{1800, 3000}
 )
@@ -494,7 +527,7 @@ var (
 func normalizeXmux(options *option.V2RayXHTTPXmuxOptions) (xmuxConfig, error) {
 	if options == nil || *options == (option.V2RayXHTTPXmuxOptions{}) {
 		return xmuxConfig{
-			maxConcurrency:   defaultXmuxMaxConcurrency,
+			maxConnections:   defaultXmuxMaxConnections,
 			hMaxRequestTimes: defaultXmuxHMaxRequestTimes,
 			hMaxReusableSecs: defaultXmuxHMaxReusableSecs,
 		}, nil

@@ -3,7 +3,7 @@
 > 🌐 Русская версия: **[lxd-daemon.ru.md](lxd-daemon.ru.md)**.
 
 Operator's guide: what `sing-box lxd` is, why it exists, how it is installed on
-macOS, and the setup approaches on Linux.
+macOS and Windows, and the setup approaches on Linux.
 
 ## Table of contents
 
@@ -14,7 +14,12 @@ macOS, and the setup approaches on Linux.
 - [4. Command-line keys](#4-command-line-keys)
 - [5. Security: who authenticates with what](#5-security-who-authenticates-with-what)
 - [6. Logs](#6-logs)
+- [6a. Hooks: the admin's scripts at the core's lifecycle boundaries](#6a-hooks-the-admins-scripts-at-the-cores-lifecycle-boundaries)
 - [7. macOS — automatic installation](#7-macos--automatic-installation)
+  - [7.1. The root-owned copy of the binary](#71-the-root-owned-copy-of-the-binary)
+- [7a. Windows — automatic installation](#7a-windows--automatic-installation)
+  - [7a.1. The protected copy of the binary set](#7a1-the-protected-copy-of-the-binary-set)
+  - [7a.2. Checking by hand](#7a2-checking-by-hand)
 - [8. Linux — setup approaches](#8-linux--setup-approaches)
   - [8.1. Common part (any init)](#81-common-part-any-init)
   - [8.2. systemd (a regular server/desktop)](#82-systemd-a-regular-serverdesktop)
@@ -86,17 +91,19 @@ Lives in `<state-dir>/daemon.json` (0600). The **only** source of connection
 settings: the command has no `--listen/--tls/--secret` flags by construction —
 the "file or flag" question cannot even be asked. No file → dev defaults; the
 file is never created implicitly (it is written by `--service=install` on macOS
-or by the operator's editor).
+and Windows or by the operator's editor).
 
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `127.0.0.1:9091` | channel address (both planes); a `"host:port"` string, or `{"address": [...], "port": N}` to bind several addresses — see below |
 | `tls` | `false` | mTLS with client enrollment; `false` = plain h2c, loopback/dev only |
 | `secret` | empty | Bearer secret for the operator routes; the only gate when `tls: false` (empty = no authentication) |
-| `log_file` | `<parent of state-dir>/lxd.log` | rotated-log path override (absolute; e.g. `/tmp/lxd.log` for tmpfs on a router) — `/admin/info` advertises the actual path |
+| `log_file` | `<parent of state-dir>/lxd.log` | rotated-log path override (absolute; e.g. `/tmp/lxd.log` for tmpfs on a router; on Windows install writes `<ProgramData>\sing-box-lxd\logs\lxd.log` when the key is absent) — `/admin/info` advertises the actual path |
 | `log_max_size_mb` | `1` | log rotation: safety size ceiling |
 | `log_max_backups` | `1` | how many rotated generations (`lxd.log.1…N`) to keep |
 | `log_max_age_hours` | `24` | rotation by file age |
+| `commands` | absent | named root commands a client may start **by name** over `/admin/commands` (SPEC 128), e.g. `{"update": "/usr/bin/sing-box lxd update"}`; name `[a-z0-9][a-z0-9_-]{0,31}`, a bad name or an empty command refuses to start; absent = no such routes. Every command runs as the daemon's user (root) with no input from the client — see §8.5 |
+| `hooks` | absent | the admin's lifecycle scripts in `<state_dir>/hooks/` (SPEC 135): `{"enabled": true, "timeout_seconds": 15, "unsafe_skip_owner_check": false}`; absent or `enabled: false` = no hooks (the directory and the stubs are still created); a negative timeout refuses to start — see §6a |
 
 The rotation defaults give "about a day of history"; 0/absent key = default,
 and there is deliberately no "unlimited" setting. Changing any setting is a
@@ -142,11 +149,17 @@ Rules worth knowing:
 | `-c <file>` | seed config (exactly one file; `-C` directories are not supported) |
 | `--config-force <file>` | always boot from this file, overriding last-good |
 | `--run` | bring the core up regardless of the recorded run state |
-| `--service install\|install-user\|uninstall` | service installation (see the OS sections) |
-| `--purge` | with `uninstall` — also delete the state directory |
-| `--dry-run` | with `--service` — show what would be done, change nothing |
-| `client add [--name <label>]` | mint a one-time invite for a new client |
+| `--service install\|install-user\|copy\|uninstall\|status` | service installation, a protected copy without a service, removal, a status report (see the OS sections, [7.1](#71-the-root-owned-copy-of-the-binary) and [7a](#7a-windows--automatic-installation)); on Windows `install`/`copy`/`uninstall` need an elevated token and `install-user` is refused |
+| `--exec-dir <dir>` | with `install`/`copy`/`uninstall`/`status` — directory of the protected copy and its sidecar. macOS: `sing-box-lxd`, default `/Library/PrivilegedHelperTools`, created `root:wheel 0755` if missing; a directory given here is created with any missing parents. Windows: `sing-box-lxd.exe` (with `libcronet.dll` when it lies beside the source), default `<ProgramFiles>\sing-box-lxd`, created if missing |
+| `--allow-unsafe-exec` | debug only: let the service (root launchd job, Windows SCM service) start from a binary that is not a protected copy (WARN instead of a refusal) |
+| `--purge` | with `uninstall` — also delete the state directory (Windows: all of `<ProgramData>\sing-box-lxd`, state and logs) |
+| `--keep-copy` | with `uninstall` — remove the service but keep the protected copy for non-service use ([7.1](#71-the-root-owned-copy-of-the-binary), [7a](#7a-windows--automatic-installation)) |
+| `--dry-run` | with `--service` (except `status`) — show what would be done, change nothing |
+| `--invite-out <file>` | with `--service=install` (macOS, Windows) — write the pairing invite into this new file instead of stdout; an existing file refuses the command, a failed mint exits 1 ([9](#9-pairing-a-client-the-same-on-every-os)) |
+| `--invite-name <name>` | with `--service=install` — the name of the client the invite pairs (default `singbox-launcher` with `--invite-out`, no name without it) |
+| `client add [--name <label>] [--invite-out <file>]` | mint a one-time invite for a new client; `--invite-out` writes it into a new file instead of printing it |
 | `client list` / `client remove <name-or-fingerprint>` | list / revoke trusted clients |
+| `update [--dry-run] [--prerelease] [--no-restart] [--service <name>]` | self-update from the latest release for this binary's platform and a service restart through the init (linux, root; [8.6](#86-updating-sing-box-lxd-update)) |
 
 The subcommand exists only in builds with the `with_lxd` tag.
 
@@ -172,8 +185,20 @@ Under a service manager (stdout is not a terminal) the daemon **owns** the
 lands in the file, including the core's log and runtime panics) and rotates it
 by age and size with the daemon.json limits. When run by hand in a terminal the
 log stays on the screen and no file is touched. Clients discover the log path
-and state dir from `GET /admin/info` — nothing needs to be hard-coded.
-Implemented on macOS and Linux; not on Windows (neither is the service).
+and state dir from `GET /admin/info` — nothing needs to be hard-coded. The
+same card names the binary's platform and release asset, the host's init
+system and whether the daemon runs as its service, so a client keeps no
+uname → GOARCH table and does not ask the user which init runs the host.
+Implemented on macOS, Linux and Windows.
+
+**Windows.** The service's log is `<ProgramData>\sing-box-lxd\logs\lxd.log` (install
+writes that `log_file` into daemon.json), beside the launcher's `classic.log`. A live file
+cannot be renamed there (Go opens files without `FILE_SHARE_DELETE`), and a writer holding
+it would stay on the old file, so the daemon keeps one handle for its whole life: the
+process's standard output and error handles point at it, runtime panics included, and
+rotation copies the content to `lxd.log.1` and truncates `lxd.log`. Lines written between
+the copy and the truncation are lost. The file cannot be deleted while the daemon runs.
+`/admin/logs` reads `lxd.log` and `lxd.log.1` as on the other platforms.
 
 **Two log channels, and they carry different things.** The gRPC `SubscribeLog`
 stream carries the **core's** log — what the running instance emits. The
@@ -188,9 +213,159 @@ curl -s --cert client.pem --key client.key -k \
   "https://server:9091/admin/logs?tail=500"
 ```
 
+## 6a. Hooks: the admin's scripts at the core's lifecycle boundaries
+
+The core on a host with TUN changes the routes but never touches the system
+DNS: on macOS, on Linux without `systemd-resolved` and on routers the resolver
+keeps pointing at the ISP. Doing that inside the core was tried and rolled
+back (issue #12): the core cannot know every network service and the order to
+restore them in, and a failed restore leaves the host without DNS. So the
+policy lives with the admin, in four scripts, and the daemon only promises
+to call them at the right moment with the right facts ([SPEC 135](../SPECS/TASKS/135-LXD_HOOKS/SPEC.md)).
+
+**Files.** The daemon creates `<state_dir>/hooks/` (root-owned, `0755`) at
+every start, with a stub for every missing script:
+
+| File | Who writes it | Purpose |
+|---|---|---|
+| `hooks/pre_start`, `post_start`, `post_reload`, `post_stop` | you | the scripts (executables run directly, your shell is the `#!` line) |
+| `hooks/core_snapshot.json` | the daemon | facts of the last live core; its presence at boot = the previous process never reached `post_stop` |
+| `hooks/.lock` | the daemon | `flock` around every run, across processes |
+| `<log dir>/hooks/<event>.log` | the script (redirected) | output of the last run; without a log file — `hooks/log/` |
+| anything else in `hooks/` | you | your snapshot of the system state, in your format |
+
+A stub left byte-for-byte as created (or a missing file) is **not configured**:
+the event is skipped with a Warn. The stub's comment lists the variables of
+its event — the documentation sits where you write the script.
+
+**daemon.json:**
+
+```jsonc
+"hooks": {
+  "enabled": true,                 // default false: no key = no hooks (the stubs are still created)
+  "timeout_seconds": 15,           // per hook; 0/absent = 15; negative = the daemon refuses to start
+  "unsafe_skip_owner_check": false // true = the ownership gate is off; WARN at every start
+}
+```
+
+**Events.** The "current" core is what exists after the event, `_PREV` is what
+no longer exists.
+
+| Event | When | `LXD_REASON` | If the script fails (non-zero exit, timeout, gate) |
+|---|---|---|---|
+| `pre_start` | before the core starts | `boot` (daemon boot), `start` (`POST /admin/start`), `apply` / `sighup` (an apply that brings the core up from nothing) | **fail-closed**: the core does not start, `status: fatal`, `last_error` names the hook |
+| `post_start` | after the core came up — tun and routes exist | `boot`, `start`, `apply` / `sighup` (same case) | the core keeps running; Error in the log, mark in `/admin/status` |
+| `post_reload` | after the instance was swapped in the live process | `apply`, `sighup`, `rollback` (the new config did not come up, last-good is up; also `POST /admin/rollback` over a live core) | the core keeps running; Error, mark in the status |
+| `post_stop` | after the core is gone | `stop`, `shutdown` (SIGTERM, `update`, service restart), `fatal` (the start failed after `pre_start` passed, or the rollback failed too), `recover` (see below) | log only; nothing blocks the stop |
+
+Every start ends with either `post_start` or `post_stop(fatal)`; a rollback
+inside an apply is a `post_reload(rollback)` with `LXD_ERROR` = why the new
+config was rejected. There is no `pre_stop` or `pre_reload`: a crash of the
+daemon process takes the core with it, and nothing before the crash can be
+relied on. Hence the contract for the `post_*` scripts: **idempotent and
+recovering** — read your own snapshot in `$LXD_HOOK_DIR`, act on it, never
+assume that `post_start` preceded this `post_stop`. `pre_start` is a
+precondition gate (the uplink is up, the disk is not full) with no side
+effects.
+
+**`recover`.** After every successful start the daemon writes
+`hooks/core_snapshot.json`; after `post_stop` it deletes it. A daemon that boots and
+finds the file knows the previous process died without `post_stop` (core
+panic, `kill -9`, power loss) and calls `post_stop` with `LXD_REASON=recover`
+and `_PREV` from the file — before its own `pre_start`. For the script it is
+an ordinary stop. This is the only coverage of a core panic: the core lives in
+the daemon process, there is no child supervision.
+
+**Environment.** Facts from the daemon, never client input; empty = unknown
+or not applicable. Common: `LXD_EVENT`, `LXD_REASON`, `LXD_CLIENT` (the client
+name when a REST request caused the transition — by certificate, `operator`
+over Bearer; empty for `boot`, `sighup`, `shutdown`, `fatal`, `recover`),
+`LXD_PLATFORM`, `LXD_VERSION`, `LXD_INIT_SYSTEM`, `LXD_STATE_DIR`, `LXD_BIN`,
+`PATH` (as for `commands`), `LXD_LOG_FILE` (empty in a terminal run),
+`LXD_HOOK_DIR`, `LXD_HOOK_TIMEOUT` (seconds). Facts about the core — current
+without a suffix, previous with `_PREV`:
+
+| Variable | Value |
+|---|---|
+| `LXD_CONFIG_SHA` / `_PREV` | sha256 of the config, as in `/admin/status` |
+| `LXD_TUN_ADDRESS` / `_PREV` | addresses of all tun inbounds, comma-separated, v4 and v6 together, config order |
+| `LXD_TUN_INTERFACE` / `_PREV` | the actual interface names (`utunN`, `tunN`), same order; in `pre_start` and in `post_stop(fatal)` only an explicit `interface_name`, otherwise empty |
+| `LXD_TUN_MTU` / `_PREV` | mtu per tun inbound (9000 when not set) |
+| `LXD_TUN_AUTO_ROUTE` / `_PREV` | `1`/`0` per tun inbound — with `0` pointing the system DNS at the tun is pointless |
+| `LXD_ERROR` | the core's error on `rollback` and `fatal` |
+
+`pre_start` has only current facts, `post_stop` only `_PREV`, `post_reload`
+both; no tun inbound = all `LXD_TUN_*` empty.
+
+**Execution.** Synchronous, in the daemon process's lifetime: the file is run
+directly (no shell), cwd `/`, stdin `/dev/null`, stdout and stderr redirected
+to `<event>.log` (overwritten each run), in its own process group; on timeout
+the whole group gets `SIGKILL`. A backgrounded child (`nohup … &`) is not
+waited for, but it dies with the daemon under the service's SIGTERM unless it
+called `setsid` — whatever DNS depends on must finish before `exit`. Before
+every run the daemon checks that every path component from `/` to the script
+is root-owned, not group/world-writable and not a symlink, and the file is
+regular and executable (the SPEC 100 invariant); a violation is a hook
+failure. The transition waits for the hook: `POST /admin/apply` may take up
+to `timeout_seconds` longer. Across processes the runs are serialized by a
+`flock` on `hooks/.lock`: on `update` procd starts the new daemon before the
+old one finished — without the lock the new `post_start` would snapshot a
+system DNS that still holds the VPN DNS.
+
+**Stop budget.** `post_stop` under SIGTERM runs before the control planes
+close; the window is the init system's: procd kills after `term_timeout`
+(default 5 s — the OpenWrt installer sets 30), launchd after `ExitTimeOut`
+(20 s). A `SIGKILL` in the middle of `post_stop` leaves DNS pointing at a dead
+tun, so keep the script inside that window.
+
+**Windows:** the `hooks` key is accepted with a Warn and ignored (unix only).
+
+**Sample `post_start` / `post_stop` for macOS** — point the Wi-Fi service's
+DNS at the tun, restore from the snapshot:
+
+```sh
+#!/bin/sh
+# post_start
+set -e
+SERVICE="Wi-Fi"
+case "$LXD_TUN_AUTO_ROUTE" in 1*) ;; *) exit 0 ;; esac
+[ -f "$LXD_HOOK_DIR/dns.snapshot" ] || networksetup -getdnsservers "$SERVICE" > "$LXD_HOOK_DIR/dns.snapshot"
+DNS=$(printf '%s' "$LXD_TUN_ADDRESS" | cut -d, -f1 | cut -d/ -f1)
+networksetup -setdnsservers "$SERVICE" "$DNS"
+```
+
+```sh
+#!/bin/sh
+# post_stop — idempotent: with no snapshot there is nothing to restore
+SERVICE="Wi-Fi"
+[ -f "$LXD_HOOK_DIR/dns.snapshot" ] || exit 0
+if grep -q "aren't any" "$LXD_HOOK_DIR/dns.snapshot"; then
+  networksetup -setdnsservers "$SERVICE" empty
+else
+  networksetup -setdnsservers "$SERVICE" $(cat "$LXD_HOOK_DIR/dns.snapshot")
+fi
+rm -f "$LXD_HOOK_DIR/dns.snapshot"
+```
+
+**Sample for Linux with `systemd-resolved`** — per-link DNS, nothing to
+restore (the setting dies with the interface):
+
+```sh
+#!/bin/sh
+# post_start
+IFACE=$(printf '%s' "$LXD_TUN_INTERFACE" | cut -d, -f1)
+DNS=$(printf '%s' "$LXD_TUN_ADDRESS" | cut -d, -f1 | cut -d/ -f1)
+[ -n "$IFACE" ] && resolvectl dns "$IFACE" "$DNS" && resolvectl domain "$IFACE" '~.'
+```
+
+`GET /admin/status` carries a `hooks` object with the last outcome per event
+(`ok` / `failed` / `timeout` / `skipped` / `never`, `reason`, `exit_code`,
+`finished_at`, `detail`), so a client can draw a mark next to the core state.
+
 ## 7. macOS — automatic installation
 
-The only platform with a full `--service`. Two scopes:
+macOS and Windows ([7a](#7a-windows--automatic-installation)) have a full `--service`; this
+section is macOS. Two scopes:
 
 ```bash
 sudo sing-box lxd --service=install    # system LaunchDaemon: root, starts before login, TUN
@@ -205,15 +380,22 @@ fails with a permission error under the user scope. This has nothing to do with
 
 Install does everything itself:
 
-1. creates `…/Application Support/sing-box-lxd/` (0700) with `state/` inside;
-2. **materializes daemon.json**: an existing address is kept (a reinstall never
+1. system scope: copies the binary to
+   `/Library/PrivilegedHelperTools/sing-box-lxd`, root-owned, and
+   the service runs that copy, not the file you installed from
+   ([7.1](#71-the-root-owned-copy-of-the-binary));
+2. creates `…/Application Support/sing-box-lxd/` (0700; system scope — `root:wheel`)
+   with `state/` inside;
+3. **materializes daemon.json**: an existing address is kept (a reinstall never
    moves the channel out from under enrolled clients), otherwise the first free
    loopback port from 19091 up; `tls` — always; the secret — kept or generated;
-3. writes the plist (`com.leadaxe.sing-box-lxd`) and bootstraps the service;
+4. writes the plist (`com.leadaxe.sing-box-lxd`) and bootstraps the service — after a bootout it waits for the old job to disappear (up to 10 s, `waiting for the old service to unload (Ns)`) and retries a bootstrap that answers "already in progress", because a live core takes seconds to exit;
    the plist degenerates to `sing-box lxd --state-dir <dir>` — every setting
    lives in daemon.json;
-4. prints the summary: channel address, admin secret, daemon.json path, the
-   restart command — and a **one-time invite** to pair the launcher.
+5. prints the status report ([7.1](#71-the-root-owned-copy-of-the-binary)) and the
+   summary: channel address, admin secret, daemon.json path, the restart command —
+   and a **one-time invite** to pair the launcher (or, with `--invite-out`, the invite
+   goes into a file — [9](#9-pairing-a-client-the-same-on-every-os)).
 
 Paths: system — `/Library/Application Support/sing-box-lxd/`, user —
 `~/Library/Application Support/sing-box-lxd/`. The log is `lxd.log` beside
@@ -222,11 +404,419 @@ Paths: system — `/Library/Application Support/sing-box-lxd/`, user —
 Other actions:
 
 ```bash
-sing-box lxd --service=install --dry-run  # show the plist and what would happen, touch nothing
+sing-box lxd --service=install --dry-run  # show the copy plan, the plist and what would happen, touch nothing
+sing-box lxd --service=status             # what is installed; exit 0/2/3/4 (see 7.1), no root needed
+sudo sing-box lxd --service=copy          # only the root-owned copy, no service (7.1)
 sing-box lxd --service=uninstall          # remove the service; state is kept
 sing-box lxd --service=uninstall --purge  # remove the service AND the state (clients, keys, last-good)
 sing-box lxd --service=uninstall --dry-run --purge   # show what would be removed
 sudo sing-box lxd client add --name mac-book   # a fresh invite on a live daemon (state-dir is found automatically)
+```
+
+### 7.1. The root-owned copy of the binary
+
+A LaunchDaemon runs as root at every boot and every KeepAlive restart. If its plist
+pointed at the binary inside the launcher bundle — a file the logged-in user can
+replace — any process of that user could get code run as root. So the system service
+never runs the file it was installed from; `--service=install` copies it first:
+
+| What | Path | Owner / mode |
+|---|---|---|
+| binary | `/Library/PrivilegedHelperTools/sing-box-lxd` | `root:wheel 0755` |
+| sidecar | `/Library/PrivilegedHelperTools/sing-box-lxd.install.json` | `root:wheel 0644` |
+
+Apple's convention for privileged helpers: one flat file, no directory of its own. It is
+named `sing-box-lxd`, not by the label: macOS truncates a process name to 16 characters,
+and `sing-box-lxd` fits whole and contains `sing-box`, so `pgrep sing-box`, `pkill` and
+`ps -c` find the daemon without `-f`. The service label, the plist and
+`XPC_SERVICE_NAME` stay `com.leadaxe.sing-box-lxd`.
+A clean macOS has no `/Library/PrivilegedHelperTools` until SMJobBless installs the first
+privileged helper; `install` and `copy` then create it `root:wheel 0755`, exactly what
+`sudo mkdir -m 0755` would (`lxd: created … (root:wheel 0755)`; `--dry-run` prints
+`would create`). Only that last component is created: `/Library` must exist and pass the
+invariant, an existing directory is checked and never repaired, and `status`/`uninstall`
+never create it (SPEC 124).
+
+- **The invariant.** Every path component from `/` down to the binary is a real
+  directory or file (not a symlink), owned by uid 0, with no write bit for group or
+  other. `/Applications` itself is `root:admin 0775` — that is why a bundle binary fails
+  it.
+- **How the copy lands.** A temporary file with a unique name in the same directory,
+  fsync, `chown root:wheel`, `chmod 0755`, sha256 compared with the source, then
+  `rename` over the old copy. Never rewritten in place (a running daemon keeps the old
+  file, and macOS kills a process whose signed pages change), no xattrs, no re-signing.
+  An identical copy is left alone: `lxd: binary unchanged (sha256 …), copy skipped`.
+- **The plist** changes only in `ProgramArguments[0]`; daemon.json, the address, the
+  secret and the enrolled clients stay as they were.
+- **The sidecar** `sing-box-lxd.install.json` is readable without root:
+  ```json
+  {
+    "source": "/Applications/singbox-launcher.app/Contents/MacOS/bin/sing-box",
+    "sha256": "…",
+    "version": "1.14.1-lx.11",
+    "installed_at": "2026-09-24T12:00:00Z",
+    "plist_path": "/Library/LaunchDaemons/com.leadaxe.sing-box-lxd.plist",
+    "label": "com.leadaxe.sing-box-lxd"
+  }
+  ```
+  `version` is the copy's core version, readable without running it; `plist_path` is
+  empty for a copy without a service.
+- **`--exec-dir <dir>`** puts both files, under the same names, into another directory;
+  a missing one is created `root:wheel 0755`. The same invariant covers every component
+  of `<dir>` and the file itself; otherwise install refuses:
+  `<path>: owned by uid N, mode NNNN, must be root-owned and not group/world-writable`.
+- **A directory where the file belongs** stops install and copy:
+  `target is a directory (legacy layout); remove it: sudo rm -rf <path>`. Nothing deletes
+  it automatically; status reports it (exit 2), uninstall leaves it with the same hint.
+- **Files of earlier builds are not this core's.** `v1.14.1-lx.11` named the copy by the
+  label (`/Library/PrivilegedHelperTools/com.leadaxe.sing-box-lxd` and its
+  `.install.json`); early pre-releases left a directory of that name. The current core
+  never reads, rewrites or deletes them; a plist running such a file shows as `MISMATCH`
+  (exit 2) until `sudo sing-box lxd --service=install` moves the service to
+  `sing-box-lxd`. Remove the leftovers by hand:
+  `sudo rm -rf /Library/PrivilegedHelperTools/com.leadaxe.sing-box-lxd*`.
+
+**A copy without a service.** `sudo sing-box lxd --service=copy` lays down the same copy
+and sidecar and nothing else — no plist, no launchd. It serves a launcher that runs the
+core as root by itself (classic TUN mode). Repeating it with the same binary changes
+nothing (`lxd: already up to date <sha256>`); a later `--service=install` binds this copy
+to the plist without copying again. Updating the core means running `--service=copy`
+(and `--service=install`, if the service exists) from the new binary — the core does not
+watch for updates.
+
+**Status** needs no root and changes nothing:
+
+```bash
+sing-box lxd --service=status; echo "exit $?"
+```
+
+For the LaunchDaemon (or, without one, the copy) and for a user agent it prints the
+plist, the program it runs, owner and mode, whether the invariant holds, the program's
+sha256 against this binary's, the sidecar, and `launchctl print`'s state and pid. The
+last line is the verdict:
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `OK` | the service runs a root-owned copy of exactly this binary | 0 |
+| `MISMATCH` | reinstall needed: another binary, a missing or foreign sidecar, a copy changed behind its sidecar, a sidecar without its copy | 2 |
+| `UNSAFE` | the program, or a directory above it, fails the invariant | 2 |
+| `NOT INSTALLED` | neither a plist nor a copy | 3 |
+| `COPY ONLY` | a good copy of this binary, no service | 4 |
+| `NOT RUNNING` | installed and consistent on disk, but launchd has no running job for the label (a failed bootstrap, a bootout without bootstrap); the reason carries the `launchctl bootstrap` command | 5 |
+
+**Uninstall** removes the copy and its sidecar only when the sidecar belongs to this
+service (or to no plist) and the file's sha256 still equals the sidecar's; otherwise the
+file stays and the reason is printed (`lxd: copy left in place: …`). It never deletes an
+arbitrary `ProgramArguments[0]`.
+
+`sudo sing-box lxd --service=uninstall --keep-copy` removes the plist and the launchd job
+but keeps the copy and its sidecar, whose `plist_path` is cleared — the copy-only state
+(status `COPY ONLY`, exit 4):
+`lxd: copy kept for non-service use: <path>; remove with --service=uninstall without --keep-copy`.
+`--purge` still concerns only the state. With no service installed and a copy already
+unbound it changes nothing, prints the same line and exits 0.
+
+**Self-check at start.** A core started as root (`lxd` or `run`) checks its own binary
+against the invariant — on macOS and Windows only, where the core installs the service
+itself; on Linux and elsewhere there is no self-check and nothing is logged. The launchd job — parent pid 1 and
+`XPC_SERVICE_NAME=com.leadaxe.sing-box-lxd` — refuses to start and says why in
+`lxd.log`:
+
+```
+lxd: refusing to run as a root service from /Applications/…/sing-box (uid 501, mode 0755): /Applications: owned by uid 0, mode 0775, must be root-owned and not group/world-writable; run `sing-box lxd --service=install` to reinstall from a root-owned copy
+```
+
+Any other root run — sudo from a terminal, nohup, a launcher elevating the core — only
+logs a WARN with the same path, owner and mode. `lxd --allow-unsafe-exec` turns the
+refusal into a WARN for debugging. A passed check in the launchd job logs one INFO line:
+`lxd: self-check ok: root-owned /Library/PrivilegedHelperTools/sing-box-lxd, launchd service com.leadaxe.sing-box-lxd`.
+
+> ⚠️ **Upgrading a system install made by an older core.** Its plist runs the bundle
+> binary. Once that binary is updated to this version, the next restart of the service
+> refuses to start (above). Reinstall once: `sudo sing-box lxd --service=install` —
+> daemon.json, clients and keys are kept.
+
+**Checking by hand:**
+
+```bash
+ls -ld / /Library /Library/PrivilegedHelperTools
+ls -l /Library/PrivilegedHelperTools/sing-box-lxd*                         # root wheel -rwxr-xr-x the binary, -rw-r--r-- .install.json
+plutil -p /Library/LaunchDaemons/com.leadaxe.sing-box-lxd.plist            # ProgramArguments[0] = the copy
+shasum -a 256 /Library/PrivilegedHelperTools/sing-box-lxd
+cat /Library/PrivilegedHelperTools/sing-box-lxd.install.json               # the same sha256
+pgrep -l sing-box                                                          # the daemon shows as sing-box-lxd
+launchctl print system/com.leadaxe.sing-box-lxd | grep -E '^[[:space:]](state|pid|program) ='
+sing-box lxd --service=status
+```
+
+## 7a. Windows — automatic installation
+
+On Windows `--service` installs a service of the Service Control Manager (SCM) named
+`sing-box-lxd`: account `LocalSystem`, automatic start at boot (before anyone logs on),
+dependency on `Tcpip`. The model is the macOS one ([7.1](#71-the-root-owned-copy-of-the-binary)):
+the service never runs the file it was installed from, only a protected copy.
+
+```powershell
+# PowerShell "Run as administrator" for everything but status and --dry-run
+sing-box lxd --service=install                  # the service, the protected copy, daemon.json, an invite
+sing-box lxd --service=install --dry-run        # the plan: data dir, copy, BinaryPathName; touches nothing
+sing-box lxd --service=status                   # no elevation; exit 0/2/3/4/5, 1 on an error (see below)
+sing-box lxd --service=copy                     # the protected copy only, the SCM untouched (7a.1)
+sing-box lxd --service=uninstall                # remove the service and its copy; state and logs are kept
+sing-box lxd --service=uninstall --keep-copy    # remove the service, keep the copy (status COPY ONLY)
+sing-box lxd --service=uninstall --purge        # also delete <ProgramData>\sing-box-lxd (state and logs)
+sing-box lxd --service=install --invite-out C:\Users\me\invite.txt   # the invite into a new file (9)
+sing-box lxd client add --name office-pc        # a fresh invite on a live daemon (state dir is found automatically)
+```
+
+`install`, `copy` and `uninstall` need an elevated token; without it they refuse before
+touching anything (`--service=install needs an elevated token (run as administrator)`).
+`status` and `--dry-run` work from a regular prompt. `--service=install-user` does not
+exist here: `--service=install-user is not supported on Windows; use --service=install`.
+`--exec-dir <dir>` moves the copy elsewhere, as on macOS; `status` and `uninstall` of such
+an install need the same flag.
+
+Paths (the roots come from the Known Folders `ProgramFiles` and `ProgramData`; `C:\` is
+only the usual value):
+
+| What | Path | Owner / DACL |
+|---|---|---|
+| copy directory | `<ProgramFiles>\sing-box-lxd\` | Administrators; `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;AU)` |
+| binary | `…\sing-box-lxd\sing-box-lxd.exe` | Administrators; `D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;AU)` |
+| library | `…\sing-box-lxd\libcronet.dll` — only if it lies beside the source binary | as the binary |
+| sidecar | `…\sing-box-lxd\sing-box-lxd.install.json` | as the binary |
+| data directory | `<ProgramData>\sing-box-lxd\` | Administrators; `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)` |
+| state | `<ProgramData>\sing-box-lxd\state\` — daemon.json, TLS pair, clients, `resources`, `tailscale` | SYSTEM or Administrators, SYSTEM and Administrators only |
+| logs | `<ProgramData>\sing-box-lxd\logs\` — `lxd.log`, `lxd.log.1`; the launcher writes its `classic.log` there | as state |
+
+Authenticated Users may read and execute the copy (the launcher hashes it and reads the
+sidecar without elevation) but not write it. The data directory is closed to everyone
+except SYSTEM and Administrators. `wintun.dll` is not part of the copy: `sing-tun` embeds
+it and loads it from memory.
+
+What `--service=install` does, in order:
+
+1. Checks the token; with `--invite-out`, an existing file refuses the whole command
+   before any change.
+2. **Takes the data directory over** before anything is written into it — daemon.json
+   carries the secret, and a file created under a foreign owner would inherit a foreign
+   DACL. With `SeTakeOwnershipPrivilege` and `SeRestorePrivilege` enabled it walks
+   `<ProgramData>\sing-box-lxd` top-down, every node through a handle opened without
+   following links: the root gets owner Administrators and the protected DACL above; a node
+   below it that is out of the norm gets owner Administrators and an explicit protected DACL
+   of its own (directories — inheritable, files — `D:P(A;;FA;;;SY)(A;;FA;;;BA)`). Files the
+   daemon created as SYSTEM with the inherited entries are in the norm and stay as they
+   are. One line per node that changed — `lxd: took ownership of <path> (was <name>
+   (<SID>))`, `lxd: replaced DACL on <path>` — or a single `lxd: data dir <path> is
+   protected`. `state\` and `logs\` are created if missing. The launcher's `classic.log`
+   gets the same DACL; the launcher restores its own read access when it next starts
+   elevated. A reparse point or a file with more than one hard link inside refuses
+   (`<path> is a reparse point; remove it: Remove-Item <path>`): changing an ACL through a
+   link would change someone else's object. Install never deletes them itself.
+3. **daemon.json**, as on macOS: an existing address is kept, otherwise the first free
+   loopback port from 19091; `tls: true`; the secret is kept or generated. If the file has
+   no `log_file`, install writes `<ProgramData>\sing-box-lxd\logs\lxd.log`.
+4. A running service is stopped, waiting up to 30 s for `STOPPED`
+   (`lxd: stopping service sing-box-lxd (Ns)`); if it does not stop, install fails and
+   nothing is changed.
+5. The binary set and the sidecar go into the copy directory ([7a.1](#7a1-the-protected-copy-of-the-binary-set)).
+6. The service is created or updated: `BinaryPathName` is the quoted copy path plus
+   `lxd --state-dir <abs>` (and `-c`/`--config-force`/`--run` if given, as on macOS);
+   `LocalSystem`, automatic start, dependency `Tcpip`; recovery — restart three times
+   after 5 s, counter reset after 86400 s, also when the service stops with a non-zero exit
+   code. The service DACL is `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)`: Authenticated
+   Users may read the configuration and the status, but not start, stop, reconfigure or
+   take the service over.
+7. Start, waiting up to 30 s for `RUNNING`. A service that stops while starting is an
+   error with its exit codes; the reason is in `lxd.log`.
+8. The status report; a verdict other than `OK` makes install fail (exit 1).
+9. The summary: channel address, admin secret, daemon.json path,
+   `restart command: Restart-Service sing-box-lxd (PowerShell as administrator)` and a
+   one-time invite — printed, or written to the `--invite-out` file.
+
+If the copy or the service configuration fails after the stop in step 4, install puts the
+previous image back, starts the service on it and only then returns the error
+(`lxd: install failed, previous service image restarted`): a failed update does not leave
+the host without its VPN. A repeated install from the same binary leaves the files alone
+(`lxd: binary set unchanged (…), copy skipped`), keeps daemon.json, the secret and the
+clients, and restarts the service — a short VPN blink.
+
+`Restart-Service` rather than `sc.exe stop` + `sc.exe start`: `sc.exe stop` does not wait,
+and `start` fails with error 1056 while the service is still `STOP_PENDING`. An install
+right after an uninstall can hit `ERROR_SERVICE_MARKED_FOR_DELETE` (1072) while the
+Services console (`services.msc`) is open; close it, or reboot, and install again.
+
+If install took ownership from an account outside SYSTEM, Administrators and
+TrustedInstaller, or such an account could read `state\`, and a daemon.json was already
+there, the secret and the server key pair are not regenerated (the launcher keeps the
+secret, and a new pair would unpair every client). Install prints
+`WARN: <path> was readable by <name> (<SID>) before this install; rotate the admin secret
+in daemon.json and re-pair clients if the host is shared` and records the same text in the
+sidecar (`warnings`), because a launcher running install through `runas` has no console to
+show it.
+
+**Status** needs no elevation and changes nothing. It opens the SCM with
+`SC_MANAGER_CONNECT` and the service with query rights only, and prints three blocks —
+`[service]` (name, `BinaryPathName` and its argv[0], start type, account, state, pid, whether
+the service DACL is protected), `[copy]` (directory, the invariant of the chain, owner and
+sha256 of each file against the caller's set, extra files, leftovers, the sidecar with its
+warnings) and `[data dir]` (owner and whether the DACL is protected; without administrator
+rights it is usually unreadable, which is expected — informational only). The last line is
+the verdict:
+
+| Verdict | Meaning | Exit |
+|---|---|---|
+| `OK` | the service runs the canonical copy, the service DACL and the invariant hold, the sidecar is bound to `sing-box-lxd`, files = sidecar = the calling binary's set, no extra files, state `RUNNING` | 0 |
+| `MISMATCH` | the invariant holds, but: another set than the caller's (including `libcronet.dll` present on one side only); no sidecar or a foreign one; a file differs from the sidecar; a sidecar names a missing file; the sidecar is bound to a service that does not exist; an extra file in the copy directory | 2 |
+| `UNSAFE` | the service configuration cannot be read (access denied included); `BinaryPathName` does not parse; argv[0] is not the canonical copy; an unquoted path with a space; the service DACL gives another account `SERVICE_CHANGE_CONFIG`, `WRITE_DAC`, `WRITE_OWNER`, `DELETE`, `GENERIC_WRITE` or `GENERIC_ALL`; the chain or the set fails the invariant | 2 |
+| `NOT INSTALLED` | no service, no copy, no sidecar | 3 |
+| `COPY ONLY` | no service; the copy passes the invariant, its sidecar has `service: ""`, files = sidecar = the caller's set | 4 |
+| `NOT RUNNING` | everything as for `OK`, but the state is not `RUNNING` (`START_PENDING` included); the reason carries `sc.exe start sing-box-lxd` (as administrator) or `--service=install` | 5 |
+| error | the SCM does not open, the calling binary cannot be read | 1 |
+
+Unlike macOS, a service whose argv[0] is not the canonical copy is `UNSAFE`, not
+`MISMATCH`. The caller's set is its own `.exe` plus `libcronet.dll` beside it, if any; paths
+compare case-insensitively.
+
+**Uninstall** stops and deletes the service (`lxd: uninstalled service sing-box-lxd`), then
+looks at two places: the directory of the service's argv[0] (when that file is named
+`sing-box-lxd.exe`) and the copy directory. The set there is removed only if the sidecar
+exists, its `service` is `sing-box-lxd` or empty, and the sha256 of every file equals the
+sidecar's; one difference and nothing is removed, with the reason
+(`lxd: copy left in place: …`). Leftovers go with the set; the default
+`<ProgramFiles>\sing-box-lxd` is removed once empty, a directory given by `--exec-dir`
+stays. `--keep-copy` removes only the service and rewrites the sidecar with `service: ""`
+(`lxd: copy kept for non-service use: <path>; remove with --service=uninstall without --keep-copy`).
+`--purge` also deletes the whole `<ProgramData>\sing-box-lxd`, the launcher's `classic.log`
+included. `--dry-run` prints the same decisions with `would`.
+
+**Logs.** The daemon writes `logs\lxd.log`; rotation is by copying (see [6](#6-logs)).
+Events of the service itself (start, stop, exit code) are in the System event log, written
+by the SCM; the daemon does not use the Event Log. An error before the log is open (an
+unreadable daemon.json) is visible only as exit code 1 there.
+
+**Under the SCM** the daemon reports `START_PENDING`, reads daemon.json, takes the log over,
+runs the self-check, changes its working directory to the state directory (relative config
+paths such as `cache.db` resolve there, not in `System32`) and reports `RUNNING` right away:
+the control channel comes up first anyway, and the core's bootstrap may take longer than
+the SCM start timeout. A stop or shutdown cancels the daemon and waits for it for 10 s;
+past that the process logs a line and exits with code 1. The channel is the same TCP
+loopback + mTLS as elsewhere; no named pipe.
+
+The service runs the daemon on the core's context, as the console run does; a panic in an
+admin REST or gRPC handler goes to `lxd.log` with its stack. Use `v1.14.2-lx.2` or later: in
+the pre-releases `v1.14.2-lx.2-rc.1`/`rc.2` the first `/admin/apply` under the SCM panicked
+and the client saw EOF.
+
+Windows 7 builds (`windows-386-legacy-windows-7`) ship without `with_lxd`, so there is no
+`lxd` and no service there.
+
+### 7a.1. The protected copy of the binary set
+
+- **The invariant.** Every component from the volume root down to the parent of the copy
+  directory is owned by SYSTEM, Administrators or TrustedInstaller, and no other account
+  holds `DELETE`, `WRITE_DAC`, `WRITE_OWNER`, `GENERIC_WRITE`, `GENERIC_ALL` or
+  `FILE_DELETE_CHILD` on it (creating folders in `C:\` is allowed — it cannot replace our
+  path). The copy directory and every file of the set are owned by SYSTEM or
+  Administrators, and no other account holds any write right on them either. Each component
+  is opened without following links, and its owner and DACL are read from that handle; a
+  reparse point anywhere, a NULL DACL, or an allow entry of an unknown type (object,
+  callback) is a violation. The volume must be a fixed NTFS drive. Messages name the path
+  and the account: `<path>: owner <name> (<SID>) is not SYSTEM, Administrators or
+  TrustedInstaller` (for the copy itself: `is not SYSTEM or Administrators`), `<path>: <name> (<SID>) is granted <rights>, must not be writable by a
+  non-administrative principal`, `<path>: is a reparse point, must be a real file or
+  directory`, `<path>: not on a fixed NTFS volume`.
+- **The set.** The resolved `os.Executable()` (a regular file, at most 512 MiB) plus
+  `libcronet.dll` from the same directory, if present. The copy is always named
+  `sing-box-lxd.exe`.
+- **How the set lands.** The ancestors are checked first (a violation refuses before any
+  change); the copy directory is created with its DACL or brought back to it. Leftovers of
+  a previous run (`<member>.old`, `.<member>.tmp-<hex>`) are removed; one still in use stays
+  for the next install (`lxd: <path> is still in use, left for the next install`). A file
+  named in the previous sidecar that is no longer part of the set (a `libcronet.dll` of an
+  earlier build) is removed; an unknown file refuses:
+  `<path>: unknown file in the copy directory; remove it: Remove-Item <path>`. Each changed
+  member goes through a temporary file created in the same directory, flushed, given its
+  DACL, and compared by sha256 with the source; then the old file is renamed to
+  `<name>.old`, the temporary file is renamed into place and `.old` is deleted. There is no
+  rewrite in place: a running image cannot be opened for writing, but it can be renamed. An
+  identical set is left alone:
+  `lxd: binary set unchanged (sha256 <exe>[, libcronet.dll <hex>]), copy skipped`.
+- **The sidecar** `sing-box-lxd.install.json` is written after the set, through a temporary
+  file and a rename, and is readable without elevation. It is a different structure from
+  the macOS one:
+  ```json
+  {
+    "source": "C:\\Users\\u\\AppData\\Local\\singbox-launcher\\bin\\sing-box.exe",
+    "version": "1.14.2-lx.2",
+    "installed_at": "2026-09-24T12:00:00Z",
+    "service": "sing-box-lxd",
+    "files": [
+      {"name": "sing-box-lxd.exe", "sha256": "…"},
+      {"name": "libcronet.dll", "sha256": "…"}
+    ],
+    "warnings": [
+      {"code": "state_dir_foreign_before_install", "text": "WARN: … before this install; …"}
+    ]
+  }
+  ```
+  `service` is the SCM service the copy is bound to, `""` for a copy without a service.
+  `files` is the whole set with the sha256 of each copy. `warnings` holds what the last
+  install or copy warned about; absent or empty means nothing, and every run rewrites it.
+  The only code so far is `state_dir_foreign_before_install`. If the files, the binding and
+  the warnings are all unchanged, the sidecar is not rewritten
+  (`lxd: already up to date <sha256>`). Installing from the copy itself keeps the previous
+  `source`.
+- **A copy without a service.** `--service=copy` takes the data directory over and lays down
+  the set and the sidecar; the SCM is not touched. The sidecar gets `service: ""`, unless it
+  was bound to an existing `sing-box-lxd` service — then the binding stays. A running service
+  keeps executing the old image until it is restarted
+  (`lxd: the service still runs the previous image until restarted`). Repeating it with the
+  same binary changes nothing. This is for a launcher that runs the core elevated by
+  itself.
+- **Self-check at start.** An elevated core (`lxd` or `run`) checks its own binary with the
+  invariant: the chain above its directory, the directory, the binary and `libcronet.dll`
+  beside it. `lxd` started by the SCM refuses to start on a violation, with the reason in
+  `lxd.log` and exit code 1:
+  ```
+  lxd: refusing to run as a Windows service from <binary> (owner <name> (<SID>)): <violation>; run `sing-box lxd --service=install` to reinstall from a protected copy
+  ```
+  Any other elevated run — `lxd` outside the SCM, `run` (the launcher's classic mode
+  included) — and `lxd --allow-unsafe-exec` only log a WARN; a non-elevated process is not
+  checked. A passed check under the SCM logs one INFO line:
+  `lxd: self-check ok: protected <path>, windows service sing-box-lxd`.
+- **DLL search.** Every `with_lxd` build on Windows restricts the search for DLLs loaded
+  without a full path to the application directory and `System32`
+  (`SetDefaultDllDirectories`), so a privileged core does not pick up a library planted in
+  its working directory or in a user-writable `PATH` entry. `libcronet.dll` itself is loaded
+  lazily by full path from the executable's directory and then from `PATH`; when the set
+  carries no `libcronet.dll`, the service and an elevated `run` pin the load to the
+  executable's directory at start, so a naive outbound gets a load error instead of a `PATH`
+  search under SYSTEM.
+
+Not covered: Authenticode signatures of the copy are neither checked nor applied; two
+concurrent install/copy runs with different binaries are not locked against each other
+(status then shows `MISMATCH`, repeating the command fixes it); the ancestors of
+`<ProgramData>` are not checked by the core.
+
+### 7a.2. Checking by hand
+
+From PowerShell (the `icacls` and `Get-Acl` of the data directory need administrator
+rights):
+
+```powershell
+sc.exe qc sing-box-lxd                     # BINARY_PATH_NAME = "C:\Program Files\sing-box-lxd\sing-box-lxd.exe" lxd --state-dir …, AUTO_START, LocalSystem, DEPENDENCIES Tcpip
+sc.exe qfailure sing-box-lxd               # RESTART -- Delay = 5000 milliseconds (three times), RESET_PERIOD 86400
+sc.exe sdshow sing-box-lxd                 # D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)
+sc.exe query sing-box-lxd                  # STATE 4 RUNNING
+icacls "C:\Program Files\sing-box-lxd"     # SYSTEM:(OI)(CI)(F), Administrators:(OI)(CI)(F), Authenticated Users:(OI)(CI)(RX); no inherited entries
+icacls "C:\Program Files\sing-box-lxd\sing-box-lxd.exe"
+(Get-Acl "C:\Program Files\sing-box-lxd\sing-box-lxd.exe").Owner   # BUILTIN\Administrators
+icacls C:\ProgramData\sing-box-lxd /t      # SYSTEM and Administrators only (plus the launcher's own entry on classic.log)
+Get-FileHash "C:\Program Files\sing-box-lxd\sing-box-lxd.exe"      # SHA256, compare with the sidecar
+Get-Content "C:\Program Files\sing-box-lxd\sing-box-lxd.install.json"
+Get-Content C:\ProgramData\sing-box-lxd\logs\lxd.log -Tail 50
+sing-box lxd --service=status; "exit $LASTEXITCODE"
 ```
 
 ## 8. Linux — setup approaches
@@ -369,18 +959,149 @@ firewall) — [openwrt-vpn-ssid.md](openwrt-vpn-ssid.md).
 
 - Automatic installation — by principle, not by omission (see above): the
   recipe is printed, the operator runs it.
-- Self-update — updating the binary means "deliver the file + restart the
-  service".
+- Self-update by the service manager — the binary updates itself instead:
+  `sing-box lxd update` ([8.6](#86-updating-sing-box-lxd-update)).
+
+### 8.5. Maintenance from the launcher: named commands
+
+The daemon runs as root, so a client must never be able to hand it code to
+execute (SPEC 100: a client configures the network, nothing more). What it
+can do is pick from a list **the operator wrote on the host** — the sudoers
+model. `daemon.json`:
+
+```json
+"commands": {
+  "update":  "/usr/bin/sing-box lxd update",
+  "restart": "/etc/init.d/sing-box-lxd restart"
+}
+```
+
+A client sees the list with the command text and the last outcome
+(`GET /admin/commands`), starts one by name (`POST /admin/commands/update`)
+and passes nothing else: a body is a `400`. The command runs detached in its
+own session, so a service restart kills the daemon but not the command, and
+without the daemon's descriptors (`FD_CLOEXEC` is set on everything before the
+spawn: a detached command holding a copy of the TUN fd kept the interface
+alive across a restart, and the new core could not open it); its output and
+exit code are written to `<dir of the log file>/commands/`
+(tmpfs on a router, so a run wears no flash; the state dir when the daemon
+has no log file) and survive the daemon's restart — `GET /admin/commands/update`
+afterwards shows `done`, the exit code and the log tail. `lost` means the
+process died before it could record an exit code.
+
+The command's environment carries facts from the daemon, never from the
+client: `LXD_PLATFORM` (release asset, e.g. `linux-arm64`), `LXD_VERSION`,
+`LXD_INIT_SYSTEM`, `LXD_STATE_DIR`, `LXD_BIN` (the running binary),
+`LXD_CLIENT` (who pressed the button); `PATH` is set to the usual
+`/usr/sbin:/usr/bin:/sbin:/bin` when the service manager gave none. Every
+start is logged with the client's name.
+
+Each command is root. A `wget http://…` without a checksum is root for whoever
+sits in the path — prefer `sing-box lxd update` (§8.6) over a hand-written
+download. The gate is the one every admin route has (the client certificate
+under mTLS, the Bearer secret without it); the key is unix-only (Linux,
+macOS) and ignored with a warning on Windows.
+
+### 8.6. Updating: `sing-box lxd update`
+
+```bash
+sing-box lxd update            # latest stable, restart via the init, roll back if it does not come up
+sing-box lxd update --dry-run  # installed / available / asset — changes nothing
+```
+
+The binary knows what a hand-written script had to guess: its own path
+(`os.Executable`, symlinks resolved — that is the file to replace), its
+version, its release asset (`Platform:` in `sing-box version`, e.g.
+`linux-armv7`, `linux-mipsle-softfloat`) and the host's init. Steps:
+
+1. `SHA256SUMS` of the latest stable release (`--prerelease`: the newest
+   release including rc, through the GitHub API) gives the asset name, the
+   version and the sum in one request. Same version → `already up to date`,
+   exit 0. An installed version newer than the available one is refused —
+   no downgrades. A UPX-packed binary (`UPX!` in its first 4 KiB) takes the
+   packed copy, `sing-box-<ver>-<platform>.upx.tar.gz`, so a router whose
+   overlay fits only the packed core keeps it; a release without that copy
+   falls back to the plain archive and says so.
+2. Free space beside the binary ≥ its size + 10 %.
+3. The archive streams straight into `<binary>.new` on the same filesystem:
+   sha256 over the compressed bytes, gunzip, tar, only the `sing-box` entry
+   is written — nothing lands in `/tmp` (RAM on a router). Before the write
+   the free space is checked again against the size in the entry's tar header
+   (+ 10 %): the plain binary replacing a packed one is 4–5× larger, and the
+   update stops here, after the first kilobytes of the archive. Progress goes to
+   the output at most once a second (`downloading <asset>: 3.2 / 14.1 MiB
+   (23%)`; bytes only when the server gave no length). A sum mismatch
+   deletes `.new`.
+4. `<binary>.new version` must run; with an applied config
+   (`<state>/last_good.json`) `<binary>.new check -c` must accept it.
+5. Swap: `link(binary, binary.old)` keeps the old inode for free, `rename(new,
+   binary)` is atomic — no `ETXTBSY`, the running daemon keeps its old inode.
+6. Restart through the init: `/etc/init.d/<service> restart` (procd),
+   `systemctl restart <service>` (systemd), `rc-service <service> restart`
+   (openrc); `--service` names a unit called differently. An unknown init,
+   `--no-restart`, or a restart command that itself fails leaves the new
+   binary in place and asks you to restart — nothing to roll back from.
+7. Health: the init must report the service running within 15 s and still
+   running 3 s later (a crash loop under procd flickers). Otherwise
+   `binary.old` goes back and the service is restarted again — exit 2.
+8. The core, not just the process: the init's "running" is the daemon, and a
+   daemon that lost the TUN to the old process during the restart stays up
+   with a control channel and no VPN. So the updater asks the new daemon's
+   `GET /admin/status` (loopback, the secret from `daemon.json`) once a second
+   for up to 20 s: `started` → `core started`, done; `fatal` → rollback as in
+   step 7 with `ERROR: <ver> is up but the core did not start: <last_error>`,
+   exit 2; still `idle` after 20 s → the same. A probe that never gets an
+   answer is not a verdict — `core status unknown (…); the service is running,
+   not rolling back`, exit 0 — and `core status not checked: <why>` says when
+   there is no probe at all (no `daemon.json`, `listen` not on loopback, core
+   stopped by the operator). The daemon itself retries a busy TUN at boot for
+   10 s (every 500 ms), so an ordinary `restart` under procd no longer loses
+   the race either.
+
+Exit codes: `0` updated or already current, `1` nothing changed, `2` rolled
+back. Downloads honour `HTTPS_PROXY` / `ALL_PROXY` / `NO_PROXY`, so where
+GitHub is unreachable the command can go through the core's own inbound:
+`"update": "HTTPS_PROXY=socks5://127.0.0.1:2080 /usr/bin/sing-box lxd update"`.
+TLS roots come from the system (`ca-bundle` on OpenWrt, which the installer
+requires). Linux only in this iteration; macOS and Windows have their own
+installation paths (§7, §7a). The OpenWrt installer writes
+`"commands": {"update": "/usr/bin/sing-box lxd update"}` into `daemon.json`,
+so the launcher's Update button runs exactly this.
 
 ## 9. Pairing a client (the same on every OS)
 
 1. On the daemon's host: `sing-box lxd client add --name <label>` (with sudo on
-   macOS when the service is system-scope). It prints a one-time invite
-   `address#fingerprint#code`.
+   macOS when the service is system-scope, elevated on Windows — there an
+   unelevated run says `cannot read <path>: access denied — run as administrator`).
+   It prints a one-time invite `address#fingerprint#code`.
 2. Paste the invite into the launcher: it pins the server by the fingerprint,
    registers with the code (`POST /admin/enroll`), and is trusted by its
    certificate from then on. The code burns.
 3. Inspect/revoke: `client list`, `client remove <name-or-fingerprint>`.
+
+**The client name.** `--name`, `--invite-name` and the `name` field of
+`POST /admin/client-code` are trimmed of surrounding spaces and must then be empty (no
+name) or 1 to 64 printable characters; otherwise the command refuses and the route answers
+400 `client name: …`. A named invite **replaces** an enrolled client of the same name when
+it is redeemed: the old certificate is revoked and the new one takes its place, so a
+launcher that re-pairs on every install does not pile up entries. An invite without a name
+adds a client, as before.
+
+**The invite into a file.** `client add --invite-out <file>` and
+`--service=install --invite-out <file>` write the invite line (`address#fingerprint#code`
+and a newline) into a new file instead of printing it, and print
+`lxd: invite written to <file>`. The file is created before the mint, exclusively: on
+Unix with `O_CREAT|O_EXCL|O_NOFOLLOW` and mode 0600; on Windows with `CREATE_NEW`, after
+which the final path of the opened file must be the requested one (an 8.3 short name in
+the request is accepted; a junction on the path refuses and the file is deleted). An
+existing file refuses the command before anything changes. Install waits up to 15 s for
+the daemon to mint the invite; if it does not, with `--invite-out` install exits 1 — the
+service stays installed, the file is removed — because the launcher judges by the exit
+code. With `--invite-out` install names the client `singbox-launcher` unless
+`--invite-name` says otherwise; without `--invite-out` the name is `--invite-name` or none.
+`--service=install --invite-out` needs a platform where install really installs (macOS,
+Windows) and is refused on Linux, where install prints a recipe; `client add --invite-out`
+works everywhere.
 
 **Pairing gotchas over the network** (proven on a router — three failed tries):
 
@@ -452,7 +1173,8 @@ The invite is three `#`-separated segments — `address#fingerprint#code`:
    ```
 
    Success is `{"enrolled":true,"name":…,"fingerprint":…}`. The label given to
-   `client add --name` wins over the `name` in the request. The code burns on
+   `client add --name` wins over the `name` in the request, and such a named code
+   replaces an enrolled client of that name (see [9](#9-pairing-a-client-the-same-on-every-os)). The code burns on
    success; only one code is active at a time (a new mint replaces the old).
 
 4. **Everything after enrollment is mTLS with that certificate** — it is the
@@ -480,8 +1202,8 @@ Error map:
 | `POST /admin/rollback` | roll back to last-good (404 — nothing recorded) |
 | `POST /admin/start` · `POST /admin/stop` | core lifecycle apart from the config (stop is remembered) |
 | `GET /admin/config` | the active config |
-| `GET /admin/status` | `idle\|started\|fatal`, active/last-good sha, `last_error`, `interrupted_apply` |
-| `GET /admin/info` | identity card: version, state_dir, listen, tls, fingerprint, pid, uptime, log_path |
+| `GET /admin/status` | `idle\|started\|fatal`, active/last-good sha, `last_error`, `interrupted_apply`, `hooks` (`enabled` and the last outcome per event: `state` `ok\|failed\|timeout\|skipped\|never`, `reason`, `exit_code`, `finished_at`, `detail` — §6a) |
+| `GET /admin/info` | identity card: version, state_dir, listen, tls, fingerprint, pid, uptime, log_path, `executable` and `executable_sha256` (the running binary — compare cores by hash, not by path; the hash is computed once at start and reads `""` for the first moments), and the platform card (SPEC 127): `goos`, `goarch`, `platform` (the release asset for this binary's platform, e.g. `linux-armv7`, `linux-mipsle-softfloat` — what to download for this machine), `init_system` (what runs the host: `procd` / `systemd` / `openrc` / `launchd` / `scm`, `""` when none is recognised), `service` (`true` when this process runs under it as a service) and `packed` (`true` when the running binary is a UPX-packed copy — download the `<platform>.upx.tar.gz` asset for it, as `lxd update` does) |
 | `POST /admin/enroll` | client registration with a one-time code |
 | `GET /admin/resources` · `PUT`/`GET`/`DELETE /admin/resources/{name}` | the files a config REFERS to (`.srs`, geo bases): list with sha256, upload, fetch, remove; 409 while the active or last-good config references the name |
 | `GET /admin/memory` | process memory: heap/stack/sys, goroutines, GC, and **two** RSS numbers — `rss_current_bytes` and `rss_peak_bytes` (raw bytes; the peak never decreases, so it is reported apart from the current size) |
@@ -496,6 +1218,9 @@ Error map:
 | `PUT`/`DELETE /admin/clients-info/labels/{key}` | operator's own name for a client; key is an IP or a MAC (400 otherwise) |
 | `GET /admin/host` | the MACHINE the daemon runs on: CPU (per-core), memory, thermal zones, disks, file descriptors — as opposed to `/admin/memory`, which is the process |
 | `GET /admin/host/interfaces` | every network interface with raw counters and derived rates |
+| `GET /admin/commands` | the operator's named commands (SPEC 128): name, command text, state of the last run (`idle` / `running` / `done` / `lost`), `started_at`, `finished_at`, `exit_code`, `client` |
+| `POST /admin/commands/{name}` | start a command by name, no body: `202` + the running view; `404` not configured; `409` already running; `400` non-empty body |
+| `GET /admin/commands/{name}` | the same view plus `log` — the last 64 KiB of the command's output |
 
 **Operator routes** — `GET /admin/clients`, `POST /admin/client-code`,
 `POST /admin/client-remove`. These are the wire behind the `client list / add /
@@ -503,7 +1228,10 @@ remove` subcommands and are deliberately **not** part of the remote surface:
 they are served on loopback only, require the Bearer secret, and — uniquely —
 do **not** require a client certificate, because the operator standing on the
 host has none. Minting an invite code is handing out trust, so it must not be
-reachable from the network.
+reachable from the network. `GET /admin/status` is on both sides: a certless
+request from a loopback peer takes the operator path (secret) — that is how
+`lxd update` learns whether the core came up — while a trusted certificate,
+or any non-loopback peer, takes the pinned path as before.
 
 SIGHUP to the daemon = re-read the config file (`--config-force`/`-c`) and
 apply it through the same validated, rollback-protected apply pipeline.

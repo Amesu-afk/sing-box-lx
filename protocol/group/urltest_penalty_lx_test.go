@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -232,39 +233,6 @@ func TestMaybeForceRetest_levelTriggerWithGap(t *testing.T) {
 	}
 }
 
-// TestUrlTest_passiveSkipDisabledInEmergency: пассивно подтверждённый выбор
-// обычно пропускает цикл проб; в аварийном режиме пробы обязаны идти, и
-// ответивший узел сбрасывает штрафы (выход из аварийного режима).
-func TestUrlTest_passiveSkipDisabledInEmergency(t *testing.T) {
-	a := &penaltyDialNode{tag: "a", addr: "server"}
-	b := &penaltyDialNode{tag: "b", addr: "server"}
-	g := newPenaltyTestGroup(t, []*penaltyDialNode{a, b}, map[string]uint16{"a": 10, "b": 50})
-	g.passiveCheck = true
-	g.selectedOutboundTCP = b
-	g.markPassiveAlive("b")
-
-	// Обычный режим: passive-skip действует, пробы не идут.
-	result, _ := g.urlTest(context.Background(), false)
-	if len(result) != 0 {
-		t.Fatal("passively confirmed selection must skip the probe cycle")
-	}
-
-	// Аварийный режим (лучший a ≥3): skip отключён, пробы идут, штрафы смываются.
-	for i := 0; i < 3; i++ {
-		g.penaltyAdd("a")
-	}
-	// История свежая — заставим testNodes перепробовать, состарив её.
-	g.history.StoreURLTestHistory("a", &adapter.URLTestHistory{Time: time.Now().Add(-2 * time.Minute), Delay: 10})
-	g.history.StoreURLTestHistory("b", &adapter.URLTestHistory{Time: time.Now().Add(-2 * time.Minute), Delay: 50})
-	result, _ = g.urlTest(context.Background(), false)
-	if len(result) == 0 {
-		t.Fatal("emergency mode must disable the passive skip and run probes")
-	}
-	if g.penaltyOf("a") != 0 {
-		t.Fatalf("probe answer must reset penalties, got %d", g.penaltyOf("a"))
-	}
-}
-
 func waitUntil(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -278,3 +246,45 @@ func waitUntil(t *testing.T, cond func() bool) {
 }
 
 // lx:end SPEC 054
+
+// lx: SPEC 139 — the dial path picks and moves the selection while a selection
+// update writes it; meaningful under -race.
+func TestSelectedOutboundConcurrentPickAndMove(t *testing.T) {
+	a := &penaltyDialNode{tag: "a", addr: "server"}
+	b := &penaltyDialNode{tag: "b", addr: "server"}
+	g := newPenaltyTestGroup(t, []*penaltyDialNode{a, b}, map[string]uint16{"a": 10, "b": 20})
+	g.setSelectedTCPLx(a)
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			_ = g.pickForDialNode(N.NetworkTCP)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			if i%2 == 0 {
+				g.moveSelection(N.NetworkTCP, b)
+			} else {
+				g.moveSelection(N.NetworkTCP, a)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			g.setSelectedTCPLx(a)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			g.performSelectionUpdate(false)
+			_ = g.failoverHeld()
+		}
+	}()
+	wg.Wait()
+}

@@ -61,7 +61,8 @@ Android-ядрах — см. [044](../../TASKS/044-ANDROID_AAR_GO124_QUIC_DEAD/S
 | Платформа | Особенность |
 |-----------|-------------|
 | Desktop ×6 | Обычные кросс-сборки |
-| Linux musl ×4 | amd64 / arm64 / armv7 / mipsle-softfloat — **статика** для роутеров (AsusWRT, OpenWrt, Keenetic), без зависимости от `libdl.so.2`, NaïveProxy сохранён |
+| Linux musl ×6 | amd64 / arm64 / armv7 / mipsle-softfloat / 386 (`GO386=sse2`) / riscv64 — **статика** для роутеров (AsusWRT, OpenWrt, Keenetic), без зависимости от `libdl.so.2`, NaïveProxy сохранён |
+| UPX-копии ×2 | `linux-arm64.upx.tar.gz`, `linux-mipsle-softfloat.upx.tar.gz` на каждом теге, rc тоже — для роутеров с маленьким overlay без USB. Необязательный шаг musl-ноги: UPX 5.2.1 по sha256, smoke `version` под qemu-user, сбой → `::warning::`, релиз не блокируется. `lxd update` сохраняет сжатый вариант (SPEC 129) |
 | AAR ×2 | Android-библиотека для LxBox |
 | Windows | Несёт `libcronet.dll` (purego); извлечение запинено по `go.mod` |
 
@@ -74,7 +75,7 @@ Android-ядрах — см. [044](../../TASKS/044-ANDROID_AAR_GO124_QUIC_DEAD/S
 |----------|------------|
 | `lx-ci.yml` | Дешёвый гейт на каждый push в `lx` и любую ветку `lx-*` (включая релизную линию и экспериментальные): lint + build-check. Doc-only коммиты пропускаются (`paths-ignore` включает `SPECS/**`) |
 | `lx-build.yml` | Артефакты по требованию, в том числе Apple xcframework |
-| `lx-release.yml` | Релиз по тегу: cross ×6 + musl ×4 + AAR |
+| `lx-release.yml` | Релиз по тегу: cross ×6 + musl ×6 (+2 UPX-копии) + AAR |
 | `lx-musl-toolchain-mirror.yml` | Producer: заливает Chromium musl-тулчейн в release-ассет |
 | `lx-rebase.yml` | Авто-ребейз на стабильные теги апстрима (исключает alpha/beta/rc). ⚠️ На 1.14-линии фактически спит: синк идёт ручным merge до появления стабильного `v1.14.0` |
 
@@ -108,7 +109,9 @@ Push через `gh auth token` во встроенном URL — обычный
 | [004 — BUILD_CI_RELEASE](../../TASKS/004-BUILD_CI_RELEASE/SPEC.md) | Теги, дешёвый CI, релизный пайплайн, поставка libcronet, авто-ребейз | C |
 | [006 — LINUX_MUSL_STATIC_ROUTER_BUILDS](../../TASKS/006-LINUX_MUSL_STATIC_ROUTER_BUILDS/SPEC.md) | Статические musl-сборки под роутеры (4 арки) | C |
 | [023 — MUSL_TOOLCHAIN_MIRROR](../../TASKS/023-MUSL_TOOLCHAIN_MIRROR/SPEC.md) | Durable-зеркало Chromium musl-тулчейна | C |
+| [044 — ANDROID_AAR_GO124_QUIC_DEAD](../../TASKS/044-ANDROID_AAR_GO124_QUIC_DEAD/SPEC.md) | AAR на go1.24 убивал quic-go-аутбаунды (hysteria2, tuic, masque-h3) на части Android-ядер — явный пин Go ≥ 1.25 в AAR-джобах, go1.24 для AAR запрещён | C |
 | [049 — GO_TOOLCHAIN_PIN_FILE](../../TASKS/049-GO_TOOLCHAIN_PIN_FILE/SPEC.md) | `go.version` — единый источник версии Go-тулчейна для CI и F-Droid | C |
+| [067 — LXD_BUILD_TAG_SPLIT](../../TASKS/067-LXD_BUILD_TAG_SPLIT/SPEC.md) | Разделение build-тегов: демон lxd за собственным `with_lxd`, командные RPC остаются за `with_lx_command` (основная фича — [LXD_DAEMON](../014-LXD_DAEMON/FEATURE.md)) | C |
 
 Полный runbook релиза — [docs-lx/lx-release-runbook.md](../../../docs-lx/lx-release-runbook.md).
 

@@ -165,6 +165,12 @@ jobs:
             LX_VERSION="${{ steps.ver.outputs.version }}" \
             LX_OUTPUT="sing-box${{ matrix.ext }}"
 
+      - name: Verify static
+        if: matrix.no_naive
+        run: |
+          set -xeuo pipefail
+          file "sing-box${{ matrix.ext }}" | grep -q "statically linked"
+
       # Windows purego builds dlopen libcronet.dll from the exe's directory —
       # without it in the archive a naive-outbound config fails at startup with
       # "cronet: library not found" (upstream build.yml ships the dll via
@@ -305,10 +311,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # upx: also ship a UPX-packed copy (*.upx.tar.gz) — for
+          # routers with RAM to spare but a small flash overlay and no USB
+          # (MT7981 aarch64, MT7621 mipsel). Two targets until downloads show
+          # the copies are wanted.
           - { arch: amd64,  asset: linux-amd64 }
-          - { arch: arm64,  asset: linux-arm64 }
+          - { arch: arm64,  asset: linux-arm64, upx: true, qemu: aarch64 }
           - { arch: arm,    goarm: "7",        asset: linux-armv7 }
-          - { arch: mipsle, gomips: softfloat, asset: linux-mipsle-softfloat }
+          - { arch: mipsle, gomips: softfloat, asset: linux-mipsle-softfloat, upx: true, qemu: mipsel }
+          # OpenWrt i386_pentium4 / riscv64_generic, upstream's linux-*-musl recipe.
+          - { arch: "386",   go386: sse2, asset: linux-386 }
+          - { arch: riscv64, asset: linux-riscv64 }
     steps:
       - uses: actions/checkout@v5
         with:
@@ -428,6 +441,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           GOARM: ${{ matrix.goarm }}
           GOMIPS: ${{ matrix.gomips }}
+          GO386: ${{ matrix.go386 }}
         run: |
           set -xeuo pipefail
           # LX_TAGS is the single source of truth (Makefile.lx). Swap the purego
@@ -456,6 +470,41 @@ jobs:
           cp dist/sing-box "stage/$NAME/"
           cp LICENSE LICENSING.md README.md "stage/$NAME/" 2>/dev/null || true
           tar -C stage -czf "dist/$NAME.tar.gz" "$NAME"
+
+      # UPX-packed copy for the `upx: true` legs, on every tag (rc included: the
+      # step runs in parallel with the AAR build, the slowest job, so it adds no
+      # wall time). UPX is pinned by version AND sha256: it rewrites what we
+      # publish. Optional: continue-on-error keeps a UPX outage
+      # from blocking the release, and the archive reaches dist/ only after the
+      # packed binary ran `version` under qemu-user. Old router kernels may still
+      # reject the stub (5.2.1 verified live on Keenetic 4.9-ndm-5, mipsel).
+      - name: UPX copy
+        id: upx
+        if: matrix.upx
+        continue-on-error: true
+        env:
+          UPX_VERSION: '5.2.1'
+          UPX_SHA256: 402162aad30af47e60dbd767fb2e64ca394ace9727ba1f40283641f1d1b91657
+        run: |
+          set -xeuo pipefail
+          NAME="sing-box-${{ steps.ver.outputs.version }}-${{ matrix.asset }}"
+          curl -fsSL --retry 3 --retry-all-errors -o upx.tar.xz "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          echo "${UPX_SHA256}  upx.tar.xz" | sha256sum -c -
+          tar -xJf upx.tar.xz
+          UPX="$PWD/upx-${UPX_VERSION}-amd64_linux/upx"
+          rm -rf stage-upx && mkdir stage-upx
+          cp -r "stage/$NAME" stage-upx/
+          "$UPX" -q --best --lzma "stage-upx/$NAME/sing-box"
+          sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static
+          "qemu-${{ matrix.qemu }}-static" "stage-upx/$NAME/sing-box" version
+          tar -C stage-upx -czf upx.tar.gz "$NAME"
+          mv upx.tar.gz "dist/$NAME.upx.tar.gz"
+          ls -la dist
+
+      # continue-on-error leaves the job green; surface the lost copy in the run summary.
+      - name: UPX copy failed
+        if: steps.upx.outcome == 'failure'
+        run: echo "::warning::UPX copy for ${{ matrix.asset }} failed — the release ships without its .upx.tar.gz"
 
       - uses: actions/upload-artifact@v6
         with:
@@ -628,9 +677,11 @@ jobs:
 
           Windows archives include \`libcronet.dll\` — keep it next to \`sing-box.exe\`, the \`naive\` outbound loads it from there. The darwin binaries are built with CGO on a macOS runner: \`libcronet.a\` is linked statically, so NaïveProxy works with nothing extra to install (tag set drops \`with_purego\` there).
 
-          **Linux — static musl builds for routers** (AsusWRT Merlin, OpenWrt, Keenetic): \`linux-amd64\`, \`linux-arm64\`, \`linux-armv7\`, \`linux-mipsle-softfloat\`. These are statically linked (no \`libdl.so.2\`/glibc dependency) and **keep NaïveProxy** — they run on musl routers where the previous dynamic builds failed with \`libdl.so.2: cannot open shared object file\`. See SPECS/TASKS/006.
+          **Linux — static musl builds for routers** (AsusWRT Merlin, OpenWrt, Keenetic): \`linux-amd64\`, \`linux-arm64\`, \`linux-armv7\`, \`linux-mipsle-softfloat\`, \`linux-386\` (SSE2), \`linux-riscv64\`. These are statically linked (no \`libdl.so.2\`/glibc dependency) and **keep NaïveProxy** — they run on musl routers where the previous dynamic builds failed with \`libdl.so.2: cannot open shared object file\`. See SPECS/TASKS/006.
 
           **Linux — big-endian MIPS** (OpenWrt \`mips_24kc\`, e.g. Atheros AR93xx): \`linux-mips-softfloat\` — pure-Go static build **without NaïveProxy** (Chromium/cronet has no big-endian MIPS toolchain); everything else matches the desktop tag set.
+
+          **Linux — UPX-packed copies**: \`linux-arm64.upx.tar.gz\` and \`linux-mipsle-softfloat.upx.tar.gz\` — the same binary packed with UPX (\`--best --lzma\`, version pinned in the workflow), for routers with a small flash overlay and no USB: ~17 MB on flash instead of 75–90 MB (the download itself is only ~1.6× smaller). The binary unpacks itself into RAM at every start: about +17 MB RSS (measured on x86) and a cold start of 15–20 s on mipsle. Some older router kernels refuse the packed binary — if it does not start, use the plain archive. \`sing-box lxd update\` keeps a packed binary packed: it takes the \`.upx\` copy of the new release (the plain archive only when a release has none, and only if it fits beside the binary).
 
           </details>
 
@@ -654,10 +705,12 @@ jobs:
           </details>
           EOF
 
-          # Previous-release footer (LxBox-style). Tag list is already complete here:
-          # checkout runs with fetch-depth 0, and the upstream tag fetch above cannot add
-          # v*-lx* tags (upstream has none).
-          PREV="$(git tag -l 'v*-lx*' --sort=-creatordate | awk -v t="$TAG" '$0==t {f=1; next} f {print; exit}')"
+          # Previous-release footer (LxBox-style): the nearest v*-lx* tag in this tag's own
+          # history, not the newest tag by date — with two release lines alive (1.14 on lx,
+          # 1.15 prereleases on lx-1.15) the date order pointed v1.14.4-lx.32 at
+          # v1.15.0-lx.1-rc.1. History and tags are complete here: checkout runs with
+          # fetch-depth 0, and the upstream tag fetch above cannot add v*-lx* tags.
+          PREV="$(git describe --tags --abbrev=0 --match 'v*-lx*' "${TAG}^" 2>/dev/null || true)"
           if [ -n "$PREV" ]; then
             printf '\n---\n\nPrevious release / Предыдущий релиз: [%s](https://github.com/%s/releases/tag/%s)\n' \
               "$PREV" "${{ github.repository }}" "$PREV" >> notes.md

@@ -56,6 +56,15 @@
 
 Включаем их в реализацию для полноты packet-up (детали в §6 SPEC).
 
+### Версия HTTP: `alpn` из `tlsSettings`
+
+Поле не из `xhttpSettings`, но на XHTTP-клиент влияет: Xray выбирает по нему версию HTTP
+(`decideHTTPVersion`).
+
+| Параметр Xray | JSON (наш) | Клиент? | Правило |
+|---------------|------------|:-------:|---------|
+| `tlsSettings.alpn` (в ссылке — `alpn`) | `tls.alpn` | ✅ | один элемент `h3` → HTTP/3 (QUIC/UDP, нужен `with_quic`); один `http/1.1` → HTTP/1.1; иначе HTTP/2; REALITY → всегда HTTP/2; без TLS — HTTP/1.1 (раньше h2c). См. [SPEC 104](../104-XHTTP_HTTP_VERSION_PARITY/SPEC.md) §5.1 |
+
 ---
 
 ## 1. Текущая база sing-box-lx ↔ дефолт Xray (важно!)
@@ -306,7 +315,7 @@
 
 ## 5. Группа: server-only (документируем, НЕ реализуем)
 
-Все 4 поля **не читаются клиентом** ни в Xray-core, ни в sing-box-extended. Ключевой факт: **клиент вообще
+Все 4 поля **не читаются клиентом** ни в Xray-core, ни в sing-box-extended. **Клиент вообще
 не инспектирует `Content-Type` ответа** (`stream-down` → `wrc.Set(resp.Body)`; `stream-up` →
 `io.Copy(io.Discard, resp.Body)`), поэтому корректно работает и с SSE-заголовком, и без него, без какого-либо
 кода.

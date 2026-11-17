@@ -30,6 +30,11 @@ type TaildropFile struct {
 	Size       int64
 	SenderName string
 	ModifiedAt int64
+	// lx:begin tailscale-taildrop
+	// SPEC 149: stable node ID of the sender; empty for files received before
+	// the core restarted, like SenderName.
+	SenderID string
+	// lx:end tailscale-taildrop
 }
 
 type TaildropReceivingFile struct {
@@ -64,6 +69,10 @@ type TailscaleEndpointStatus struct {
 	ReceivingFileCount int32
 	UnreadFileCount    int32
 	CertDomains        []string
+	// lx:begin tailscale-status (SPEC 115)
+	// Health warnings from the backend; empty when healthy.
+	Health []string
+	// lx:end tailscale-status
 }
 
 type TailscaleUserGroup struct {
@@ -93,6 +102,17 @@ type TailscalePeer struct {
 	UserID          int64
 	KeyExpiry       int64
 	LastSeen        int64
+	// lx:begin tailscale-status (SPEC 115)
+	// Path is one of the TailscalePeerPath* constants: the path magicsock would
+	// use for the peer right now. Endpoint / PeerRelay / DERPRegionCode name
+	// the direct address, the peer relay and the peer's home DERP region.
+	// LastHandshake is Unix seconds of the last WireGuard handshake, 0 = none.
+	Path           string
+	Endpoint       string
+	PeerRelay      string
+	DERPRegionCode string
+	LastHandshake  int64
+	// lx:end tailscale-status
 }
 
 type ShellSession interface {

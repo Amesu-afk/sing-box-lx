@@ -55,7 +55,6 @@ type Router struct {
 	pauseManager      pause.Manager
 	trackers          []adapter.ConnectionTracker
 	platformInterface adapter.PlatformInterface
-	started           bool
 	// lx:begin idle-suspend
 	// SPEC 020. idleSuspend is the configured threshold (0 = feature off). idleStop
 	// is closed by Close() to stop the idle tick goroutine. reachCache holds the
@@ -65,11 +64,12 @@ type Router struct {
 	// tick computes it. endpoint is the endpoint manager: WG/AWG endpoints live
 	// there (NOT in the outbound manager — outbound.Outbounds() never lists them),
 	// so the idle tick must iterate it to find IdleSuspendable endpoints.
-	// idleTeardownSet records that lx_idle_teardown was present in the config,
+	// idleTeardownSet records that lx.wg.idle_teardown was present in the config,
 	// which an explicit "0" (teardown disabled) makes indistinguishable from
 	// absent in the resolved duration alone. Prerequisite checks key off this,
-	// so "0" still requires lx_idle_suspend and still fails loudly in a build
-	// without the tag.
+	// so "0" still requires lx.wg.idle_suspend and still fails loudly in a build
+	// without the tag. All four come from the resolved `lx` block in the context
+	// (SPEC 098).
 	idleSuspend          time.Duration
 	idleSuspendReachable time.Duration
 	idleTeardown         time.Duration
@@ -78,6 +78,7 @@ type Router struct {
 	idlePauseCallback    *list.Element[pause.Callback]
 	reachMu              sync.RWMutex
 	reachCache           map[string]bool
+	reachRefs            map[string]selectionRefs // SPEC 097 — incoming edges per tag, same walk and dirty flag
 	reachDirty           atomic.Bool
 	endpoint             adapter.EndpointManager
 	// lx:end idle-suspend
@@ -107,33 +108,16 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		leaseFiles:           options.DHCPLeaseFiles,
 		pauseManager:         service.FromContext[pause.Manager](ctx),
 		platformInterface:    service.FromContext[adapter.PlatformInterface](ctx),
-		idleSuspend:          time.Duration(options.LXIdleSuspend),              // lx: SPEC 020 (0 = off)
-		idleSuspendReachable: time.Duration(options.LXIdleSuspendReachable),     // lx: SPEC 020 (0 = reachable never suspends)
-		idleTeardown:         idleTeardownOf(options),                           // lx: SPEC 020 level 3 (default = reachable window, explicit "0" = off)
-		idleTeardownSet:      options.LXIdleTeardown != nil,                     // lx: SPEC 020 — "0" is a value, not an absence
+		idleSuspend:          lxWG(ctx).IdleSuspend,                             // lx: SPEC 020/098 — lx.wg.idle_suspend (0 = off)
+		idleSuspendReachable: lxWG(ctx).IdleSuspendReachable,                    // lx: SPEC 020/098 (0 = reachable never suspends)
+		idleTeardown:         lxWG(ctx).IdleTeardown,                            // lx: SPEC 020/098 level 3 (default = reachable window, explicit "0" = off)
+		idleTeardownSet:      lxWG(ctx).IdleTeardownSet,                         // lx: SPEC 020/098 — "0" is a value, not an absence
 		endpoint:             service.FromContext[adapter.EndpointManager](ctx), // lx: SPEC 020 — idle tick iterates endpoints
 		dnsHijackSem:         semaphore.NewWeighted(dnsHijackConcurrencyLimit),  // lx: SPEC 046
 	}
 	router.reachDirty.Store(true) // lx: SPEC 020 — first tick computes the reachable set
 	return router
 }
-
-// lx:begin idle-suspend
-// idleTeardownOf resolves the level-3 window (SPEC 020): an explicit
-// lx_idle_teardown wins; absent, it defaults to lx_idle_suspend_reachable (so a
-// config that opted into sleeping reachable endpoints also reclaims their
-// netstack after the same window of sleep). An explicit "0" is the documented
-// kill switch: endpoints stay merely suspended and are never torn down, so the
-// next dial pays ~1 handshake RTT instead of a full rebuild. The option is a
-// pointer precisely so that "0" and absent stay distinguishable.
-func idleTeardownOf(options option.RouteOptions) time.Duration {
-	if options.LXIdleTeardown != nil {
-		return time.Duration(*options.LXIdleTeardown)
-	}
-	return time.Duration(options.LXIdleSuspendReachable)
-}
-
-// lx:end idle-suspend
 
 func (r *Router) Initialize(rules []option.Rule, ruleSets []option.RuleSet) error {
 	for i, options := range rules {
@@ -163,10 +147,13 @@ func (r *Router) Initialize(rules []option.Rule, ruleSets []option.RuleSet) erro
 	return nil
 }
 
-func (r *Router) Start(stage adapter.StartStage) error {
+func (r *Router) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 	monitor := taskmonitor.New(r.logger, C.StartTimeout)
 	switch stage {
 	case adapter.StartStateInitialize:
+		for _, ruleSet := range r.ruleSets {
+			scope.Add(ruleSet.Close)
+		}
 		if r.needFindNeighbor {
 			if r.platformInterface != nil && r.platformInterface.UsePlatformNeighborResolver() {
 				monitor.Start("initialize neighbor resolver")
@@ -177,6 +164,7 @@ func (r *Router) Start(stage adapter.StartStage) error {
 					r.logger.Error(E.Cause(err, "start neighbor resolver"))
 				} else {
 					r.neighborResolver = resolver
+					scope.Add(resolver.Close)
 				}
 			} else {
 				monitor.Start("initialize neighbor resolver")
@@ -192,6 +180,7 @@ func (r *Router) Start(stage adapter.StartStage) error {
 						r.logger.Error(E.Cause(err, "start neighbor resolver"))
 					} else {
 						r.neighborResolver = resolver
+						scope.Add(resolver.Close)
 					}
 				}
 			}
@@ -224,6 +213,9 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			startContext.Close()
 		}
 		r.ruleSetUpdater = R.NewRuleSetUpdater(r.ctx, r.ruleSets)
+		if r.ruleSetUpdater != nil {
+			scope.Add(r.ruleSetUpdater.Close)
+		}
 		r.network.Initialize(r.ruleSets)
 		needFindProcess := r.needFindProcess
 		for _, ruleSet := range r.ruleSets {
@@ -256,12 +248,14 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			}
 		}
 		if r.processSearcher != nil {
+			scope.Add(r.processSearcher.Close)
 			processCache := common.Must1(freelru.New[processCacheKey, processCacheEntry](256, maphash.NewHasher[processCacheKey]().Hash32, true))
 			processCache.SetLifetime(200 * time.Millisecond)
 			r.processCache = processCache
 		}
 	case adapter.StartStatePostStart:
 		for i, rule := range r.rules {
+			scope.Add(rule.Close)
 			monitor.Start("initialize rule[", i, "]")
 			err := rule.Start()
 			monitor.Finish()
@@ -272,9 +266,13 @@ func (r *Router) Start(stage adapter.StartStage) error {
 		if r.ruleSetUpdater != nil {
 			r.ruleSetUpdater.Start()
 		}
-		r.started = true
 		// lx: SPEC 020 — start the idle-suspend tick (with_lx_idle_suspend); the
-		// no-tag stub errors here if lx_idle_suspend is set without the build tag.
+		// no-tag stub errors here if lx.wg.* is set without the build tag. The
+		// scope stops it; box.Close also stops it earlier (QuiesceForShutdown).
+		scope.Add(func() error {
+			r.stopIdleSuspend()
+			return nil
+		})
 		return r.startIdleSuspend()
 	case adapter.StartStateStarted:
 		for _, ruleSet := range r.ruleSets {
@@ -283,48 +281,6 @@ func (r *Router) Start(stage adapter.StartStage) error {
 		runtime.GC()
 	}
 	return nil
-}
-
-func (r *Router) Close() error {
-	monitor := taskmonitor.New(r.logger, C.StopTimeout)
-	var err error
-	r.stopIdleSuspend() // lx: SPEC 020 — stop the idle tick before tearing down
-	if r.neighborResolver != nil {
-		monitor.Start("close neighbor resolver")
-		err = E.Append(err, r.neighborResolver.Close(), func(closeErr error) error {
-			return E.Cause(closeErr, "close neighbor resolver")
-		})
-		monitor.Finish()
-	}
-	for i, rule := range r.rules {
-		monitor.Start("close rule[", i, "]")
-		err = E.Append(err, rule.Close(), func(err error) error {
-			return E.Cause(err, "close rule[", i, "]")
-		})
-		monitor.Finish()
-	}
-	if r.ruleSetUpdater != nil {
-		monitor.Start("close rule-set updater")
-		err = E.Append(err, r.ruleSetUpdater.Close(), func(err error) error {
-			return E.Cause(err, "close rule-set updater")
-		})
-		monitor.Finish()
-	}
-	for i, ruleSet := range r.ruleSets {
-		monitor.Start("close rule-set[", i, "]")
-		err = E.Append(err, ruleSet.Close(), func(err error) error {
-			return E.Cause(err, "close rule-set[", i, "]")
-		})
-		monitor.Finish()
-	}
-	if r.processSearcher != nil {
-		monitor.Start("close process searcher")
-		err = E.Append(err, r.processSearcher.Close(), func(err error) error {
-			return E.Cause(err, "close process searcher")
-		})
-		monitor.Finish()
-	}
-	return err
 }
 
 func (r *Router) RuleSet(tag string) (adapter.RuleSet, bool) {

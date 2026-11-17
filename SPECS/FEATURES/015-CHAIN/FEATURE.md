@@ -4,7 +4,7 @@
 |--------------|------------------|
 | Type / Тип | Product feature / Продуктовая фича |
 | Build tag | `with_lx_chain` (chain state in the UI — behind `with_lx_command`, see [OBSERVABILITY](../006-OBSERVABILITY/FEATURE.md)) / (состояние цепочки в UI — за `with_lx_command`) |
-| State / Состояние | ✅ Implemented (I): unit tests + acceptance stand on live shadowsocks hops; no field run of WireGuard links yet / Реализовано (I): юниты + приёмочный стенд на живых shadowsocks-хопах; полевой проверки WG-звеньев не было — [073](../../TASKS/073-CHAIN_OUTBOUND/SPEC.md) |
+| State / Состояние | ✅ Done (D): unit tests + acceptance stand on live shadowsocks hops; WireGuard links not run in the field, in production since `v1.14.0-lx.27-rc.5` with no reports (closed by the owner, 2026-09-24) / Готово (D): юниты + приёмочный стенд на живых shadowsocks-хопах; WG-звенья в поле не гонялись, в проде с `v1.14.0-lx.27-rc.5` без жалоб (закрыто владельцем 2026-09-24) — [073](../../TASKS/073-CHAIN_OUTBOUND/SPEC.md), [075](../../TASKS/075-CHAIN_POSITION_TOGGLE/SPEC.md) |
 
 > **Language.** This document carries both languages in one file: the two blocks below hold the
 > same content, not a word-by-word translation. The tables and code blocks are shared and live
@@ -64,7 +64,7 @@ The position order is the one thing to remember: **not** "who goes through whom"
 |-----|------------|-----------------|---------------------|
 | `tls.fragment` | stripped | packet-level ClientHello fragmentation (`fragment`, `fragment_fallback_delay`) | the server never sees it; inside a tunnel it only adds latency and failure points. **`record_fragment` is not touched** — under `detour` it is switched on automatically as a path fix (see [HOTFIXES / 060](../004-HOTFIXES/FEATURE.md)) and is not subject to stripping |
 | `multiplex.padding` | stripped | multiplexer padding | requested by the client; a server that supports it accepts traffic without it just the same |
-| `xhttp.padding` | stripped | XHTTP padding — reduced to the minimum of the range, obfs mode off | the server accepts any length |
+| `xhttp.padding` | stripped | XHTTP padding — `x_padding_bytes` is pinned to the lower bound of the node's range (`100` when unset); placement and obfs mode are kept | any length inside the range is valid for the server. The server rejects a length outside its range with 400 and reads the padding from the configured placement, so the strip never goes below the lower bound and leaves `x_padding_obfs_mode` alone |
 | `tls.utls` | **not** stripped | ClientHello fingerprint imitation | not a source of failures; can be stripped via `strip`, except on nodes with `reality` (where it is mandatory — start error) |
 
 The catalog deliberately **excludes** parameters that are contracts with the server: `flow`,
@@ -134,12 +134,18 @@ GROUPS ARE NEVER COPIED; links exist only for nodes at positions ≥ 1
   health check, sticky, penalties and fallback, `interrupt_exist_connections`. Switching a group
   with that flag also cuts the chain's connections that went through it, including the tunnels of
   links above — they come back up through the new pick.
-- **A link = the original minus the DPI garb, plus `rewrite`, with an adjusted MTU.** The order of
-  transformations is fixed: `strip` → `rewrite` → MTU. `mtu` in a node's config means "as a
-  standalone node"; the chain only **lowers** it by the exact overhead of the IP tunnels below the
-  link (WireGuard inside an IP tunnel −60/−80 by the server's address family, MASQUE ≈ −90); over
-  stream and datagram proxies the MTU is left alone. Under a group the worst case over all its
-  members is taken — so a link is not rebuilt when a group below switches.
+- **A link = the original minus the DPI garb, plus `rewrite`, with an aligned MTU / packet size.**
+  The order of transformations is fixed: `strip` → `rewrite` → MTU. The MTU rule is the shared
+  mechanism of [SPEC 120](../../TASKS/120-PATH_MTU_ALIGN/SPEC.md) (`lx.mtu_align`, capacity model
+  amended by [SPEC 144](../../TASKS/144-MTU_ALIGN_STREAM_BOUNDARY/SPEC.md); the line starts at
+  [SPEC 028](../../TASKS/028-NESTED_TUNNEL_UDP_FRAGMENT/SPEC.md)), the same one
+  that acts under a plain `detour`: `mtu` in a node's config means "as a standalone node"; the chain
+  only **lowers** it by the exact overhead of the IP tunnels below the link (WireGuard inside an IP
+  tunnel −60/−80 by the server's address family, MASQUE −79/−99); QUIC links (hysteria2, tuic,
+  hysteria) get `initial_packet_size` that fits the hop below plus `disable_path_mtu_discovery:
+  true`; over stream and datagram proxies nothing changes. The mode (`clamp` default, `fill`,
+  `off`) and `except` apply to links as they do to `detour`. Under a group the worst case over
+  all its members is taken — so a link is not rebuilt when a group below switches.
 - **Transparent `direct`.** At a position ≥ 1 `direct` means "no hop here": the path shortens by
   that position. `direct` as a member of a selector is a runtime off-switch for the position.
   `block` is terminal at any position.
@@ -175,9 +181,9 @@ GROUPS ARE NEVER COPIED; links exist only for nodes at positions ≥ 1
 - **A nested chain** is allowed only at position 0.
 - **DPI between hops** (`["domestic-relay", "foreign-node"]`) needs
   `"strip": {"tls.fragment": false}` — the default assumes DPI between the client and the entry.
-- **A tunnel over a datagram proxy** (hysteria2, tuic, ss-UDP) keeps the configured `mtu` — the
-  physical path is unknown, exactly as with a plain `detour`; over `tuic` in `native` mode a
-  warning is emitted.
+- **A tunnel over a proxy** (vless, trojan, hysteria2, tuic, ss, …) keeps the configured `mtu` —
+  a proxy delivers the link's packet whole, as a stream or by its own fragmentation, so whatever
+  lies under the proxy does not limit the link (SPEC 144); exactly as with a plain `detour`.
 - **The first dial to a new pick** pays for creating the link synchronously (for WireGuard — stack
   start plus handshake).
 - Server side, per-position overrides outside `rewrite`-by-type, and limits on the number of links
@@ -226,8 +232,11 @@ GROUPS ARE NEVER COPIED; links exist only for nodes at positions ≥ 1
   пути (см. [HOTFIXES / 060](../004-HOTFIXES/FEATURE.md)) и снятию не подлежит.
 - `multiplex.padding` — снимается: паддинг запрашивается клиентом, сервер одинаково принимает
   трафик и без него.
-- `xhttp.padding` — снимается: диапазон сводится к минимуму, обфус-режим выключается; сервер
-  допускает любую длину.
+- `xhttp.padding` — снимается: `x_padding_bytes` фиксируется на нижней границе диапазона узла
+  (`100`, если диапазон не задан); размещение и обфус-режим остаются как в конфиге. Сервер
+  принимает любую длину внутри своего диапазона, длину вне его отклоняет ответом 400, а паддинг
+  читает из настроенного размещения, поэтому ниже нижней границы strip не опускается и
+  `x_padding_obfs_mode` не трогает.
 - `tls.utls` — **не** снимается по умолчанию: имитация отпечатка ClientHello не источник отказов.
   Снять можно через `strip`, кроме узлов с `reality` (там utls обязателен — ошибка старта).
 
@@ -279,12 +288,18 @@ GROUPS ARE NEVER COPIED; links exist only for nodes at positions ≥ 1
   sticky, штрафы и fallback, `interrupt_exist_connections`. Переключение группы с этим флагом рвёт
   и соединения цепочки, прошедшие через неё, включая туннели звеньев выше — они переподнимаются
   через новый выбор.
-- **Звено = оригинал минус DPI-обвес плюс `rewrite`, с подогнанным MTU.** Порядок преобразований
-  фиксирован: `strip` → `rewrite` → MTU. `mtu` в конфиге узла трактуется как «MTU как
-  самостоятельного»; цепочка только **понижает** его на точные накладные IP-туннелей под звеном
-  (WireGuard внутри IP-туннеля −60/−80 по семейству адреса сервера, MASQUE ≈ −90); над потоковыми
-  и датаграммными прокси MTU не меняется. Под группой берётся худший случай по всем её участникам —
-  звено не пересоздаётся при переключении группы ниже.
+- **Звено = оригинал минус DPI-обвес плюс `rewrite`, с выровненным MTU / размером пакета.**
+  Порядок преобразований фиксирован: `strip` → `rewrite` → MTU. Правило MTU — общий механизм
+  [SPEC 120](../../TASKS/120-PATH_MTU_ALIGN/SPEC.md) (`lx.mtu_align`, модель ёмкости поправлена
+  [SPEC 144](../../TASKS/144-MTU_ALIGN_STREAM_BOUNDARY/SPEC.md); начало линии —
+  [SPEC 028](../../TASKS/028-NESTED_TUNNEL_UDP_FRAGMENT/SPEC.md)), тот же, что действует под
+  обычным `detour`: `mtu` в конфиге узла трактуется как «MTU как самостоятельного»; цепочка только
+  **понижает** его на точные накладные IP-туннелей под звеном (WireGuard внутри IP-туннеля −60/−80
+  по семейству адреса сервера, MASQUE −79/−99); QUIC-звенья (hysteria2, tuic, hysteria) получают
+  `initial_packet_size` под ёмкость хопа ниже и `disable_path_mtu_discovery: true`; над потоковыми
+  и датаграммными прокси ничего не меняется. Режим (`clamp` по умолчанию, `fill`, `off`) и
+  `except` действуют на звенья так же, как на `detour`. Под группой берётся худший случай по всем
+  её участникам — звено не пересоздаётся при переключении группы ниже.
 - **Прозрачный `direct`.** На позиции ≥ 1 `direct` — «хопа нет»: путь укорачивается на эту
   позицию. `direct` участником селектора = выключатель позиции на лету. `block` — терминален на
   любой позиции.
@@ -318,9 +333,9 @@ GROUPS ARE NEVER COPIED; links exist only for nodes at positions ≥ 1
 - **Вложенная цепочка** допустима только на позиции 0.
 - **DPI между хопами** (`["domestic-relay", "foreign-node"]`) требует
   `"strip": {"tls.fragment": false}` — дефолт рассчитан на DPI между клиентом и входом.
-- **Туннель над датаграммным прокси** (hysteria2, tuic, ss-UDP) сохраняет `mtu` конфига —
-  физический путь неизвестен, как и при обычном `detour`; над `tuic` в `native`-режиме выдаётся
-  предупреждение.
+- **Туннель над прокси** (vless, trojan, hysteria2, tuic, ss, …) сохраняет `mtu` конфига —
+  прокси доставляет пакет звена целиком, потоком или своей нарезкой, и то, что лежит под
+  прокси, звено не ограничивает (SPEC 144); как и при обычном `detour`.
 - **Первый дозвон к новому выбору** платит создание звена синхронно (для WireGuard — старт стека
   и хендшейк).
 - Серверная сторона, per-позиционные переопределения вне `rewrite`-по-типу, лимиты числа звеньев —
@@ -336,3 +351,5 @@ GROUPS ARE NEVER COPIED; links exist only for nodes at positions ≥ 1
 |---------------|-----------------------------|
 | [073](../../TASKS/073-CHAIN_OUTBOUND/SPEC.md) | Outbound `chain`: group positions, runtime links, transparent `direct`, warm-up/idleness, MTU, `strip`/`rewrite`, observability / Outbound `chain`: позиции-группы, рантайм-звенья, прозрачный `direct`, прогрев/простой, MTU, `strip`/`rewrite`, наблюдаемость |
 | [075](../../TASKS/075-CHAIN_POSITION_TOGGLE/SPEC.md) | Runtime enable/disable of any position over gRPC (`SetChainPositionEnabled`), cache-file persistence, selector-style connection interrupt, effective link config (`GetChainCloneConfig`), `disabled` in diagnostics / Runtime вкл/выкл любой позиции по gRPC, персистентность в cache-file, разрыв соединений по селекторной модели, эффективный конфиг звена, `disabled` в диагностике |
+| [120](../../TASKS/120-PATH_MTU_ALIGN/SPEC.md) | One MTU/packet-size alignment for `chain` links **and** plain `detour`: capacity of the node below → `mtu` of tunnels, `initial_packet_size` (+ PMTUD off) of QUIC proxies; `lx.mtu_align` = `off`/`fill`/`clamp` (default) with `except`; masque outer QUIC starts at `mtu + 51` / Единое выравнивание MTU и размера пакета для звеньев `chain` **и** обычного `detour`: ёмкость узла снизу → `mtu` туннелей, `initial_packet_size` (+ PMTUD off) QUIC-прокси; `lx.mtu_align` = `off`/`fill`/`clamp` (дефолт) с `except`; внешний QUIC masque стартует с `mtu + 51` |
+| [144](../../TASKS/144-MTU_ALIGN_STREAM_BOUNDARY/SPEC.md) | Alignment fixes: only IP tunnels and groups carry a capacity upwards, any other node is a boundary (a proxy delivers the packet whole; no per-protocol table); IP tunnels with IPv6 inside never go below 1280; AWG `s4` counts in the overhead / Поправки выравнивания: ёмкость наверх несут только IP-туннели и группы, любой другой узел — граница (прокси доставляет пакет целиком; таблицы по протоколам нет); IP-туннели с IPv6 внутри не ниже 1280; `s4` AWG в накладных |

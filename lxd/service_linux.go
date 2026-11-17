@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	E "github.com/sagernet/sing/common/exceptions"
 )
 
 // PRINCIPLE (linux): --service ONLY PRINTS. Everything that touches the disk —
@@ -37,32 +39,15 @@ const (
 	initProcd
 )
 
-// Probe paths, indirected so tests can point them at a fake root.
-var (
-	pid1CommPath       = "/proc/1/comm"
-	openwrtReleasePath = "/etc/openwrt_release"
-	systemdRunPath     = "/run/systemd/system"
-)
-
-// detectInit asks who actually runs the machine. /proc/1/comm is the honest
-// answer (it names the live init, not what happens to be installed on disk);
-// the file probes only disambiguate when PID 1 is something else entirely
-// (a container shim, a supervisor). /run/systemd/system is the same check
-// libsystemd's sd_booted() uses — /run is tmpfs, so a chroot cannot fake it.
+// detectInit is the host's init for the recipe, from the detector shared
+// with /admin/info (initsystem.go, SPEC 127). openrc has no recipe here and
+// reads as unknown.
 func detectInit() initSystem {
-	if pid1, err := os.ReadFile(pid1CommPath); err == nil {
-		switch strings.TrimSpace(string(pid1)) {
-		case "systemd":
-			return initSystemd
-		case "procd":
-			return initProcd
-		}
-	}
-	if _, err := os.Stat(openwrtReleasePath); err == nil {
-		return initProcd
-	}
-	if info, err := os.Stat(systemdRunPath); err == nil && info.IsDir() {
+	switch detectLinuxInit(linuxInitProbe()) {
+	case initNameSystemd:
 		return initSystemd
+	case initNameProcd:
+		return initProcd
 	}
 	return initUnknown
 }
@@ -109,8 +94,29 @@ func DefaultServiceStateDir(user bool) string {
 
 // dryRun is accepted and ignored on purpose: every action here is already a
 // printout, so "show what you would do" and "do it" coincide by construction.
-func InstallService(daemonArgs []string, dryRun bool) error {
+// execDir is macOS-only (the root-owned binary copy, SPEC 100): on linux the
+// operator picks the binary path the unit runs.
+func InstallService(daemonArgs []string, execDir string, dryRun bool) error {
+	noteExecDirIgnored(execDir)
 	return printRecipe(false, daemonArgs)
+}
+
+// InstallServiceCopy is macOS-only: the root-owned copy lives in
+// /Library/PrivilegedHelperTools; on linux the operator places the binary.
+func InstallServiceCopy(execDir string, dryRun bool) error {
+	return E.New("lxd: --service=copy is macOS-only; on linux install the binary root-owned yourself (e.g. install -o root -g root -m 0755 sing-box /usr/local/bin/)")
+}
+
+func noteExecDirIgnored(execDir string) {
+	if execDir != "" {
+		fmt.Println("lxd: --exec-dir is macOS-only; ignored here — the unit runs the binary path you put into it")
+		fmt.Println()
+	}
+}
+
+// ServiceStatus is macOS-only: here the init system owns the service.
+func ServiceStatus(execDir string) (ServiceVerdict, error) {
+	return ServiceNotInstalled, E.New("lxd: --service=status is macOS-only; on linux ask the init system (systemctl status " + serviceName + ", or " + procdInitPath + " status on OpenWrt)")
 }
 
 func InstallUserService(daemonArgs []string, dryRun bool) error {
@@ -203,7 +209,12 @@ func printRecipe(user bool, daemonArgs []string) error {
 // --purge, which prints the rm command instead of running it: the state
 // directory holds the client registry and the server key, and deleting it is
 // the operator's call to make with their own hands.
-func UninstallService(purge bool, dryRun bool) error {
+func UninstallService(purge bool, keepCopy bool, execDir string, dryRun bool) error {
+	noteExecDirIgnored(execDir)
+	if keepCopy {
+		fmt.Println("lxd: --keep-copy is macOS-only (the root-owned copy); ignored here")
+		fmt.Println()
+	}
 	detected := detectInit()
 	stateDir := DefaultServiceStateDir(false)
 	supportDir := filepath.Dir(stateDir)

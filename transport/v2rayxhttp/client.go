@@ -31,6 +31,7 @@ import (
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/lxsniffguard"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -38,7 +39,6 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	sHTTP "github.com/sagernet/sing/protocol/http"
 	"github.com/sagernet/sing/service"
 
 	"golang.org/x/net/http2"
@@ -63,6 +63,7 @@ type Client struct {
 	scheme       string
 	host         string
 	path         string
+	query        string // configured path after the first "?", sent verbatim (lx: SPEC 119)
 	mode         string
 	headers      http.Header
 	paddingRange intRange
@@ -72,15 +73,21 @@ type Client struct {
 	// realityEnabled records whether the TLS config is a Reality client config.
 	// It drives mode=auto resolution (Reality → stream-one, like Xray).
 	realityEnabled bool
+	// httpVersion is the HTTP version the pool speaks (lx: SPEC 104). On HTTP/1.1
+	// long requests go out with "Connection: close".
+	httpVersion httpVersion
 	// noGRPCHeader suppresses the default "Content-Type: application/grpc" on
 	// streamed-body requests (stream-one, stream-up). See option.NoGRPCHeader.
 	noGRPCHeader bool
+	// serverName is the TLS server name, the subject of the REUSED `tls` stage a
+	// connection test records for a pooled transport (lx: SPEC 139).
+	serverName string
 }
 
 // NewClient builds an XHTTP client transport. The tlsConfig (possibly Reality)
-// is consumed exactly like the other v2ray transports: when present it drives
-// an HTTP/2 dialer over the TLS dialer; when absent a plaintext HTTP/2 (h2c)
-// transport is used.
+// selects the HTTP version (lx: SPEC 104): HTTP/2 over the TLS dialer by
+// default, HTTP/1.1 for tls.alpn ["http/1.1"] and for a cleartext server,
+// HTTP/3 over QUIC for tls.alpn ["h3"].
 func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, options option.V2RayXHTTPOptions, tlsConfig tls.Config) (adapter.V2RayClientTransport, error) {
 	mode := options.Mode
 	if mode == "" {
@@ -125,42 +132,71 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		return nil, err
 	}
 
-	// newTransport builds one pooled HTTP connection. XMUX holds several of these
-	// and decides which one carries a given stream; each has its own dialer, so
-	// separate transports mean separate TCP+TLS connections (SPECS/TASKS/059).
-	var (
-		scheme       string
-		newTransport func() *http2.Transport
-	)
-	if tlsConfig == nil {
-		scheme = "http"
-		// Plaintext h2c: speak HTTP/2 over a cleartext TCP conn so the same
-		// streaming request/response body machinery works without TLS.
-		newTransport = func() *http2.Transport {
-			return &http2.Transport{
-				AllowHTTP:       true,
-				ReadIdleTimeout: xmuxConfig.keepAlivePeriod,
-				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
-					return dialer.DialContext(ctx, N.NetworkTCP, M.ParseSocksaddr(addr))
-				},
-			}
+	var logger log.ContextLogger
+	if logFactory := service.FromContext[log.Factory](ctx); logFactory != nil {
+		logger = logFactory.NewLogger("xhttp")
+	}
+	// Messages go out under the "xhttp" logger tag: "xhttp: <message>".
+	warn := func(message string) {
+		if logger != nil {
+			logger.Warn(message)
 		}
-	} else {
+	}
+
+	// lx: SPEC 104 — the HTTP version follows tls.alpn, REALITY and the presence
+	// of TLS, by Xray's decideHTTPVersion. newConn builds one pooled HTTP
+	// connection; XMUX holds several of these and decides which one carries a
+	// given stream (SPECS/TASKS/059).
+	realityEnabled := tlsConfigIsReality(tlsConfig)
+	version := decideHTTPVersion(tlsConfig, realityEnabled)
+	var (
+		scheme  string
+		newConn func() xmuxConn
+	)
+	switch version {
+	case httpVersion3:
 		scheme = "https"
+		// lx: SPEC 060 — lx.sniff_guard for the node this transport serves.
+		sniffGuard := lxsniffguard.FromContext(ctx).Node(adapter.OutboundTagFromContext(ctx))
+		newConn, err = newHTTP3Transport(dialer, serverAddr, tlsConfig, xmuxConfig.keepAlivePeriod, warn, sniffGuard, logger)
+		if err != nil {
+			return nil, err
+		}
+	case httpVersion11:
+		// Without TLS too: Xray speaks HTTP/1.1 to a cleartext server, and reverse
+		// proxies on a cleartext port usually accept nothing else.
+		var tlsDialer tls.Dialer
+		if tlsConfig == nil {
+			scheme = "http"
+		} else {
+			scheme = "https"
+			tlsDialer = tls.NewDialer(dialer, tlsConfig)
+		}
+		newConn = func() xmuxConn {
+			return &http1XmuxConn{transport: newHTTP1Transport(dialer, tlsDialer)}
+		}
+	default:
+		scheme = "https"
+		if realityEnabled && realityALPNNeedsH2(tlsConfig.NextProtos()) {
+			warn(`REALITY uses HTTP/2, tls.alpn replaced with ["h2"]`)
+			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
+		}
 		if len(tlsConfig.NextProtos()) == 0 {
 			tlsConfig.SetNextProtos([]string{http2.NextProtoTLS})
 		}
 		tlsDialer := tls.NewDialer(dialer, tlsConfig)
-		newTransport = func() *http2.Transport {
-			return &http2.Transport{
-				ReadIdleTimeout: xmuxConfig.keepAlivePeriod,
-				DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.STDConfig) (net.Conn, error) {
-					return tlsDialer.DialTLSContext(ctx, M.ParseSocksaddr(addr))
-				},
-			}
+		newConn = func() xmuxConn {
+			return &http2XmuxConn{transport: newHTTP2Transport(tlsDialer, xmuxConfig.keepAlivePeriod)}
 		}
 	}
+	if logger != nil {
+		logger.Debug("HTTP version ", version)
+	}
 
+	var serverName string // lx: SPEC 139
+	if tlsConfig != nil {
+		serverName = tlsConfig.ServerName()
+	}
 	var host string
 	if options.Host != "" {
 		host = options.Host
@@ -177,7 +213,10 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	// The one place the slash must go is stream-one's bare path (empty sessionId),
 	// where the Xray server keys the bidirectional branch on an exact bare path —
 	// that trim happens locally in applyMeta, not globally here (lx: SPEC 002).
-	path := options.Path
+	// Like Xray (GetNormalizedPath/GetNormalizedQuery), everything after the
+	// first "?" is the request query, not part of the path: relays such as
+	// Cloudflare Workers read their parameters from it (lx: SPEC 119, issue #36).
+	path, query, _ := strings.Cut(options.Path, "?")
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
@@ -186,18 +225,16 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	for key, value := range options.Headers {
 		headers[key] = value
 	}
+	applyDefaultHeaders(headers) // lx: SPEC 142 — Xray's TryDefaultHeadersWith(header, "fetch")
 
-	xmux := newXmuxManager(xmuxConfig, func() xmuxConn {
-		return &http2XmuxConn{transport: newTransport()}
-	})
+	xmux := newXmuxManager(xmuxConfig, newConn)
 	// The pool's transitions (a connection opened, a connection retired and why)
 	// are what is worth observing about XMUX — the pool size itself follows from
 	// the config. Debug level, so it costs nothing unless someone is looking.
 	// See SPECS/TASKS/059 §8.2.
-	if logFactory := service.FromContext[log.Factory](ctx); logFactory != nil {
-		xmuxLogger := logFactory.NewLogger("xhttp")
+	if logger != nil {
 		xmux.onEvent = func(format string, args ...any) {
-			xmuxLogger.Debug(fmt.Sprintf(format, args...))
+			logger.Debug(fmt.Sprintf(format, args...))
 		}
 	}
 
@@ -209,23 +246,31 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		scheme:         scheme,
 		host:           host,
 		path:           path,
+		query:          query,
 		mode:           mode,
 		headers:        headers,
 		paddingRange:   paddingRange,
 		meta:           meta,
-		realityEnabled: tlsConfigIsReality(tlsConfig),
+		realityEnabled: realityEnabled,
+		httpVersion:    version,
 		noGRPCHeader:   options.NoGRPCHeader,
+		serverName:     serverName,
 	}, nil
 }
 
 func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	sessionID := c.newSessionID()
+	trace := c.traceDial(ctx) // lx: SPEC 139 — the `transport` stage; nil without a test
 	// One pooled connection carries this whole dial: both halves of a split mode
 	// and every upload POST of packet-up. It is released once, when the conn
 	// closes — see releaseOnce in conn.go. getContext may wait out the breaker's
 	// backoff window before opening a transport (lx: SPEC 076).
-	xmuxClient, err := c.xmux.getContext(ctx)
+	// lx: SPEC 139 — in a connection test: fresh=true takes a transport outside
+	// the pool, a reused pooled transport gets a REUSED stage. Without a test it
+	// is c.xmux.getContext(ctx).
+	xmuxClient, err := trace.acquire(ctx, c)
 	if err != nil {
+		trace.end(err)
 		return nil, err
 	}
 	xmuxClient.addOpenUsage(1)
@@ -234,15 +279,17 @@ func (c *Client) DialContext(ctx context.Context) (net.Conn, error) {
 	// (fail already released the slot before the error surfaced here) cannot
 	// release twice and drive openUsage negative.
 	release := newXmuxRelease(xmuxClient)
-	conn, err := c.dialMode(ctx, sessionID, xmuxClient, release)
+	conn, err := c.dialMode(ctx, sessionID, xmuxClient, release, trace)
 	if err != nil {
 		release.release()
+		trace.end(err)
 		return nil, err
 	}
+	trace.end(nil)
 	return conn, nil
 }
 
-func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease) (net.Conn, error) {
+func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmuxClient, release *xmuxRelease, trace *xhttpTrace) (net.Conn, error) {
 	switch c.mode {
 	case modeAuto:
 		// Match Xray's auto resolution (transport/internet/splithttp/dialer.go):
@@ -250,15 +297,15 @@ func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmu
 		// mode, live-validated against Xray 3x-ui). Xray also picks stream-up when
 		// downloadSettings is present, but we don't support asymmetric transport.
 		if c.realityEnabled {
-			return c.dialStreamOne(ctx, sessionID, xmuxClient, release)
+			return c.dialStreamOne(ctx, sessionID, xmuxClient, release, trace)
 		}
-		return c.dialPacketUp(ctx, sessionID, xmuxClient, release)
+		return c.dialPacketUp(ctx, sessionID, xmuxClient, release, trace)
 	case modePacketUp:
-		return c.dialPacketUp(ctx, sessionID, xmuxClient, release)
+		return c.dialPacketUp(ctx, sessionID, xmuxClient, release, trace)
 	case modeStreamUp:
-		return c.dialStreamUp(ctx, sessionID, xmuxClient, release)
+		return c.dialStreamUp(ctx, sessionID, xmuxClient, release, trace)
 	case modeStreamOne:
-		return c.dialStreamOne(ctx, sessionID, xmuxClient, release)
+		return c.dialStreamOne(ctx, sessionID, xmuxClient, release, trace)
 	default:
 		return nil, E.New("v2ray-xhttp: unknown mode: ", c.mode)
 	}
@@ -271,19 +318,22 @@ func (c *Client) Close() error {
 
 // baseURL builds a fresh request URL targeting the normalized base path. The
 // placement engine (applyMeta) appends session/seq path segments and query params
-// as configured; applyXPadding attaches the padding. The base path is set via
-// sHTTP.URLSetPath so percent-encoding matches the rest of sing-box.
+// as configured; applyXPadding attaches the padding. The base path is literal
+// (lx: SPEC 142); the configured query is set verbatim, and query placements
+// add to it.
 func (c *Client) baseURL() (*url.URL, error) {
+	// lx: SPEC 142 — the path is literal, as Xray assigns GetNormalizedPath to
+	// requestURL.Path: "/a%2Fb/" is the prefix the server was configured with,
+	// not an escape of "/a/b/", and "/100%/" is a path, not a parse error.
 	u := &url.URL{
 		Scheme: c.scheme,
 		Host:   c.serverAddr.String(),
-	}
-	if err := sHTTP.URLSetPath(u, c.path); err != nil {
-		return nil, E.Cause(err, "parse path")
+		Path:   c.path,
 	}
 	if !strings.HasPrefix(u.Path, "/") {
 		u.Path = "/" + u.Path
 	}
+	u.RawQuery = c.query
 	return u, nil
 }
 
@@ -311,6 +361,12 @@ func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr strin
 	c.applyXPadding(request)
 	if body != nil {
 		request.Body = readCloser{body}
+	}
+	// lx: SPEC 104 — on HTTP/1.1 the long requests (download GET, streamed
+	// bodies; no seq) take their own connection, like Xray's DisableKeepAlives
+	// client; packet-up upload POSTs (with a seq) stay on keep-alive.
+	if c.httpVersion == httpVersion11 && seqStr == "" {
+		request.Close = true
 	}
 	return request.WithContext(ctx), nil
 }

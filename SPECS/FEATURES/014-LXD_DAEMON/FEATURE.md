@@ -32,12 +32,20 @@ data-plane лежит.
 | `--config-force <файл>` | путь | **всегда** бутиться с этого файла, поверх last-good; после успешного старта он становится last-good |
 | `--run` | флаг | форсит подъём ядра независимо от памяти run-состояния; без него: записанная память (`was_running`) обязательна к исполнению, а **свежий state с конфигом = запуск** (явный `-c` на чистом хосте бутится сам; лежать остаётся только после явного `stop`) |
 | `<state-dir>/daemon.json` | файл `0600`, **не флаги** | единственный источник connection-настроек демона: `listen` (дефолт `127.0.0.1:9091`; строка `"host:port"` либо `{"address": [...], "port": N}` — несколько адресов, обе плоскости на каждом, бинд «всё или ничего», первый адрес рекламируемый; масок нет), `tls` (mTLS с регистрацией клиентов; без него h2c loopback-only), `secret` (Bearer операторских маршрутов и единственный гейт plain-h2c; пусто = выключен); connection-флагов у команды НЕТ по построению; файла нет = dev-дефолты, создаёт его только `--service=install` или редактор оператора |
-| `log_max_size_mb` / `log_max_backups` / `log_max_age_hours` | ключи daemon.json, дефолт `20` / `1` / `24` | лимиты ротации лога демона («≈сутки истории»: ротация по возрасту раз в 24 ч, текущий + 1 бэкап; размер — страховка); 0/отсутствие = дефолт, «безлимита» нет |
-| `--state-dir` | путь, дефолт `lxd-state` (сервис — абсолютный `<support>/state`) | каталог состояния: daemon.json, last-good, кандидат, pending, was_running, серверная пара, доверенные клиенты |
-| `--service` | `install` \| `install-user` \| `uninstall` | установка службой (см. ниже) |
-| `--purge` | флаг | с `--service=uninstall` — снести и state-каталог |
-| `--dry-run` | флаг | с `--service` — показать, что было бы сделано, не меняя ничего (на linux любое действие и так печать) |
-| `client add [--name] / list / remove <тег>` | подкоманды | регистрация/просмотр/отзыв доверенных клиентов у живого демона; операторские маршруты **loopback-only** (минт кода = выдача доверия, из сети недоступен) |
+| `commands` | ключ daemon.json, `{имя: команда}`, нет по умолчанию | именованные root-команды для запуска клиентом по имени через `/admin/commands` (SPEC 128); имя `[a-z0-9][a-z0-9_-]{0,31}`; исход в `<каталог лога>/commands/`; окружение `LXD_*`; unix |
+| `hooks` | ключ daemon.json, `{enabled, timeout_seconds, unsafe_skip_owner_check}`, выключено по умолчанию | скрипты админа `<state_dir>/hooks/{pre_start,post_start,post_reload,post_stop}` на границах жизни ядра (SPEC 135): факты о ядре в `LXD_*` (`LXD_EVENT`, `LXD_REASON`, `LXD_TUN_ADDRESS`/`LXD_TUN_INTERFACE`/`…_PREV`), `pre_start` fail-closed, `post_*` восстановительные и идемпотентные; `hooks/core_snapshot.json` пишет демон — `post_stop(recover)` после аварийного выхода; синхронно, таймаут 15 с, root-owned гейт перед каждым запуском, `flock`; unix |
+| `log_max_size_mb` / `log_max_backups` / `log_max_age_hours` | ключи daemon.json, дефолт `1` / `1` / `24` | лимиты ротации лога демона («≈сутки истории»: ротация по возрасту раз в 24 ч, текущий + 1 бэкап; размер — страховка); 0/отсутствие = дефолт, «безлимита» нет |
+| `--state-dir` | путь, дефолт `lxd-state` (сервис — абсолютный `<support>/state`; Windows — `<ProgramData>\sing-box-lxd\state`) | каталог состояния: daemon.json, last-good, кандидат, pending, was_running, серверная пара, доверенные клиенты |
+| `--service` | `install` \| `install-user` \| `copy` \| `uninstall` \| `status` | установка службой, защищённая копия без службы, снятие, отчёт (см. ниже); на Windows `install`/`copy`/`uninstall` — повышенный токен (elevated), `status` — без прав, `install-user` — отказ |
+| `--exec-dir <dir>` | путь; macOS — дефолт `/Library/PrivilegedHelperTools` (при отсутствии создаётся `root:wheel 0755`, SPEC 124; заданный — создаётся с родителями); Windows — дефолт `<ProgramFiles>\sing-box-lxd` (создаётся) | с `--service=install\|copy\|uninstall\|status` — каталог защищённой копии и её сайдкара; macOS: каждый компонент от `/` принадлежит root без записи для group/other; Windows: копия `sing-box-lxd.exe` (+ `libcronet.dll`, если лежит рядом с источником), владелец и DACL каждого звена от корня тома — инвариант SPEC 103 §2.2 |
+| `--allow-unsafe-exec` | флаг, отладка | служба (root-job launchd, служба SCM) стартует и с бинаря, который не защищённая копия, — с `WARN` вместо отказа |
+| `--purge` | флаг | с `--service=uninstall` — снести и state-каталог (Windows: весь `<ProgramData>\sing-box-lxd`, state и `logs\`, включая `classic.log` лаунчера) |
+| `--keep-copy` | флаг | с `--service=uninstall` — снять службу, защищённую копию и сайдкар оставить для запуска без службы (состояние «только копия»; на Windows сайдкар получает `service: ""`) |
+| `--dry-run` | флаг | с `--service` (кроме `status`) — показать, что было бы сделано, не меняя ничего (на linux любое действие и так печать) |
+| `--invite-out <файл>` | путь, с `--service=install` (macOS, Windows; на Linux — отказ) | инвайт сопряжения в новый файл вместо stdout (`адрес#отпечаток#код` и перевод строки; Unix — `O_CREAT\|O_EXCL\|O_NOFOLLOW` `0600`, Windows — `CREATE_NEW` со сверкой итогового пути); существующий файл — отказ до любых изменений; провал минта (ожидание до 15 с) — выход 1, служба остаётся, файл удаляется |
+| `--invite-name <имя>` | строка, с `--service=install`; дефолт `singbox-launcher` при `--invite-out`, иначе пусто | имя клиента, которого сопрягает инвайт install; норма имени — как у `--name` |
+| `client add [--name] / list / remove <тег>` | подкоманды | регистрация/просмотр/отзыв доверенных клиентов у живого демона; операторские маршруты **loopback-only** (минт кода = выдача доверия, из сети недоступен); имя (`--name`, `--invite-name`, поле `name` в `/admin/client-code`) — пусто или 1–64 печатных символа после обрезки пробелов, иначе отказ / `400 client name: …`; именной инвайт при enroll заменяет клиента с тем же именем (старый сертификат отозван), безымянный добавляет |
+| `client add --invite-out <файл>` | путь | инвайт `client add` в новый файл вместо stdout, те же правила создания файла; на всех платформах |
 | build-tag | `with_lxd` | без тега сабкоманды нет |
 
 **Admin-плоскость (REST, тот же порт, что gRPC):** `POST /admin/apply`
@@ -86,18 +94,55 @@ gRPC `SubscribeLog` несёт логи ядра, а строки `lxd:`, оши
 TUN, до логина); `install-user` — пользовательский LaunchAgent (без sudo,
 десктоп-UX); оба переносят текущую командную строку (минус `--service`) в plist,
 абсолютизируя пути, и сами создают каталоги; `--dry-run` — сухой прогон
-(печатает plist и что произошло бы, ничего не трогая);
+(печатает план и plist, ничего не трогая);
 `uninstall` (+`--purge`) — снять службу (и опц. state). **macOS** — установка
-по-настоящему. **Linux — только печать рецепта** (принцип: всё, что меняет
+по-настоящему.
+
+**Root исполняет только root-owned копию (macOS).** LaunchDaemon запускает не тот
+файл, из которого его поставили, а копию
+`/Library/PrivilegedHelperTools/sing-box-lxd` (`root:wheel 0755`, плоский файл по
+соглашению Apple; имя влезает в 16 символов `comm` и содержит `sing-box` — `pgrep`/`ps -c`
+находят демон без `-f`; ярлык службы остаётся `com.leadaxe.sing-box-lxd`; путь проверяется от `/`, копия встаёт атомарной
+подменой после сверки sha256) с сайдкаром `sing-box-lxd.install.json` рядом (`source`, `sha256`, `version`, `installed_at`,
+`plist_path`, `label`; читается без root). В plist меняется только первый элемент
+`ProgramArguments`. `copy` — та же копия без plist и launchd (для лаунчера, который сам
+запускает ядро от root); последующий `install` привязывает её без повторного
+копирования, повторный `copy` с тем же бинарём ничего не делает. `uninstall` удаляет
+копию только по совпадению sha с её сайдкаром. `status` (без root) печатает plist,
+программу, владельца и режим, хеши, сайдкар и состояние launchd и выходит с кодом
+0 `OK`, 2 `MISMATCH`/`UNSAFE` (нужна переустановка), 3 `NOT INSTALLED`, 4 `COPY ONLY`, 5 `NOT RUNNING` (на диске исправно, job не запущен).
+Ядро под root (`lxd` и `run`) на macOS при старте проверяет собственный бинарь: служба с меткой
+launchd (`ppid 1` и `XPC_SERVICE_NAME` = ярлык) на не root-owned бинаре не стартует,
+любой другой запуск под root — `WARN`. Самопроверка есть только на macOS и Windows, где службу
+ставит само ядро; на Linux и прочих — ни отказа, ни `WARN` (SPEC 132). `GET /admin/info` отдаёт `executable` и
+`executable_sha256` — клиент сравнивает ядро по хешу, не по пути, — а также платформенную
+карточку `goos`, `goarch`, `platform`, `init_system`, `service` (SPEC 127): платформу, ассет
+для скачивания и init-систему хоста клиент узнаёт у демона.
+
+**Windows — служба SCM `sing-box-lxd` (SPEC 103).** `LocalSystem`, автозапуск, зависимость
+`Tcpip`, restart ×3 через 5 с (и при остановке с ненулевым кодом), DACL службы
+`D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)`. Служба исполняет защищённую копию
+`<ProgramFiles>\sing-box-lxd\sing-box-lxd.exe` (+ `libcronet.dll`, если была рядом с
+источником) с сайдкаром `sing-box-lxd.install.json` (`source`, `version`, `installed_at`,
+`service`, `files[{name, sha256}]`, `warnings[{code, text}]`); инвариант — владелец и DACL
+каждого звена от корня тома (SYSTEM/Administrators/TrustedInstaller у предков, чужой записи
+нет), без reparse points, фиксированный NTFS. install и copy сначала забирают
+`<ProgramData>\sing-box-lxd` (`state\`, `logs\`) во владение Administrators с защищённым DACL,
+install останавливает службу до замены образа (замена — temp → sha → `rename` старого в
+`.old`), при провале поднимает службу на прежнем образе. `status` без прав, коды 0/2/3/4/5/1;
+argv[0] не каноническая копия — `UNSAFE`. Демон под SCM — `svc.Run`, рабочий каталог =
+state, лог `logs\lxd.log` с ротацией копированием, самопроверка (отказ старта только под
+SCM), `SetDefaultDllDirectories`, закрепление `libcronet.dll` за каталогом exe. Win7-386
+собирается без `with_lxd` — службы нет. **Linux — только печать рецепта** (принцип: всё, что меняет
 диск, делает оператор): детект init (`/proc/1/comm`, фолбэки
 `/etc/openwrt_release` и `/run/systemd/system`), печать ссылки на нужный
 раздел руководства, дома демона + `daemon.json` (секрет генерится подстановкой
 `$(head -c 32 /dev/urandom …)` — на экран не попадает), unit/init-скрипта,
 команд включения и шага сопряжения; `uninstall --purge` печатает `rm -rf`, а не
-выполняет. Windows — заглушка.
+выполняет.
 
 Дорожная карта ручек (не реализовано): confirm/dead-man, история версий
-(content-addressed), reverse-proxy внутреннего Clash API, Linux/Windows-служба
+(content-addressed), reverse-proxy внутреннего Clash API, Linux-служба
 (systemd `LoadCredential=`), scoped-токены. Слияние лога демона в gRPC-поток
 `SubscribeLog` (сейчас две ленты: ядро — по gRPC, демон — через
 `GET /admin/logs`).
@@ -115,7 +160,8 @@ TUN, до логина); `install-user` — пользовательский Lau
 Под службой (stdout — не терминал) демон сам владеет `<support>/lxd.log`:
 dup2 stdout/stderr на файл (туда попадает всё, включая паники) и ротация по
 возрасту/размеру с лимитами из daemon.json; в терминале лог остаётся на
-экране. darwin/linux; Windows — заглушка (как и служба).
+экране. darwin/linux — dup2 и `rename`; Windows — один дескриптор на всю жизнь процесса
+(`SetStdHandle`) и ротация копированием с усечением (SPEC 103 §2.12).
 
 ## 4. Data flow
 
@@ -139,10 +185,25 @@ dup2 stdout/stderr на файл (туда попадает всё, включа
   отказ = 422, работающий инстанс не тронут) → подмена инстанса → last-good
   переписывается **только после успешного старта**; провал старта (bind/tun —
   то, что проверка без Start не ловит) вызывает **автооткат** на last-good.
+- **Root исполняет только root-owned файл.** Системная служба (macOS) запускает
+  копию, у которой каждый компонент пути от `/` принадлежит root и закрыт на запись
+  для group/other; служба на ином бинаре не стартует. На Windows то же по владельцу и
+  DACL (SPEC 103): служба SCM запускает только защищённую копию набора. Копия заменяется только
+  атомарно и только после сверки sha256; снимается только своя (по сайдкару).
 - **Источник конфига на старте**: last-good → seed-файл (`-c`, если дан
   явно; первый успешный старт записывает его как last-good) → пусто (IDLE).
   Кандидат не загружается на старте никогда; прерванный процессной смертью
   apply помечается в статусе (`interrupted_apply`).
+- **Клиент не исполняет код — он выбирает из перечисленного оператором.** `commands`
+  (SPEC 128): текст команды пишет оператор в `daemon.json` на хосте, клиент передаёт только
+  имя (тело запроса — `400`); окружение команды — факты от демона, не вход клиента. Гейт —
+  тот же, что у всех admin-маршрутов, без исключений (решение владельца 2026-10-12).
+- **Границы жизни ядра объявляются админу, политика остаётся у него.** `hooks` (SPEC 135):
+  четыре скрипта в root-owned каталоге state-dir, клиент к ним не прикасается и ничего им не
+  передаёт; демон гарантирует вызов на каждой границе — включая `post_stop` после паники
+  процесса (`recover` по `core_snapshot.json`) и при `update`/рестарте службы (под `flock`, чтобы
+  старый и новый демон под procd не перемешали восстановление). Системный DNS и его снимок —
+  дело скрипта, не демона (issue #12).
 - Статус `fatal` означает «инстанса нет»; после успешного отката статус
   `started`, а причина провала остаётся в `last_error` информационно.
 - Аутентификация обеих плоскостей: с `--tls` — пиннингованный клиентский
@@ -155,11 +216,17 @@ dup2 stdout/stderr на файл (туда попадает всё, включа
 - Не заменяет Clash API: если конфиг содержит `experimental.clash_api`,
   он работает как обычно внутри инстанса.
 - Не супервизор самого себя: смерть процесса лечит systemd/launchd/SCM.
+- **Обслуживание из лаунчера без SSH — три задачи одной линией.** 127: демон называет
+  платформу, релизный ассет, init хоста и свой статус службы. 128: оператор перечисляет
+  root-команды в `daemon.json`, клиент запускает их по имени — код клиента не исполняется.
+  129: `sing-box lxd update` — штатная команда `update`, самообновление с проверкой суммы,
+  атомарной подменой и откатом. Windows/macOS — только 127 и (macOS) 128; Linux/OpenWrt — всё.
 - Не менеджер парка ядер: один демон — одно ядро.
 - Android/gomobile не затрагивает (другая точка входа).
 - Откат, mTLS, admin-плоскость, хранилище ресурсов и плоскость наблюдаемости
-  реализованы (056/057/063/065); впереди по дорожной карте — confirm/dead-man,
-  история версий, reverse-proxy Clash API, Linux/Windows-служба, scoped-токены.
+  реализованы (056/057/063/065); служба macOS и Windows — 057/100/103; впереди по
+  дорожной карте — confirm/dead-man, история версий, reverse-proxy Clash API,
+  Linux-служба, scoped-токены.
 - Плоскость наблюдаемости профилирует **процесс демона целиком**: ядро живёт
   внутри того же процесса, и разделить «память ядра» и «память демона» она не
   может — у Go нет per-subsystem учёта. На вопрос «какой outbound течёт»
@@ -173,10 +240,18 @@ dup2 stdout/stderr на файл (туда попадает всё, включа
 | [056-LXD_APPLY_ROLLBACK](../../TASKS/056-LXD_APPLY_ROLLBACK/SPEC.md) | Admin-плоскость MVP: REST на том же порту, apply с валидацией-до-убийства (сабпроцесс), last-good, автооткат, старт без конфига (IDLE), рестарт из last-good; демо на macOS |
 | [057-LXD_MTLS_SERVICE](../../TASKS/057-LXD_MTLS_SERVICE/SPEC.md) | mTLS-канал (демон сам себе CA, приглашение `адрес#отпечаток#код`, одноразовый код), `client add/list/remove`, start/stop жизни ядра, память was_running, `--config-force`/`--run`, daemon.json как единственный источник connection-настроек + ротация лога; служба `--service=install` (system LaunchDaemon) / `install-user` (LaunchAgent без sudo) / `uninstall [--purge]`, пути абсолютизируются, каталоги создаются сами; device-verified на macOS (обе роли службы, крэш-цикл на cwd-relative пути пойман и починен) |
 | [063-LXD_RESOURCE_STORE](../../TASKS/063-LXD_RESOURCE_STORE/SPEC.md) | Вторая полезная нагрузка admin-плоскости: REST-CRUD над файловыми ресурсами (`.srs`, geo-базы), адресация по имени + sha256 для дифа, гуард ссылок (409 на занятое имя), санитизация имён; демо на macOS |
-| [068-LXD_HOST_TELEMETRY](../../TASKS/068-LXD_HOST_TELEMETRY/SPEC.md) | Телеметрия **хоста** (в отличие от `/admin/memory`, который про процесс): `GET /admin/host` — CPU с разрезом по ядрам, память (процент от available, не free), термозоны массивом, диски с пометкой раздела state-dir, дескрипторы процесса и системы; `GET /admin/host/interfaces` — все интерфейсы с сырыми счётчиками и скоростями. Проценты и скорости = дельты с `interval_seconds`; первый замер честно отдаёт `null`. Кеш 2 с; вне Linux форма та же, недоступное — `null`; на darwin байтовые счётчики доращиваются до 64 бит (ядро отдаёт 32-битные). Живой прогон на macOS |
+| [068-LXD_HOST_TELEMETRY](../../TASKS/068-LXD_HOST_TELEMETRY/SPEC.md) | Телеметрия **хоста** (в отличие от `/admin/memory`, который про процесс): `GET /admin/host` — CPU с разрезом по ядрам, память (процент от available, не free), термозоны массивом, диски с пометкой раздела state-dir, дескрипторы процесса и системы; `GET /admin/host/interfaces` — все интерфейсы с сырыми счётчиками и скоростями. Проценты и скорости = дельты с `interval_seconds`; первый замер отдаёт `null`. Кеш 2 с; вне Linux форма та же, недоступное — `null`; на darwin байтовые счётчики доращиваются до 64 бит (ядро отдаёт 32-битные). Живой прогон на macOS |
 | [067-LXD_BUILD_TAG_SPLIT](../../TASKS/067-LXD_BUILD_TAG_SPLIT/SPEC.md) | Демон переехал на собственный build-tag `with_lxd`; `with_lx_command` остался за RPC SPEC 015 (`URLTestOutbound`, `GetRules`, `GetGroups` — их использует LxBox). Позволяет собрать сборку без демона, но с командными расширениями: так теперь собирается legacy-Win7. Логика не менялась — только теги и комментарии |
 | [066-LXD_CLIENT_IDENTITY](../../TASKS/066-LXD_CLIENT_IDENTITY/SPEC.md) | Справочник IP → устройство для сетевого инспектора: `GET /admin/clients-info` отдаёт `name`/`mac`/`ssid`/`iface`/`port`/`source` по каждому клиенту, метки оператора через `PUT`/`DELETE` (ключ = IP или MAC). Пять провайдеров с приоритетом по порядку вызова (`lease` → `arp` → `bridge` → `wireless` → `label`), платформенные через build-теги, ядро не трогается; кеш 60 с; живой прогон на macOS |
 | [065-LXD_OBSERVABILITY_PLANE](../../TASKS/065-LXD_OBSERVABILITY_PLANE/SPEC.md) | Диагностика демона: `/admin/memory` (два RSS — текущий и пик, кеш 200 мс), `/admin/stats` (uptime ядра, трафик, соединения; без ядра `null`, а не 503), `/admin/logs` (хвост `lxd.log` — лог **демона**, которого нет в gRPC-потоке), `/admin/pprof/*` (шесть снимков по whitelist, CPU/trace с потолком и 409, вкл/выкл block/mutex) — за тем же mTLS-пином, без отдельного debug-порта; живой прогон на macOS |
+| [100-LXD_ROOT_OWNED_BINARY](../../TASKS/100-LXD_ROOT_OWNED_BINARY/SPEC.md) | Системная служба исполняет root-owned копию бинаря, а не файл, из которого её поставили (закрыто повышение привилегий через user-writable бинарь в plist): копия `/Library/PrivilegedHelperTools/sing-box-lxd` (плоский файл), сайдкар `sing-box-lxd.install.json`, `--exec-dir`, `--service=copy` (копия без службы, для classic TUN лаунчера), `--service=status` с кодами выхода, uninstall только своей копии, самопроверка `lxd`/`run` под root, `executable`/`executable_sha256` в `/admin/info`; табличный тест переходов состояний |
+| [103-LXD_WINDOWS_SERVICE](../../TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md) | Реализовано (I): служба Windows (SCM `sing-box-lxd`, LocalSystem, автозапуск, recovery) по модели 100 — защищённая копия `<ProgramFiles>\sing-box-lxd\` (exe + `libcronet.dll`, сайдкар с `files[]`/`service`/`warnings`), инвариант по владельцу и DACL от корня тома, захват `<ProgramData>\sing-box-lxd` до записи секрета, install (stop → замена образа → configure → start, откат на прежний образ), copy, uninstall по сайдкару, status без прав с кодами 0/2/3/4/5/1; `svc.Run` с рабочим каталогом state, лог `logs\lxd.log` с ротацией копированием, `SetDefaultDllDirectories` и закрепление `libcronet.dll`; `--invite-out`/`--invite-name`, норма имени клиента, именной enroll заменяет запись; джоба CI `test-windows`. Живой прогон на Windows — за лаунчер-сессией; пара SPEC 141 лаунчера |
+| [124-LXD_DEFAULT_EXEC_DIR_CREATE](../../TASKS/124-LXD_DEFAULT_EXEC_DIR_CREATE/SPEC.md) | Реализовано (I): на чистой macOS нет `/Library/PrivilegedHelperTools` (её создаёт SMJobBless при первом помощнике) — `--service=install`/`copy` падали; теперь создают последний компонент дефолта `root:wheel 0755` после проверки цепочки `/Library`, dry-run пишет `would create`, status/uninstall не создают; существующий каталог проверяется как в 100 |
+| [127-LXD_INFO_PLATFORM](../../TASKS/127-LXD_INFO_PLATFORM/SPEC.md) | Реализовано (I): платформенная карточка в `GET /admin/info` — `goos`/`goarch` (`runtime`), `platform` (релизный ассет по `GOARM`/`GOMIPS` из build info: `linux-armv7`, `linux-mipsle-softfloat`), `init_system` (init **хоста**: `procd` / `systemd` / `openrc` / `launchd` / `scm` / `""`) и `service` (**этот процесс** запущен под ним службой); раз при старте. Детектор linux общий с рецептом `--service` (`/proc/1/comm`, затем пробы; +openrc). Лаунчер перестаёт хранить платформу машины руками и спрашивать init |
+| [128-LXD_COMMANDS](../../TASKS/128-LXD_COMMANDS/SPEC.md) | Реализовано (I) 2026-10-12: `"commands": {имя: строка}` в `daemon.json` — админ перечисляет root-команды, клиент запускает по имени без входа (`sudoers`-модель); `GET/POST /admin/commands[/{name}]`, detached-исполнение, исход рядом с логом демона (tmpfs на роутере), окружение `LXD_*` от демона, гейт — как у остальных операторских маршрутов (однородно, решение владельца); граница 100 сохраняется |
+| [129-LXD_UPDATE](../../TASKS/129-LXD_UPDATE/SPEC.md) | Реализовано (I) 2026-10-12: `sing-box lxd update` — самообновление на Linux из `SHA256SUMS` релиза по `platform` 127, поток в `.new`, хардлинк `.old`, атомарный `rename`, рестарт по init и откат; `--dry-run`/`--prerelease`/`--no-restart`; `sing-box version` печатает `Platform:`/`Init:` |
+| [132-LXD_SELFCHECK_SERVICE_PLATFORMS_ONLY](../../TASKS/132-LXD_SELFCHECK_SERVICE_PLATFORMS_ONLY/SPEC.md) | Реализовано (I) 2026-10-14: самопроверка бинаря при старте под root — только macOS и Windows; на Linux (вкл. OpenWrt) и прочих снята целиком — WARN про launchd с неисполнимым советом (issue #40, Asus Merlin `/` = `0777`) |
+| [135-LXD_HOOKS](../../TASKS/135-LXD_HOOKS/SPEC.md) | Реализована (I) 2026-10-17, дизайн утверждён 2026-10-17; ручные проверки владельца (Mac-лаунчер, `kill -9`, `update` на RouteRich) впереди: скрипты `pre_start`/`post_start`/`post_reload`/`post_stop` в `<state_dir>/hooks/`, ключ `hooks` в `daemon.json` (`enabled`, `timeout_seconds`, `unsafe_skip_owner_check`); окружение `LXD_EVENT`/`LXD_REASON`/`LXD_TUN_*`/`_PREV`; `pre_start` fail-closed, `post_*` идемпотентные; `core_snapshot.json` демона и `post_stop(recover)`; синхронное исполнение, вывод в файл, `flock`, root-owned гейт; статус `hooks` в `/admin/status`; `// lx:` аксессор `InterfaceName()` на tun-inbound |
 
 ## 8. Особенности сопровождения
 
@@ -193,5 +268,5 @@ dup2 stdout/stderr на файл (туда попадает всё, включа
   пустым (стаб) — обе стороны проверяются CI. Тег **отдельный** от
   `with_lx_command` (тот гейтит RPC SPEC 015 — `URLTestOutbound`, `GetRules`,
   `GetGroups`, которыми живёт LxBox): снятие `with_lxd` убирает демон и
-  оставляет RPC рабочими. Так собирается legacy-Win7, где служба Windows не
-  реализована (SPEC 067).
+  оставляет RPC рабочими. Так собирается legacy-Win7: без `with_lxd` там нет ни
+  демона, ни службы Windows (SPEC 067, SPEC 103).

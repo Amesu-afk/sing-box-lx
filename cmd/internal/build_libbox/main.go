@@ -96,8 +96,9 @@ func init() {
 	// SPEC 020 — idle-suspend of unreachable+idle WG/AWG endpoints (device.Down),
 	// a MOBILE-ONLY power/RAM feature: it frees the recv-worker bufsArrs, which are
 	// ~8 MB each only where BatchSize=128 (Android/Linux). It ships in the AAR so a
-	// LxBox config carrying route.lx_idle_suspend works; without the tag the core
-	// rejects that option at start ("rebuild with -tags with_lx_idle_suspend"), so
+	// LxBox config carrying lx.wg.idle_suspend (SPEC 098; route.lx_idle_suspend is
+	// a deprecated alias) works; without the tag the core rejects any lx.wg key at
+	// start ("rebuild with -tags with_lx_idle_suspend"), so
 	// the desktop/CLI LX_TAGS (Makefile.lx) deliberately OMIT it. On iOS BatchSize=1
 	// makes bufsArrs tiny, so the tag is neutral there (harmless if the AAR path is
 	// later reused for a Darwin mobile target); it is off unless the config sets the
@@ -116,6 +117,15 @@ func init() {
 	// diverge between the two builds.
 	sharedTags = append(sharedTags, "with_openvpn", "with_openconnect")
 	// lx:end openvpn
+	// lx:begin trusttunnel
+	// TrustTunnel outbound + inbound (SPEC 133/134, FEATURE 018) in the AAR — owner
+	// decision 2026-11-05, reversing the 2026-10-16 "desktop and router only" one:
+	// LxBox receives trusttunnel nodes (tt:// links) and the core must resolve
+	// `type: trusttunnel` instead of failing with "not included in this build".
+	// Pure Go (H2/H3 over the existing TLS and quic stacks), no extra dependency.
+	// The AAR now matches the desktop LX_TAGS set (Makefile.lx) for this tag too.
+	sharedTags = append(sharedTags, "with_trusttunnel")
+	// lx:end trusttunnel
 	darwinTags = append(darwinTags, "with_dhcp", "grpcnotrace")
 	// memcTags = append(memcTags, "with_tailscale")
 	// lx:begin tailscale
@@ -124,7 +134,11 @@ func init() {
 	// DNS transport and DERP service have to be present at runtime. This is upstream's
 	// mobile tag set unchanged: with_tailscale plus the ts_omit_* trims (logtail, ssh,
 	// drive, taildrop, webclient, doctor, capture, kube, aws, synology, bird), which
-	// strip client features a VPN app never calls. Tailscale is the single largest
+	// strip client features a VPN app never calls. ts_omit_taildrop is a no-op: the
+	// sagernet/tailscale fork has no feature/taildrop package, and sing-box implements
+	// Taildrop itself in protocol/tailscale/taildrop.go, so the AAR carries it (libbox.so
+	// with and without the tag differ only in the embedded tag string, measured
+	// 2026-11-02). Tailscale is the single largest
 	// dependency in the APK; the size cost is accepted. The AAR now matches the desktop
 	// LX_TAGS set (Makefile.lx), which carries with_tailscale since 2026-09-04.
 	sharedTags = append(sharedTags, "with_tailscale", "ts_omit_logtail", "ts_omit_ssh", "ts_omit_drive", "ts_omit_taildrop", "ts_omit_webclient", "ts_omit_doctor", "ts_omit_capture", "ts_omit_kube", "ts_omit_aws", "ts_omit_synology", "ts_omit_bird")

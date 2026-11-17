@@ -69,18 +69,42 @@
 |------|----------|-----------|-------|
 | `ip` | `quic` · `dns` · `stun` · `sip` | при любом из трёх | Под какой протокол маскируется первый пакет |
 | `id` | домен | только для `quic` | Домен в приманке. Для `dns`/`sip` необязателен — без него генерируется псевдо-домен; для `stun` игнорируется |
-| `ib` | `chrome` · `firefox` · `curl` | нет | Профиль клиента; принимается только вместе с `ip=quic` |
+| `ib` | `chrome` · `firefox` · `curl` (`chrome-full` — экспериментальный, не для клиентских UI) | нет | Профиль клиента; принимается только вместе с `ip=quic` |
 
 Вместо ручного составления CPS-строки пользователь называет протокол, домен
 и клиент — приманка собирается за него.
 
-`ib` выбирает **TLS-фингерпринт приманки**: `chrome` и `firefox` дают подлинный
-браузерный отпечаток (JA3/JA4) настоящего браузерного рукопожатия, `curl` и
-отсутствие ключа — общий отпечаток. Браузерные профили требуют сборки
-с поддержкой имитации TLS; без неё они молча деградируют до общего.
+Для `ip=quic` приманка — не статичный блоб, а **живой генератор**: перед каждым
+хендшейком WireGuard (старт, rekey, пробуждение, реконнект) собирается свежий QUIC
+Initial с новыми connection ID, random, key share и раскладкой фреймов. `ib` задаёт
+**QUIC-ClientHello и раскладку браузера**: `chrome` — Chrome 155 без постквантового
+key share, расширения и transport parameters Chrome в QUIC, фреймы разрезаны и
+перемешаны как у Chrome; `firefox` — Firefox 148 по захвату, заголовок и набивка как
+у Firefox; `curl` и отсутствие ключа — общий короткий ClientHello. Все три проходят к
+WARP там, где чистый WireGuard не поднимается (проверено на устройстве в LTE,
+09.10.2026); проход держит целый ClientHello в одном пакете под MTU, а не его
+содержимое. `chrome-full` (ML-KEM, пакет больше MTU) — только для стендов. `dns`/`sip`
+остаются статичными шаблонами и к WARP не проходят — они для серверов, отвечающих на
+такую приманку. Браузерные профили требуют сборки с поддержкой имитации TLS; без неё
+они молча деградируют до общего.
 
 Профиль `sip` — двухпакетный: приманка занимает и `i1` (INVITE), и `i2`
 (ответ того же диалога), поэтому явный `i2` вместе с `ip=sip` отвергается.
+
+### Маскировочная пачка и `detour`
+
+Вся пачка перед инициацией — приманка `ip`, статичные `i1`…`i5`, junk `jc` — нужна на
+первой миле. Через `detour` первая миля видит несущий протокол, а релей с Xray-сниффингом
+разбирает приманку `ip=quic` как первую датаграмму ассоциации и уводит её на SNI из `id`
+(issue #64). Пачка шлётся на любом пути, в том числе через `detour`; ключ `lx.awg_masquerade`
+задачи 153 (`all`/`direct`, lx.31–lx.32) удалён в задаче 060 (владелец 2026-11-07), любое его
+значение — ошибка загрузки. Сниффящий релей закрывается секцией `quic` блока `lx.sniff_guard`
+(фича [019-SNIFF_GUARD](../019-SNIFF_GUARD/FEATURE.md)), метод `decoy_first_byte`: перед
+QUIC-образной пачкой (`ip: quic` или статичный `i1` с QUIC-дампа) идёт байт `0x00`, если метка
+пути на момент создания сокета — `suspect`. Повтора нет — повторы рукопожатия идут по тому же
+сокету, релей уже решил по первой датаграмме; исход рукопожатия метку не двигает, `quic.delay` к
+AWG не применяется. Пачки `ip: dns|stun|sip` и обычный junk байта не получают. Серверные
+поля (`s1`–`s4`, `h1`–`h4`, защита заголовка, хвосты) не трогаются.
 
 ### AWG 3.x — защита заголовка, паддинг, хвосты, тайминги
 
@@ -139,7 +163,7 @@ Amnezia `amnezia-awg2` с `protocol_version` 3.x экспортирует ров
 **Входящий путь:** пакет с провода → распознавание типа по magic-заголовкам →
 снятие padding → штатная расшифровка WireGuard → маршрутизация.
 
-Ключевая связь между параметрами: **`s1`–`s4` сдвигают позицию magic-заголовка**
+Связь между параметрами: **`s1`–`s4` сдвигают позицию magic-заголовка**
 в пакете. Отсюда весь класс пограничных случаев — параметры не независимы,
 padding и заголовки читаются из одного и того же буфера.
 
@@ -197,16 +221,23 @@ padding и заголовки читаются из одного и того ж�
 | [003 — AWG2_CLIENT_ENDPOINT](../../TASKS/003-AWG2_CLIENT_ENDPOINT/SPEC.md) | Базовый endpoint: `s1`–`s4`, `h1`–`h4`, `i1`–`i5` | C |
 | [005 — AWG2_RANGED_MAGIC_HEADERS](../../TASKS/005-AWG2_RANGED_MAGIC_HEADERS/SPEC.md) | Диапазонная форма `"min-max"` для `h1`–`h4` | C |
 | [008 — AWG_JUNK_PARAM_VALIDATION](../../TASKS/008-AWG_JUNK_PARAM_VALIDATION/SPEC.md) | Fail-fast на `jmin > jmax` | C |
-| [009 — WIRESOCK_MASQUERADE_PROFILES](../../TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) | Masquerade `id`/`ip`/`ib`, профили quic/dns/stun/sip | C |
+| [009 — WIRESOCK_MASQUERADE_PROFILES](../../TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) | Masquerade `id`/`ip`/`ib`: `quic` — свежий браузерный Initial на каждый хендшейк (chrome/firefox/curl device-verified на LTE, lx.13), dns/stun/sip — статичный CPS | C |
 | [025 — AWG_TRANSPORT_PADDING_OVERRUN](../../TASKS/025-AWG_TRANSPORT_PADDING_OVERRUN/SPEC.md) | Класс крашей от значений padding | C |
 | [026 — AWG_MAGIC_VS_RESERVED_CLEAR](../../TASKS/026-AWG_MAGIC_VS_RESERVED_CLEAR/SPEC.md) | Сохранность magic при малом padding | C |
 | [031 — AWG_PARITY_AUDIT_ADVANCED_SECURITY](../../TASKS/031-AWG_PARITY_AUDIT_ADVANCED_SECURITY/SPEC.md) | Сверка паритета AWG2 (полный, 16/16); `AdvancedSecurity` — серверное поле, не зазор. §3/§3.1 про «v3-ключи» устарели — см. 080 | C |
 | [080 — AWG3_HEADER_PROTECTION_TIMINGS](../../TASKS/080-AWG3_HEADER_PROTECTION_TIMINGS/SPEC.md) | AWG 3.0/3.1: `header_protection_key`, `content_padding_addition`, `random_trailers`, `disable_cookies`, диапазонные тайминги и keepalive; порт amneziawg-go v3.1 в прививку | C |
 | [081 — AWG_RECEIVE_INDEX_FIRST_CLASSIFICATION](../../TASKS/081-AWG_RECEIVE_INDEX_FIRST_CLASSIFICATION/SPEC.md) | Приём: data-пакет с живым receiver index классифицируется до handshake-кандидатов — downlink не теряет пакеты при широких `h1–h4` (точный размер AWG2, `random_trailers` AWG 3.1) | C |
 | [007 — AWG_OVER_WIREGUARD_DETOUR_GUARD](../../TASKS/007-AWG_OVER_WIREGUARD_DETOUR_GUARD/SPEC.md) | Guard AWG-over-WG — снят, причина устранена | C |
+| [101 — WG_HANDSHAKE_GSO_RETRY_LOG_NOISE](../../TASKS/101-WG_HANDSHAKE_GSO_RETRY_LOG_NOISE/SPEC.md) | Хендшейк-пути форка wireguard-go: успешная переотправка без UDP GSO — Verbose, не ERROR (LxBox #95) | I |
+| [153 — AWG_MASQUERADE_OVER_DETOUR](../../TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md) | Хук форка `SetHandshakeBurstFunc` (пачка как голые payload'ы до headroom) и фильтр пачки — шов для байта `lx.quic_sniff_decoy` перед QUIC-образной пачкой (issue #64, два полевых отчёта 2026-11-03). Ключ `lx.awg_masquerade` (`all`/`direct`) удалён в задаче 060, владелец 2026-11-07 | C |
+| [112 — TAILSCALE_DIRECT_PATH_SEND_HEADROOM](../../TASKS/112-TAILSCALE_DIRECT_PATH_SEND_HEADROOM/SPEC.md) | Запас 8 байт перед датаграммой в `Bind.Send()` возвращён на всех путях отправки: графт обнулял его, и узел Tailscale (тот же форк) не слал трафик по прямому UDP-пути (issue #33) | C |
 
 Примеры конфигурации — [docs-lx/lx-config.md](../../../docs-lx/lx-config.md)
 и `EXAMPLES.md` в задаче 009.
+
+## Документация
+
+Ликбез по механике и реализации в форке — `docs-lx/amneziawg-explained.md` / `.ru.md`: три слоя AWG, бюджет MTU, графт и валидация, пример `awg.conf` ↔ endpoint, позиция апстрима.
 
 ## Особенности сопровождения
 

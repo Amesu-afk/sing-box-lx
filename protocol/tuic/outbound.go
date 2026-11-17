@@ -9,6 +9,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/lxdatagram"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -30,7 +31,11 @@ func RegisterOutbound(registry *outbound.Registry) {
 	outbound.Register[option.TUICOutboundOptions](registry, C.TypeTUIC, NewOutbound)
 }
 
-var _ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+var (
+	_ adapter.InterfaceUpdateListener = (*Outbound)(nil)
+	_ adapter.IdleConnectionKeeper    = (*Outbound)(nil)
+	_ adapter.OutboundWithMultiplex   = (*Outbound)(nil)
+)
 
 type Outbound struct {
 	outbound.Adapter
@@ -40,7 +45,6 @@ type Outbound struct {
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TUICOutboundOptions) (adapter.Outbound, error) {
-	options.UDPFragmentDefault = true
 	if options.TLS == nil || !options.TLS.Enabled {
 		return nil, C.ErrTLSRequired
 	}
@@ -73,7 +77,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	client, err := tuic.NewClient(tuic.ClientOptions{
 		Context:       ctx,
-		Dialer:        outboundDialer,
+		Dialer:        lxdatagram.Dialer(ctx, tag, outboundDialer, logger), // lx: SPEC 150, 060
 		ServerAddress: options.ServerOptions.Build(),
 		TLSConfig:     tlsConfig,
 		QUICOptions: qtls.QUICOptions{
@@ -152,6 +156,24 @@ func (h *Outbound) InterfaceUpdated(ctx context.Context) {
 	_ = h.client.CloseWithError(E.New("network changed"))
 }
 
-func (h *Outbound) Close() error {
-	return h.client.CloseWithError(os.ErrClosed)
+func (h *Outbound) MultiplexEnabled() bool {
+	return true
+}
+
+func (h *Outbound) SetKeepIdleConnections(keep bool) {
+	h.client.SetKeepIdleConnections(keep)
+}
+
+func (h *Outbound) CloseIdleConnections() {
+	h.client.CloseIdleConnections()
+}
+
+func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage != adapter.StartStateInitialize {
+		return nil
+	}
+	scope.Add(func() error {
+		return h.client.CloseWithError(os.ErrClosed)
+	})
+	return nil
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
 	dnsgroup "github.com/sagernet/sing-box/dns/transport/group"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/group"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -92,7 +93,7 @@ func (s *StartedService) URLTestOutbound(ctx context.Context, request *URLTestOu
 
 	delay, err := urltest.URLTest(testCtx, request.Link, detour)
 
-	realTag := group.RealTag(boxService.outboundManager, realTagSource)
+	realTag := group.RealTag(realTagSource, N.NetworkTCP)
 	if err != nil {
 		boxService.urlTestHistoryStorage.DeleteURLTestHistory(realTag)
 		return &URLTestOutboundResponse{Error: err.Error()}, nil
@@ -181,12 +182,18 @@ func (s *StartedService) GetURLViaOutbound(ctx context.Context, request *GetURLV
 
 	// remoteAddr is captured from the connection actually established inside the tunnel —
 	// this is where the target resolved to through THIS node, not the node's own exit IP
-	// (that one is carried by the body).
+	// (that one is carried by the body). Not every conn has an address: a naive node
+	// (cronet-go BidirectionalConn) returns nil from RemoteAddr(), and calling String()
+	// on that nil interface took the whole process down (SPEC 099). Nil address = empty
+	// field, the same state the response already has for a probe that never connected.
 	var remoteAddr string
 	httpRequest = httpRequest.WithContext(httptrace.WithClientTrace(httpRequest.Context(), &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			if info.Conn != nil {
-				remoteAddr = info.Conn.RemoteAddr().String()
+			if info.Conn == nil {
+				return
+			}
+			if addr := info.Conn.RemoteAddr(); addr != nil {
+				remoteAddr = addr.String()
 			}
 		},
 	}))
@@ -207,7 +214,14 @@ func (s *StartedService) GetURLViaOutbound(ctx context.Context, request *GetURLV
 		if err != nil {
 			return &GetURLViaOutboundResponse{Error: E.Cause(err, "initialize certificate store").Error()}, nil
 		}
-		defer store.Close()
+		// Same pattern as libbox NewHTTPClient: the store fills its pool at
+		// Initialize and releases it through the scope.
+		storeScope := adapter.NewScope(boxService.ctx, log.NewNOPFactory().Logger())
+		defer storeScope.Close()
+		err = store.Start(adapter.StartStateInitialize, storeScope)
+		if err != nil {
+			return &GetURLViaOutboundResponse{Error: E.Cause(err, "initialize certificate store").Error()}, nil
+		}
 		transport.TLSClientConfig = &tls.Config{RootCAs: store.Pool()}
 	}
 	defer transport.CloseIdleConnections()
@@ -326,9 +340,16 @@ func (s *StartedService) GetOutbounds(ctx context.Context, empty *emptypb.Empty)
 	var list OutboundList
 	appendItem := func(detour adapter.Outbound) {
 		item := &GroupItem{Tag: detour.Tag(), Type: detour.Type()}
-		if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, detour)); history != nil {
+		if history := historyStorage.LoadURLTestHistory(group.RealTag(detour, N.NetworkTCP)); history != nil {
 			item.UrlTestTime = history.Time.Unix()
 			item.UrlTestDelay = int32(history.Delay)
+		}
+		// SPEC 097: a WG/AWG endpoint reports its build/sleep state — "not
+		// built yet" is a state for the app to show, not a dead node.
+		if reporter, isReporter := detour.(adapter.IdleStateReporter); isReporter {
+			idleState := reporter.IdleState()
+			item.EndpointState = idleState.State
+			item.IdleSinceSeconds = int64(idleState.IdleSince / time.Second)
 		}
 		list.Outbounds = append(list.Outbounds, item)
 	}
@@ -586,7 +607,7 @@ func resolveOutboundChain(tags []string, outboundManager adapter.OutboundManager
 			continue
 		}
 		if group, isGroup := detour.(adapter.OutboundGroup); isGroup {
-			if now := group.Now(); now != "" {
+			if now := adapter.GroupNow(group); now != "" {
 				chain = append(chain, now)
 			}
 		}

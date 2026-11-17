@@ -2,6 +2,7 @@ package v2raygrpclite
 
 import (
 	std_bufio "bufio"
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
@@ -9,7 +10,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/sagernet/sing-box/common/badh2"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/baderror"
 	"github.com/sagernet/sing/common/buf"
@@ -28,7 +28,9 @@ type GunConn struct {
 	flusher       http.Flusher
 	create        chan struct{}
 	err           error
-	readRemaining int
+	cancel        context.CancelFunc
+	readRemaining uint64
+	onClose       func()
 }
 
 func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunConn {
@@ -40,10 +42,11 @@ func newGunConn(reader io.Reader, writer io.Writer, flusher http.Flusher) *GunCo
 	}
 }
 
-func newLateGunConn(writer io.Writer) *GunConn {
+func newLateGunConn(writer io.Writer, cancel context.CancelFunc) *GunConn {
 	return &GunConn{
 		create: make(chan struct{}),
 		writer: writer,
+		cancel: cancel,
 	}
 }
 
@@ -52,17 +55,17 @@ func (c *GunConn) setup(reader io.Reader, err error) {
 		c.rawReader = reader
 		c.reader = std_bufio.NewReader(reader)
 	}
-	c.err = badh2.HideStreamError(err) // lx: SPEC 082
+	c.err = err
 	close(c.create)
 }
 
 func (c *GunConn) Read(b []byte) (n int, err error) {
 	n, err = c.read(b)
-	return n, badh2.HideStreamError(baderror.WrapH2(err)) // lx: SPEC 082
+	return n, baderror.WrapH2(err)
 }
 
 func (c *GunConn) read(b []byte) (n int, err error) {
-	if c.reader == nil {
+	if c.create != nil {
 		<-c.create
 		if c.err != nil {
 			return 0, c.err
@@ -70,11 +73,11 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 	}
 
 	if c.readRemaining > 0 {
-		if len(b) > c.readRemaining {
+		if uint64(len(b)) > c.readRemaining {
 			b = b[:c.readRemaining]
 		}
 		n, err = c.reader.Read(b)
-		c.readRemaining -= n
+		c.readRemaining -= uint64(n)
 		return
 	}
 
@@ -88,14 +91,13 @@ func (c *GunConn) read(b []byte) (n int, err error) {
 		return
 	}
 
-	readLen := int(dataLen)
-	c.readRemaining = readLen
-	if len(b) > readLen {
-		b = b[:readLen]
+	c.readRemaining = dataLen
+	if uint64(len(b)) > dataLen {
+		b = b[:dataLen]
 	}
 
 	n, err = c.reader.Read(b)
-	c.readRemaining -= n
+	c.readRemaining -= uint64(n)
 	return
 }
 
@@ -142,7 +144,24 @@ func (c *GunConn) FrontHeadroom() int {
 }
 
 func (c *GunConn) Close() error {
-	return common.Close(c.rawReader, c.writer)
+	var reader io.Reader
+	if c.create != nil {
+		select {
+		case <-c.create:
+			reader = c.rawReader
+		default:
+		}
+	} else {
+		reader = c.rawReader
+	}
+	err := common.Close(reader, c.writer)
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return err
 }
 
 func (c *GunConn) LocalAddr() net.Addr {

@@ -82,7 +82,13 @@ func (d *DetourDialer) DialContext(ctx context.Context, network string, destinat
 	if err != nil {
 		return nil, err
 	}
-	return dialer.DialContext(ctx, network, destination)
+	// lx:begin SPEC 139 — upstream returns dialer.DialContext directly
+	ctx, stage := d.beginDetourLx(ctx, dialer, destination)
+	ctx = d.recordCarrierLx(ctx, dialer) // lx: SPEC 060 — the carrier dials without the node's attempt
+	conn, err := dialer.DialContext(ctx, network, destination)
+	stage.End(err)
+	return conn, err
+	// lx:end SPEC 139
 }
 
 func (d *DetourDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
@@ -90,7 +96,13 @@ func (d *DetourDialer) ListenPacket(ctx context.Context, destination M.Socksaddr
 	if err != nil {
 		return nil, err
 	}
-	return dialer.ListenPacket(ctx, destination)
+	// lx:begin SPEC 139 — upstream returns dialer.ListenPacket directly
+	ctx, stage := d.beginDetourLx(ctx, dialer, destination)
+	ctx = d.recordCarrierLx(ctx, dialer) // lx: SPEC 060 — the carrier dials without the node's attempt
+	conn, err := dialer.ListenPacket(ctx, destination)
+	stage.End(err)
+	return conn, err
+	// lx:end SPEC 139
 }
 
 func (d *DetourDialer) Upstream() any {

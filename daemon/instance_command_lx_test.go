@@ -6,10 +6,12 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/common/json/badoption"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,6 +46,51 @@ func TestCaptureRunningConfig_LX(t *testing.T) {
 	}
 	if !strings.HasSuffix(strings.TrimRight(content, "\n"), "}") {
 		t.Fatalf("snapshot is not a single JSON object: %q", content)
+	}
+}
+
+// lx: SPEC 098 — the snapshot shows the root `lx` block canonical: an empty
+// sub-block is dropped, an explicit teardown "0" stays a value, and the
+// caller's options (which box.New resolves next) are untouched.
+func TestCaptureRunningConfig_canonicalLXBlock_LX(t *testing.T) {
+	zero := badoption.Duration(0)
+	options := option.Options{
+		Route: &option.RouteOptions{Final: "direct-out"},
+		LX: &option.LXOptions{
+			WG: &option.LXWGOptions{
+				IdleSuspend:          badoption.Duration(30 * time.Second),
+				IdleSuspendReachable: badoption.Duration(5 * time.Minute),
+				IdleTeardown:         &zero,
+			},
+			MASQUE:      &option.LXMASQUEOptions{IdleTimeout: badoption.Duration(2 * time.Minute)},
+			TrustTunnel: &option.LXTrustTunnelOptions{},
+		},
+	}
+	content := captureRunningConfig(options)
+	var document struct {
+		Route map[string]any            `json:"route"`
+		LX    map[string]map[string]any `json:"lx"`
+	}
+	if err := json.Unmarshal([]byte(content), &document); err != nil {
+		t.Fatalf("snapshot is not valid JSON: %v", err)
+	}
+	if document.Route["final"] != "direct-out" {
+		t.Fatalf("the rest of route must survive: %s", content)
+	}
+	want := map[string]any{"idle_suspend": "30s", "idle_suspend_reachable": "5m0s", "idle_teardown": "0s"}
+	for key, value := range want {
+		if document.LX["wg"][key] != value {
+			t.Fatalf("lx.wg.%s = %v, want %v: %s", key, document.LX["wg"][key], value, content)
+		}
+	}
+	if document.LX["masque"]["idle_timeout"] != "2m0s" {
+		t.Fatalf("lx.masque must survive: %s", content)
+	}
+	if _, present := document.LX["trusttunnel"]; present {
+		t.Fatalf("an empty lx.trusttunnel must be dropped from the snapshot: %s", content)
+	}
+	if options.LX.TrustTunnel == nil {
+		t.Fatal("capturing the snapshot must not canonicalize the caller's options")
 	}
 }
 

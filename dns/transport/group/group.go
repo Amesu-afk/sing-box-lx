@@ -22,6 +22,9 @@
 // Observability (SPEC 035): probes are recorded into the per-request query
 // trace (write-once effective, group path, attempts, fanned/survival flags);
 // GroupState() exposes the record snapshot for GetDNSGroups.
+//
+// Servers of type hosts listed under `hosts` (SPEC 143) answer the names they
+// know before target selection and carry no records (hosts.go).
 package group
 
 import (
@@ -82,12 +85,14 @@ type Transport struct {
 	ctx        context.Context
 	logger     log.ContextLogger
 	serverTags []string
+	hostsTags  []string
 	mode       string
 	errorTTL   time.Duration
 	winTTL     time.Duration
 
 	access   sync.Mutex
 	members  []*member
+	hosts    []*hostsMember // set once by Start
 	records  map[string]*memberRecord
 	current  string // sticky target (stable/fastest); "" = not chosen yet
 	election bool   // fastest: an election fan is in flight (single-flight)
@@ -107,6 +112,19 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
 			return nil, E.New("group[", tag, "]: duplicate server: ", serverTag)
 		}
 		seen[serverTag] = true
+	}
+	seenHosts := make(map[string]bool, len(options.Hosts))
+	for _, hostsTag := range options.Hosts {
+		if hostsTag == tag {
+			return nil, E.New("group[", tag, "]: group cannot contain itself")
+		}
+		if seen[hostsTag] {
+			return nil, E.New("group[", tag, "]: server ", hostsTag, " is listed in both servers and hosts")
+		}
+		if seenHosts[hostsTag] {
+			return nil, E.New("group[", tag, "]: duplicate hosts server: ", hostsTag)
+		}
+		seenHosts[hostsTag] = true
 	}
 	mode := options.Mode
 	switch mode {
@@ -129,10 +147,11 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
 		errorTTL = DefaultErrorTTL
 	}
 	return &Transport{
-		TransportAdapter: dns.NewTransportAdapter(C.DNSTypeGroup, tag, options.Servers),
+		TransportAdapter: dns.NewTransportAdapter(C.DNSTypeGroup, tag, append(append([]string(nil), options.Servers...), options.Hosts...)),
 		ctx:              ctx,
 		logger:           logger,
 		serverTags:       options.Servers,
+		hostsTags:        options.Hosts,
 		mode:             mode,
 		errorTTL:         errorTTL,
 		winTTL:           winTTL,
@@ -140,7 +159,7 @@ func NewTransport(ctx context.Context, logger log.ContextLogger, tag string, opt
 	}, nil
 }
 
-func (t *Transport) Start(stage adapter.StartStage) error {
+func (t *Transport) Start(stage adapter.StartStage, _ *adapter.Scope) error {
 	if stage != adapter.StartStateStart {
 		return nil
 	}
@@ -154,14 +173,18 @@ func (t *Transport) Start(stage adapter.StartStage) error {
 			return E.New("group[", t.Tag(), "]: DNS server not found: ", serverTag)
 		}
 		switch rawTransport.Type() {
-		case C.DNSTypeFakeIP, C.DNSTypeHosts:
+		case C.DNSTypeHosts:
+			// NXDOMAIN is a valid answer for the group: a hosts member would
+			// win every race and break every name it does not know.
+			return E.New("group[", t.Tag(), "]: server type hosts is not allowed in servers, put it under \"hosts\": ", serverTag)
+		case C.DNSTypeFakeIP:
 			// Local sources: they cannot fail over the network, so backing
 			// them up is meaningless and their presence is a config mistake.
 			return E.New("group[", t.Tag(), "]: server type ", rawTransport.Type(), " is not allowed in a group: ", serverTag)
 		}
 		t.members = append(t.members, &member{tag: serverTag, transport: rawTransport})
 	}
-	return nil
+	return t.startHosts(transportManager)
 }
 
 func (t *Transport) Close() error {
@@ -414,6 +437,9 @@ func (t *Transport) leastDirtyLocked(now time.Time) *member {
 
 func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	dnstrack.PushGroup(ctx, t.Tag()) // prepend: final order is inside-out
+	if response, hit := t.exchangeHosts(ctx, message); hit {
+		return response, nil
+	}
 	sel, err := t.selectTarget()
 	if err != nil {
 		return nil, err
@@ -448,12 +474,19 @@ func (t *Transport) exchangeSingle(ctx context.Context, message *mDNS.Msg, sel s
 		}
 	}
 	targetCtx, cancel := context.WithTimeout(ctx, t.targetBudget(ctx))
+	targetCtx, stage := beginMemberLx(targetCtx, sel.target) // lx: SPEC 139
 	response, err, rtt := t.timedExchange(targetCtx, sel.target, message)
+	endMemberLx(targetCtx, stage, response, err) // lx: SPEC 139
 	cancel()
 	t.traceAttempt(ctx, sel.target, response, err, rtt)
 	if !isFailure(response, err) {
 		t.noteSuccess(sel.target.tag, rtt, sel.gen)
 		t.recordEffective(ctx, sel.target)
+		return response, err
+	}
+	// A caller that gave up (its connection closed mid-query) says nothing
+	// about the server: no error record, no rescue fan under a dead context.
+	if callerCancelled(ctx) {
 		return response, err
 	}
 	// The target's sub-deadline was honest — its failure is always recorded.
@@ -475,16 +508,28 @@ func (t *Transport) exchangeSurvival(ctx context.Context, message *mDNS.Msg, sel
 	target := sel.target
 	dnstrack.MarkSurvival(ctx)
 	t.logger.WarnContext(ctx, "group[", t.Tag(), "]: no clean servers, survival attempt via ", target.tag)
-	response, err, rtt := t.timedExchange(ctx, target, message)
+	memberCtx, stage := beginMemberLx(ctx, target) // lx: SPEC 139
+	response, err, rtt := t.timedExchange(memberCtx, target, message)
+	endMemberLx(memberCtx, stage, response, err) // lx: SPEC 139
 	t.traceAttempt(ctx, target, response, err, rtt)
 	if !isFailure(response, err) {
 		t.noteSuccess(target.tag, rtt, sel.gen) // erases its errors → back to clean, stickiness holds it
 		t.recordEffective(ctx, target)
 		return response, err
 	}
+	if callerCancelled(ctx) {
+		return response, err
+	}
 	t.noteError(target.tag, sel.gen)
 	t.logProbeFailure(ctx, target.tag, response, err)
 	return response, err
+}
+
+// callerCancelled reports a request abandoned by its caller. An expired
+// request budget is not that: a server that stayed silent for the whole
+// budget did fail, and its error is recorded.
+func callerCancelled(ctx context.Context) bool {
+	return errors.Is(ctx.Err(), context.Canceled)
 }
 
 // targetBudget is half of the remaining request budget (fallback: half of

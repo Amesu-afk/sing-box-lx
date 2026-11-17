@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sagernet/sing-box/schema"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json"
 )
@@ -68,6 +69,21 @@ func (r AWGRange) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(string(normalized))
 }
+
+// DescribeSchema maps AWGRange to its JSON schema: a uint32 number or a
+// "N" / "N-M" string, mirroring UnmarshalJSON. Without it `sing-box schema`
+// aborts on the first AWGRange field it meets (custom JSON types must
+// describe themselves).
+func (r AWGRange) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return builder.Define("AWGRange", func() (*schema.Node, error) {
+		return schema.AnyOf(
+			schema.UnsignedNode(32),
+			&schema.Node{Type: "string", Pattern: awgRangePattern},
+		), nil
+	})
+}
+
+const awgRangePattern = `^\s*\d+\s*(-\s*\d+\s*)?$`
 
 // Spec re-validates the value and returns the canonical IpcSet spec (""
 // when unset). The device layer calls it so options constructed in code
@@ -191,9 +207,9 @@ type AmneziaWGOptions struct {
 	I3   string      `json:"i3,omitempty"`
 	I4   string      `json:"i4,omitempty"`
 	I5   string      `json:"i5,omitempty"`
-	Id   string      `json:"id,omitempty"` // masquerade domain; required for ip=quic/dns/sip, optional for stun
+	Id   string      `json:"id,omitempty"` // masquerade domain; required for ip=quic (SNI), optional for dns/sip (pseudo-host when empty), ignored for stun
 	Ip   string      `json:"ip,omitempty"` // masquerade protocol: quic | dns | stun | sip
-	Ib   string      `json:"ib,omitempty"` // masquerade browser: chrome | firefox | curl (limited effect, see masque_awg.go)
+	Ib   string      `json:"ib,omitempty"` // masquerade browser: chrome | firefox | curl (ClientHello fingerprint + Initial layout); chrome-full is experimental, not for client UIs
 
 	// AmneziaWG 3.x (SPECS/TASKS/080-*)
 	HeaderProtectionKey    string   `json:"header_protection_key,omitempty"`

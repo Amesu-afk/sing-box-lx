@@ -210,7 +210,7 @@ type RemoteHTTPSDNSServerOptions struct {
 
 type FakeIPDNSServerOptions struct {
 	Inet4Range *badoption.Prefix `json:"inet4_range,omitempty" examples:"198.18.0.0/15"`
-	Inet6Range *badoption.Prefix `json:"inet6_range,omitempty" examples:"fc00::/18"`
+	Inet6Range *badoption.Prefix `json:"inet6_range,omitempty" examples:"2001:2::/48"`
 }
 
 type DHCPDNSServerOptions struct {
@@ -226,6 +226,7 @@ type MDNSDNSServerOptions struct {
 // lx:begin dns-group
 type GroupDNSServerOptions struct {
 	Servers  badoption.Listable[string] `json:"servers" reference:"dns_server"`
+	Hosts    badoption.Listable[string] `json:"hosts,omitempty" reference:"dns_server"`
 	Mode     string                     `json:"mode,omitempty"`
 	ErrorTTL badoption.Duration         `json:"error_ttl,omitempty"`
 	WinTTL   badoption.Duration         `json:"win_ttl,omitempty"`

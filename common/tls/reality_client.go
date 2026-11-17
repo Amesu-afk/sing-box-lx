@@ -27,14 +27,13 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/debug"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
-	"github.com/sagernet/sing/common/ntp"
+	M "github.com/sagernet/sing/common/metadata"
 	aTLS "github.com/sagernet/sing/common/tls"
 
 	utls "github.com/metacubex/utls"
@@ -45,7 +44,6 @@ import (
 var _ ConfigCompat = (*RealityClientConfig)(nil)
 
 type RealityClientConfig struct {
-	ctx       context.Context
 	uClient   *UTLSClientConfig
 	publicKey []byte
 	shortID   [8]byte
@@ -93,7 +91,7 @@ func newRealityClient(ctx context.Context, logger logger.ContextLogger, serverAd
 		return nil, E.New("unknown reality key_share: ", options.Reality.KeyShare, " (expected \"hybrid\" or \"classical\")")
 	}
 
-	var config Config = &RealityClientConfig{ctx, uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare}
+	var config Config = &RealityClientConfig{uClient.(*UTLSClientConfig), publicKey, shortID, options.Reality.KeyShare}
 	if options.KernelRx || options.KernelTx {
 		if !C.IsLinux {
 			return nil, E.New("kTLS is only supported on Linux")
@@ -147,6 +145,7 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	err = uConn.HandshakeContext(ctx)
+	realityVerdictLx(ctx, e, verifier.verified, err) // lx: SPEC 139 — reality verdict
 	if err != nil {
 		return nil, err
 	}
@@ -156,10 +155,11 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 	}
 
 	if !verifier.verified {
-		go realityClientFallback(e.ctx, uConn, e.uClient.ServerName(), e.uClient.id)
+		realityClientFallback(ctx, uConn, e.uClient.ServerName(), e.uClient.id)
 		return nil, E.New("reality verification failed")
 	}
 
+	releaseHandshakeState(uConn) // lx: SPEC 122 — drop the ClientHello, key shares and extensions after a verified handshake
 	return &realityClientConnWrapper{uConn}, nil
 }
 
@@ -168,10 +168,18 @@ func (e *RealityClientConfig) ClientHandshake(ctx context.Context, conn net.Conn
 // (SPEC 089), and the session id sealed with the AuthKey. Split from
 // ClientHandshake so tests can inspect what would go on the wire. lx: SPEC 088/089.
 func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *realityVerifier, error) {
-	verifier := &realityVerifier{
-		serverName: e.uClient.ServerName(),
-	}
 	uConfig := e.uClient.config.Clone()
+	var nowTime time.Time
+	if uConfig.Time != nil {
+		nowTime = uConfig.Time()
+	} else {
+		nowTime = time.Now()
+	}
+	verifier := &realityVerifier{
+		serverName:  e.uClient.ServerName(),
+		rootCAs:     uConfig.RootCAs,
+		currentTime: nowTime,
+	}
 	uConfig.InsecureSkipVerify = true
 	uConfig.SessionTicketsDisabled = true
 	uConfig.VerifyPeerCertificate = verifier.VerifyPeerCertificate
@@ -228,35 +236,18 @@ func (e *RealityClientConfig) prepareClientHello(conn net.Conn) (*utls.UConn, *r
 		}
 	}
 
-	if len(uConfig.NextProtos) > 0 {
-		for _, extension := range uConn.Extensions {
-			if alpnExtension, isALPN := extension.(*utls.ALPNExtension); isALPN {
-				alpnExtension.AlpnProtocols = uConfig.NextProtos
-				break
-			}
-		}
-	}
-
 	hello := uConn.HandshakeState.Hello
 	hello.SessionId = make([]byte, 32)
 	copy(hello.Raw[39:], hello.SessionId)
 
-	var nowTime time.Time
-	if uConfig.Time != nil {
-		nowTime = uConfig.Time()
-	} else {
-		nowTime = time.Now()
-	}
-	binary.BigEndian.PutUint64(hello.SessionId, uint64(nowTime.Unix()))
-
 	// lx: SPEC 053 — Xray v26.7.11 (XTLS/Xray-core@af7eb68) включил
-	// minClientVer=26.3.27 по умолчанию. Апстримный `1, 8, 1` ниже порога:
+	// minClientVer=26.3.27 по умолчанию. Апстримный `1, 8, 2` ниже порога:
 	// сервер не отдаёт ошибку, а молча проксирует на камуфляжный dest.
-	// Объявляем ровно минимум — сравнение там `>=`, выше не нужно.
+	// Объявляем минимум — сравнение там `>=`, выше не нужно.
 	hello.SessionId[0] = 26
 	hello.SessionId[1] = 3
 	hello.SessionId[2] = 27
-	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
+	binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(nowTime.Unix()))
 	copy(hello.SessionId[8:], e.shortID[:])
 	if debug.Enabled {
 		fmt.Printf("REALITY hello.sessionId[:16]: %v\n", hello.SessionId[:16])
@@ -324,13 +315,17 @@ func realityClientFallback(ctx context.Context, uConn net.Conn, serverName strin
 			DialTLSContext: func(ctx context.Context, network, addr string, config *tls.Config) (net.Conn, error) {
 				return uConn, nil
 			},
-			TLSClientConfig: &tls.Config{
-				Time:    ntp.TimeFuncFromContext(ctx),
-				RootCAs: adapter.RootPoolFromContext(ctx),
-			},
 		},
 	}
-	request, _ := http.NewRequest("GET", "https://"+serverName, nil)
+	serverAddress := M.ParseSocksaddrHostPort(serverName, 0)
+	host := serverAddress.AddrString()
+	if serverAddress.IsIPv6() {
+		host = "[" + host + "]"
+	}
+	request, err := http.NewRequestWithContext(ctx, "GET", "https://"+host, nil)
+	if err != nil {
+		return
+	}
 	request.Header.Set("User-Agent", fingerprint.Client)
 	request.AddCookie(&http.Cookie{Name: "padding", Value: strings.Repeat("0", mRand.Intn(32)+30)})
 	response, err := client.Do(request)
@@ -343,7 +338,6 @@ func realityClientFallback(ctx context.Context, uConn net.Conn, serverName strin
 
 func (e *RealityClientConfig) Clone() Config {
 	return &RealityClientConfig{
-		e.ctx,
 		e.uClient.Clone().(*UTLSClientConfig),
 		e.publicKey,
 		e.shortID,
@@ -353,9 +347,11 @@ func (e *RealityClientConfig) Clone() Config {
 
 type realityVerifier struct {
 	*utls.UConn
-	serverName string
-	authKey    []byte
-	verified   bool
+	serverName  string
+	rootCAs     *x509.CertPool
+	currentTime time.Time
+	authKey     []byte
+	verified    bool
 }
 
 func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -370,6 +366,8 @@ func (c *realityVerifier) VerifyPeerCertificate(rawCerts [][]byte, verifiedChain
 		}
 	}
 	opts := x509.VerifyOptions{
+		Roots:         c.rootCAs,
+		CurrentTime:   c.currentTime,
 		DNSName:       c.serverName,
 		Intermediates: x509.NewCertPool(),
 	}
@@ -420,5 +418,5 @@ func (c *realityClientConnWrapper) ReaderReplaceable() bool {
 }
 
 func (c *realityClientConnWrapper) WriterReplaceable() bool {
-	return true
+	return false
 }

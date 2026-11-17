@@ -2,6 +2,12 @@
 
 > 🌐 English version: **[lx-config.md](lx-config.md)**.
 
+> 🧭 **Где что искать.** Документация форка — три уровня, по вопросу читателя:
+> [lx-config](lx-config.ru.md) — что есть в форке и как включить;
+> [protocols-transports](protocols-transports.ru.md) — каждое поле, тип, дефолт, текст ошибки;
+> [xray-protocols-explained](xray-protocols-explained.ru.md) и [amneziawg-explained](amneziawg-explained.ru.md) —
+> как устроено, почему, как сделано у нас и чем отличается от ванили.
+
 `sing-box-lx` — это upstream [sing-box](https://github.com/SagerNet/sing-box) плюс небольшой набор **клиентских** фич, каждая за своим build-тегом:
 
 | Фича | Build-тег | Где живёт в конфиге | Входит в |
@@ -9,8 +15,10 @@
 | **XHTTP** транспорт (совместим с Xray) | `with_xhttp` | `transport.type: "xhttp"` на VLESS / VMess / Trojan outbound | desktop + mobile |
 | **AmneziaWG 2.0/3.x** (AWG2, AWG3) | `with_awg` | доп. поля на `wireguard` **endpoint** | desktop + mobile |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic`+`with_gvisor` | `outbounds[].type: "masque"` | desktop + mobile |
-| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `route.lx_idle_suspend` (+ `lx_idle_suspend_reachable`, `lx_idle_teardown`) | **только mobile** (AAR) |
-| **Группа DNS-серверов** (SPEC 033/035) | — (всегда в сборке) | `dns.servers[].type: "group"` | desktop + mobile |
+| **TrustTunnel** outbound и inbound (SPEC 133/134) | `with_trusttunnel` (+ `with_quic` для HTTP/3) | `outbounds[].type` / `inbounds[].type: "trusttunnel"`; поля — [protocols-transports.ru.md §6](protocols-transports.ru.md#6-trusttunnel-outbound-и-inbound), глобальный `lx.trusttunnel.idle_timeout` — [§13](#lxtrusttunnel--trusttunnel-outboundы) | desktop + mobile |
+| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `lx.wg.idle_suspend` (+ `idle_suspend_reachable`, `idle_teardown`) | **только mobile** (AAR) |
+| **Корневой блок `lx`** (SPEC 098) | — (разбирается всегда) | `lx.wg`, `lx.masque`, `lx.trusttunnel`, `lx.mtu_align`, `lx.sniff_guard` — глобальные ручки форка, [§13](#13-корневой-блок-lx-spec-098) | desktop + mobile |
+| **Группа DNS-серверов** (SPEC 033/035/143) | — (всегда в сборке) | `dns.servers[].type: "group"` | desktop + mobile |
 | **VLESS `encryption`** (SPEC 032) | — (всегда в сборке) | `encryption` на `vless`-outbound | desktop + mobile |
 | **Демон `lxd`** (SPEC 055–057, 063–068) | `with_lxd` | не ключ конфига — подкоманда `sing-box lxd` + `<state-dir>/daemon.json`; см. [lxd-daemon.ru.md](lxd-daemon.ru.md) | desktop / сервер (**не** Win7, **не** AAR) |
 | **Outbound `chain`** (SPEC 073) | `with_lx_chain` | `outbounds[].type: "chain"` — многохоповый путь из групп и узлов | desktop + mobile |
@@ -24,17 +32,18 @@
 GC-нагрева / RAM, ~8 МБ каждый там, где `BatchSize=128` — Android/Linux; замерено на
 устройстве: 8 эндпоинтов усыплены → освобождено 134 МБ). На десктопе `BatchSize` мал,
 экономить почти нечего; чтобы не было молчаливого расхождения, desktop/CLI-бинарь,
-которому дали конфиг с `route.lx_idle_suspend`, **падает при старте** с ошибкой
-`route.lx_idle_suspend is set but this build lacks idle-suspend support; rebuild with
+которому дали конфиг с `lx.wg.idle_suspend` (или любым другим ключом `lx.wg`), **падает при
+старте** с ошибкой `lx.wg.* is set but this build lacks idle-suspend support; rebuild with
 -tags with_lx_idle_suspend (mobile-only feature)`. См. [фичу ENERGY](../SPECS/FEATURES/008-ENERGY/FEATURE.md).
 
-Смежные ключи (ревизия 2026-07-15): `route.lx_idle_suspend_reachable` — опциональное
+Смежные ключи (ревизия 2026-07-15; с SPEC 098 в блоке `lx` — старые имена `route.lx_idle_*`
+удалены, конфиг с ними не загружается как с неизвестными ключами): `lx.wg.idle_suspend_reachable` — опциональное
 второе, более длинное окно простоя, после которого гасятся и *достижимые* эндпоинты
-(члены пула, выбранный узел, final); `route.lx_idle_teardown` — третий уровень:
+(члены пула, выбранный узел, final); `lx.wg.idle_teardown` — третий уровень:
 сколько эндпоинт может *спать* до полного сноса (Close, освобождается и gVisor
 netstack; пробуждение = rebuild ~0.5–1 с; дефолт = reachable-окну);
-`urltest.passive_check` — пропуск health-проб,
-пока свежий успешный TCP-дайл доказывает живость узла. Полная энергомодель,
+`urltest` `mode: failover` — держаться за рабочий узел и пробовать только его
+(одно пробуждение в `interval` вместо N). Полная энергомодель,
 таймлайны и рекомендованный мобильный конфиг — в **[lx-energy.ru.md](lx-energy.ru.md)**.
 
 > ⚠️ Все ключи/UUID ниже — **заглушки**. Никогда не коммитьте реальные приватные ключи / pre-shared-ключи в репозиторий.
@@ -47,24 +56,28 @@ netstack; пробуждение = rebuild ~0.5–1 с; дефолт = reachable
 - [2. AmneziaWG 2.0/3.x (AWG2, AWG3)](#2-amneziawg-203x-awg2-awg3)
   - [Пример — AmneziaWG 3.1 endpoint (экспорт Amnezia `amnezia-awg2`)](#пример--amneziawg-31-endpoint-экспорт-amnezia-amnezia-awg2)
   - [Пример — AmneziaWG 2.0 endpoint](#пример--amneziawg-20-endpoint)
-- [3. Балансировка нагрузки round_robin (SPEC 019)](#3-балансировка-нагрузки-round_robin-spec-019)
+- [3. Режимы выбора узла в urltest (SPEC 019 / 116)](#3-режимы-выбора-узла-в-urltest-spec-019--116)
   - [Поля (на `urltest` outbound)](#поля-на-urltest-outbound)
   - [Привязка по слот-хешу](#привязка-по-слот-хешу)
   - [Пример — urltest с round_robin](#пример--urltest-с-round_robin)
 - [4. MASQUE outbound — Cloudflare WARP (SPEC 021)](#4-masque-outbound--cloudflare-warp-spec-021)
   - [Пример — WARP (дефолты: `vhttp: auto`)](#пример--warp-дефолты-vhttp-auto)
-- [5. Группа DNS-серверов (SPEC 033/035)](#5-группа-dns-серверов-spec-033035)
+- [5. Группа DNS-серверов (SPEC 033/035/143)](#5-группа-dns-серверов-spec-033035143)
   - [Поля (запись в `dns.servers[]`)](#поля-запись-в-dnsservers)
+  - [Локальные имена первыми: `hosts`](#локальные-имена-первыми-hosts)
   - [Пример — отказоустойчивый публичный DNS по умолчанию](#пример--отказоустойчивый-публичный-dns-по-умолчанию)
+  - [Пример — одно локальное имя для WireGuard-сервера с IPv4 и IPv6](#пример--одно-локальное-имя-для-wireguard-сервера-с-ipv4-и-ipv6)
 - [6. VLESS `encryption` — пост-квантовый слой (SPEC 032)](#6-vless-encryption--пост-квантовый-слой-spec-032)
   - [Поле (на `vless`-outbound)](#поле-на-vless-outbound)
   - [Пример](#пример)
 - [7. REALITY `key_share` — гибридный или классический ClientHello (SPEC 089)](#7-reality-key_share--гибридный-или-классический-clienthello-spec-089)
 - [8. Наблюдаемость (расширения CommandClient)](#8-наблюдаемость-расширения-commandclient)
-- [9. Автоматическая фрагментация ClientHello под `detour` (SPEC 060)](#9-автоматическая-фрагментация-clienthello-под-detour-spec-060)
+- [9. ClientHello под `detour` — без дефолта (SPEC 060)](#9-clienthello-под-detour--без-дефолта-spec-060)
 - [10. Outbound `chain` — виртуальная цепочка хопов из групп и узлов (SPEC 073)](#10-outbound-chain--виртуальная-цепочка-хопов-из-групп-и-узлов-spec-073)
 - [11. Снифферы протоколов для трафика из LAN (SPEC 078 / 080)](#11-снифферы-протоколов-для-трафика-из-lan-spec-078--080)
 - [12. Проверка и сборка](#12-проверка-и-сборка)
+- [13. Корневой блок `lx` (SPEC 098)](#13-корневой-блок-lx-spec-098)
+- [14. Tailscale: выключить Taildrop (SPEC 149)](#14-tailscale-выключить-taildrop-spec-149)
 
 ---
 
@@ -72,8 +85,8 @@ netstack; пробуждение = rebuild ~0.5–1 с; дефолт = reachable
 
 Один конфиг, несущий все поля **outbound-фич** — XHTTP-транспорт, AmneziaWG 2.0 endpoint,
 masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-балансировщик `urltest`
-(у MASQUE, DNS-группы и ключей `route.lx_idle_*` — свои примеры в [§4](#4-masque-outbound--cloudflare-warp-spec-021),
-[§5](#5-группа-dns-серверов-spec-033035) и [lx-energy.ru.md](lx-energy.ru.md)).
+и корневой блок `lx` со всеми ключами (у MASQUE и DNS-группы — свои примеры в [§4](#4-masque-outbound--cloudflare-warp-spec-021)
+и [§5](#5-группа-dns-серверов-spec-033035143); блок `lx` описан в [§13](#13-корневой-блок-lx-spec-098), его энергоключи — в [lx-energy.ru.md](lx-energy.ru.md)).
 Это **справочник «всё сразу»**, а не рекомендуемый конфиг: многие поля взаимоисключающи
 (например, сахар `id`/`ip`/`ib` против написанного вручную `i1`) либо серверные и игнорируются
 клиентом — такие помечены прямо в комментариях. Для рабочей настройки скопируйте только нужный
@@ -81,6 +94,54 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
 
 ```jsonc
 {
+  // ─────────────────────────────────────────────────────────────────────────
+  // Корневой блок `lx` (§13) — глобальные ручки форка по подсистемам.
+  // lx.wg действует только с build-тегом with_lx_idle_suspend (мобильный AAR);
+  // десктоп-бинарь отвергает его на старте.
+  // ─────────────────────────────────────────────────────────────────────────
+  "lx": {
+    "wg": {
+      "idle_suspend": "30s",                    // дефолт: выкл. Endpoint вне дерева маршрутизации → Down после простоя
+      "idle_suspend_reachable": "5m",           // дефолт: выкл. То же для endpoint'ов в дереве; >= idle_suspend, требует его
+      "idle_teardown": "10m",                   // дефолт: = idle_suspend_reachable. Сон до полной разборки; "0" = никогда
+      "lazy_build": true,                       // дефолт: false. Сборка устройства при первом дайле (SPEC 097)
+      "build_max": 4,                           // дефолт: 0 (без потолка). Не больше N собранных устройств (SPEC 097)
+      "build_overflow": "wait"                  // дефолт: wait. wait | build (SPEC 097)
+    },
+    "masque": {
+      "idle_timeout": "5m"                      // дефолт: выкл. Глобальное окно простоя masque-узлов без своего ключа
+    },
+    "trusttunnel": {
+      "idle_timeout": "5m"                      // дефолт: 5m. Глобальное окно простоя trusttunnel-узлов без своего ключа; выключается только "0" в узле (SPEC 133)
+    },
+    "mtu_align": "clamp",                       // дефолт: clamp. off | fill | clamp, либо объект {"mode", "except": [теги]} (§13)
+    "sniff_guard": {                            // дефолт: нет блока = поведение апстрима. Защита рукопожатия от перенаправления по SNI на релее или роутере (§13, SPEC 060)
+      "nodes": {
+        "sni_mismatch": true,                   // дефолт: true — только узлы, у которых SNI не совпадает с server. false — фильтра нет
+        "outbound_type": ["vless", "masque"]    // дефолт: фильтра нет. Список типов или false; true, [] и неизвестный тип — ошибка загрузки
+      },
+      "detour_type": {                          // дефолт: {"direct": "clean", "ssh": "clean", "socks": "clean", "*": "suspect"}
+        "direct": "clean",                      //   тип носителя → never | clean | suspect; "*" — остальные типы; группы ключами нельзя
+        "*": "suspect"
+      },
+      "override": false,                        // дефолт: false. true — блок сильнее узловых fragment / record_fragment
+      "tls": {
+        "method": "record_fragment",            // дефолт: off. record_fragment | fragment | delay | off
+        "delay": "300ms",                       // дефолт: 300ms. Пауза метода delay; > 0
+        "persist": true,                        // дефолт: false. Метки релеев в experimental.cache_file
+        "detour_type": { "ssh": "suspect" }     // дефолт: общая карта. Перекрытие для TLS
+      },
+      "quic": {
+        "method": "decoy_first_byte",           // дефолт: off. decoy_first_byte | delay | off
+        "delay": "300ms",                       // дефолт: 300ms
+        "persist": true,                        // дефолт: false
+        "detour_type": { "socks": "never" }     // дефолт: общая карта. Перекрытие для QUIC
+      }
+    }
+    // "quic_sniff_decoy" удалён: любое значение — ошибка загрузки, замена — sniff_guard.quic (§13)
+    // "awg_masquerade" удалён в lx.33: любое значение — ошибка загрузки, пачка AWG идёт на любом пути (§13)
+  },
+
   "outbounds": [
     // ─────────────────────────────────────────────────────────────────────────
     // XHTTP-транспорт (§1) — крепится к VLESS / VMess / Trojan outbound.
@@ -236,9 +297,7 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
       "outbounds": ["xhttp-out", "proxy-b", "proxy-c", "proxy-d", "proxy-e"],
       "url": "https://www.gstatic.com/generate_204",
       "interval": "15m",
-      "passive_check": false,                   // по умолчанию: false. Свежий успешный TCP-дайл
-                                                //   считается доказательством живости (< interval) — пробы молчат
-      "mode": "round_robin",                    // по умолчанию: least_test. least_test | round_robin
+      "mode": "round_robin",                    // по умолчанию: least_test. least_test | round_robin | failover
       "balancer": {                             // допустим только с mode: round_robin
         "pool": 3,                              // по умолчанию: 3. 0/отсутствие → 3; эффективный = min(pool, #outbounds)
         "pool_tolerance": 0,                    // по умолчанию: 0 (мс). 0 = держать живой пул; >0 = топ-N по задержке с гистерезисом
@@ -252,7 +311,7 @@ masquerade-сахар `id`/`ip`/`ib`, VLESS `encryption` и `round_robin`-бал
 ```
 
 > **Счёт полей:** 26 XHTTP + 30 AmneziaWG (вкл. `id`/`ip`/`ib` и 9 ключей AWG 3.x) + 1 VLESS (`encryption`) +
-> 6 `urltest` (`mode`, `passive_check` + `balancer{pool,pool_tolerance,sticky_hash}`). Взаимоисключающие / игнорируемые поля помечены
+> 5 `urltest` (`mode` + `balancer{pool,pool_tolerance,sticky_hash}`) + 21 `lx` (6 `lx.wg` + `lx.masque.idle_timeout` + `lx.trusttunnel.idle_timeout` + `lx.mtu_align` + 12 `lx.sniff_guard{nodes{sni_mismatch,outbound_type},detour_type,override,tls{method,delay,persist,detour_type},quic{method,delay,persist,detour_type}}`). Взаимоисключающие / игнорируемые поля помечены
 > в комментариях выше; разделы ниже дают семантику каждого поля, подводные камни и статус
 > живой проверки.
 
@@ -272,8 +331,8 @@ v1-клиентом** — каждое v2-поле (размещение session
 
 > **📖 Полный справочник полей — все 26 ключей XHTTP, их дефолты, семантика пула `xmux`,
 > формы записи диапазонов и таблица диагностики — в
-> [lx-protocols-transports.ru.md §1](lx-protocols-transports.ru.md#1-xhttp-транспорт)**
-> ([EN](lx-protocols-transports.md#1-xhttp-transport)).
+> [protocols-transports.ru.md §1](protocols-transports.ru.md#1-xhttp-транспорт)**
+> ([EN](protocols-transports.md#1-xhttp-transport)).
 
 ### Пример — VLESS + XHTTP + Reality
 
@@ -306,9 +365,9 @@ v1-клиентом** — каждое v2-поле (размещение session
 
 AWG — это WireGuard + обфускация против DPI. Настраивается как обычный sing-box **`wireguard` endpoint** с дополнительными «поднятыми» полями. С `with_awg` они передаются на устройство; конфиг без единого AWG-поля — обычный WireGuard endpoint (поведение байт-в-байт как в upstream).
 
-AWG2 = поля AWG1 **плюс** CPS-пакеты `I1`–`I5`. И клиент, и сервер должны работать на AmneziaWG с **совпадающими** параметрами (I-пакеты — это конфигурация, не согласуются). Более дружелюбный способ задать первую приманку — WireSock-style сахар `id`/`ip`/`ib`, который генерирует `i1` за вас — см. [полный справочник](lx-protocols-transports.ru.md#25-сахар-маскировки-id--ip--ib).
+AWG2 = поля AWG1 **плюс** CPS-пакеты `I1`–`I5`. И клиент, и сервер должны работать на AmneziaWG с **совпадающими** параметрами (I-пакеты — это конфигурация, не согласуются). Более дружелюбный способ задать первую приманку — WireSock-style сахар `id`/`ip`/`ib`, который генерирует `i1` за вас — см. [полный справочник](protocols-transports.ru.md#25-сахар-маскировки-id--ip--ib).
 
-AWG3 (amneziawg-go v3.0/v3.1, контейнер Amnezia `amnezia-awg2` с `protocol_version` 3.x) добавляет защиту заголовка (`header_protection_key` — серверный, обязан совпасть), паддинг содержимого, случайные хвосты, отключённые cookie и диапазонные тайминги, плюс диапазонный `persistent_keepalive_interval`. Все поля на корне endpoint, как и AWG2 — [справочник §2.10](lx-protocols-transports.ru.md#210-awg-3x-защита-заголовка-паддинг-хвосты-тайминги).
+AWG3 (amneziawg-go v3.0/v3.1, контейнер Amnezia `amnezia-awg2` с `protocol_version` 3.x) добавляет защиту заголовка (`header_protection_key` — серверный, обязан совпасть), паддинг содержимого, случайные хвосты, отключённые cookie и диапазонные тайминги, плюс диапазонный `persistent_keepalive_interval`. Все поля на корне endpoint, как и AWG2 — [справочник §2.10](protocols-transports.ru.md#210-awg-3x-защита-заголовка-паддинг-хвосты-тайминги).
 
 AWG-поля сидят в **корне** endpoint (ни одно не на peer), зеркаля секцию `[Interface]`
 из `awg-quick` `.conf`: junk (`jc`/`jmin`/`jmax`), паддинг handshake (`s1`–`s4`),
@@ -321,8 +380,8 @@ WireGuard, потому что `s4` паддит каждый data-пакет �
 > формат CPS-тегов, сахар маскировки `id`/`ip`/`ib` (четыре профиля, какой выбрать, что
 > попадает на провод), математика бюджета MTU, маппинг `awg.conf` 1:1 и дословные ошибки
 > валидации — в
-> [lx-protocols-transports.ru.md §2](lx-protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)**
-> ([EN](lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3)).
+> [protocols-transports.ru.md §2](protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)**
+> ([EN](protocols-transports.md#2-amneziawg-203x-awg2-awg3)).
 
 ### Пример — AmneziaWG 3.1 endpoint (экспорт Amnezia `amnezia-awg2`)
 
@@ -388,31 +447,49 @@ WireGuard, потому что `s4` паддит каждый data-пакет �
 
 ---
 
-## 3. Балансировка нагрузки round_robin (SPEC 019)
+## 3. Режимы выбора узла в urltest (SPEC 019 / 116)
 
 Upstream `urltest` всегда выбирает единственную ноду с наименьшей задержкой. sing-box-lx добавляет
-**режим** `round_robin`, который ротирует трафик по фиксированному **пулу** нод — спроектирован
-масштабироваться на большие списки (health-check проходит только пул, а не каждую ноду). Выбор
-происходит один раз на соединение; UDP/QUIC-сессия остаётся на своей ноде. С опущенным `mode` (или
-`least_test`) outbound ведёт себя ровно как upstream, и `balancer` задавать нельзя.
+к нему два **режима**:
 
-Метод CommandClient `GetPool` (см. [§8](#8-наблюдаемость-расширения-commandclient)) за тегом
-`with_lx_command`; сами поля конфига `mode`/`balancer` доступны всегда.
+| `mode` | Выбор | Переключение | Что пробуется каждый `interval` |
+|---|---|---|---|
+| `least_test` (по умолчанию) | самый быстрый | как только кто-то быстрее на `tolerance` | все узлы |
+| `round_robin` | пул живых | ротация по пулу | члены пула (лениво) |
+| `failover` | самый быстрый на момент выбора | **только при отказе или деградации текущего** (больше 2× медленнее остальных, с подтверждением); следующий — снова самый быстрый | **только текущий узел** |
 
-### Поля (на `urltest` outbound)
+Общие upstream-поля (`url`, `interval`, `idle_timeout`, `interrupt_exist_connections`) не меняются; поля
+`mode`/`balancer` доступны без build-тега, метод CommandClient `GetPool` (см.
+[§8](#8-наблюдаемость-расширения-commandclient)) — за тегом `with_lx_command`.
+
+### 3.1 Общие поля
 
 | Ключ | Тип | По умолчанию | Значение |
 |------|-----|--------------|----------|
-| `mode` | string | `least_test` | `least_test` (поведение upstream) \| `round_robin` (ротация по пулу). `least_connection` отклоняется (round_robin статистически равномерен) |
-| `passive_check` | bool | `false` | свежий успешный TCP-дайл считается доказательством живости, пока свеж (< `interval`): `least_test` пропускает целые циклы перетеста, пока выбранный узел пассивно подтверждён; `round_robin` (только при `pool_tolerance: 0`) считает подтверждённые слоты живыми без проб. Цена: более лежалые числа задержек в UI. См. [lx-energy.ru.md](lx-energy.ru.md) |
-| `balancer` | object | — | параметры round_robin; **допустим только с `mode: round_robin`** (иначе ошибка). Upstream-поле `tolerance` в round_robin игнорируется — используйте `pool_tolerance` (предупреждение при старте подсказывает это, пока `pool_tolerance` не задан) |
+| `mode` | string | `least_test` | `least_test` (поведение upstream) \| `round_robin` (ротация по пулу) \| `failover` (держаться за рабочий узел до его отказа, SPEC 116). `least_connection` отклоняется (round_robin статистически равномерен) |
+| `balancer` | object | — | параметры round_robin; **допустим только с `mode: round_robin`** (иначе ошибка старта). См. [§3.3](#33-round_robin--пул-с-закреплением) |
+
+### 3.2 least_test — самый быстрый узел
+
+Поведение upstream: каждый `interval` пробуются все узлы, группа переключается, как только другой
+узел быстрее текущего больше чем на `tolerance` мс (по умолчанию `50`). С опущенным `mode` outbound
+ведёт себя так же. Штрафной failover SPEC 054 на ошибках дайла класса «путь мёртв» действует и здесь
+([SPEC 054](../SPECS/TASKS/054-URLTEST_PENALTY_FAILOVER/SPEC.md)).
+
+### 3.3 round_robin — пул с закреплением
+
+`round_robin` ротирует трафик по фиксированному **пулу** нод — спроектирован масштабироваться на
+большие списки (health-check проходит только пул, а не каждую ноду). Выбор происходит один раз на
+соединение; UDP/QUIC-сессия остаётся на своей ноде. Upstream-поле `tolerance` в round_robin
+игнорируется — используйте `pool_tolerance` (предупреждение при старте подсказывает это, пока
+`pool_tolerance` не задан).
 
 #### Поля `balancer`
 
 | Ключ | Тип | По умолчанию | Значение |
 |------|-----|--------------|----------|
 | `pool` | int | `3` | размер пула ротации. `0`/опущено → `3`; отрицательное — ошибка. Эффективный размер — `min(pool, число outbounds)`. URL-тестируется только пул каждый `interval`, поэтому список из сотен нод **не** означает сотни тестов |
-| `pool_tolerance` | int (мс) | `0` | `0` = держать пул полным из **живых** нод (задержка не ранжируется), тестируя не больше нужного — дешёвый режим для больших списков. `> 0` = тестировать **все** ноды и держать самые быстрые `pool`; член заменяется только когда нода вне пула обгоняет его больше чем на `pool_tolerance` мс (гистерезис). Мёртвая нода пула держит свой слот, пока не найдётся живая замена (пул никогда не пустеет); ошибка dial никогда не меняет пул — только периодический health-check |
+| `pool_tolerance` | int (мс) | `0` | `0` = держать пул полным из **живых** нод (задержка не ранжируется), тестируя не больше нужного — дешёвый режим для больших списков. `> 0` = тестировать **все** ноды и держать самые быстрые `pool`; член заменяется только когда нода вне пула обгоняет его больше чем на `pool_tolerance` мс (гистерезис). Мёртвая нода пула держит свой слот, пока не найдётся живая замена (пул никогда не пустеет), но новые соединения её обходят, пока в пуле есть живая (SPEC 138: sticky-ключи мёртвых слотов поровну расходятся по живым слотам, простая ротация идёт по живым слотам); ошибка dial никогда не меняет пул — только периодический health-check. Живость — общая история URL-тестов узла: ручной тест задержки с коротким таймаутом, который не успел (Clash API `/proxies/{name}/delay`, `URLTestOutbound`), или неудачный dial группы `least_test` с тем же узлом тоже выводит его из ротации до ближайшего health-check пула (не дольше `interval` плюс время пробы) |
 | `sticky_hash` | string[] | `["process","domain"]` | компоненты ключа липкости потока (см. ниже). Опущено/`[]` → дефолт. **Чтобы отключить** липкость, используйте sentinel **`["none"]`** — никогда не пустой `[]`. Компоненты: `process` \| `domain` \| `source_ip` \| `dest_ip` \| `dest_port` |
 
 > **Подвох с `[]` (badjson).** Не пишите `"sticky_hash": []`, чтобы отключить липкость: декодер
@@ -421,11 +498,11 @@ Upstream `urltest` всегда выбирает единственную нод
 > **включена**). Используйте явный sentinel **`["none"]`**; это единственный допустимый элемент,
 > когда он присутствует (смешивание `none` с реальным компонентом — ошибка).
 
-### Привязка по слот-хешу
+#### Привязка по слот-хешу
 
 `sticky_hash` привязывает поток к фиксированному **индексу слота** — `slot[hash(key) % pool]`
 (FNV-64a по конкатенированным компонентам) — а не к позиции ноды. Слоты никогда не двигаются, и
-нода-замена занимает ровно тот слот, что вытеснила, поэтому нода, оставшаяся в своём слоте, держит
+нода-замена занимает тот же слот, что вытеснила, поэтому нода, оставшаяся в своём слоте, держит
 все свои ключи, когда другие слоты меняются: ни лишних реконнектов, ни per-key состояния. Дефолт
 `["process","domain"]` даёт привязку по процессу и по домену назначения; `domain` читает исходный
 снифнутый домен (он переживает резолв роутера домен→IP, поэтому заполнен для нормального
@@ -433,7 +510,7 @@ Upstream `urltest` всегда выбирает единственную нод
 `domain` в ключе — ключ только из `source_ip`/`dest_ip`/`dest_port` может схлопнуться в `""` для
 нерезолвленного назначения, приклеив все потоки одного источника к единственному слоту.
 
-### Пример — urltest с round_robin
+#### Пример — urltest с round_robin
 
 ```jsonc
 {
@@ -459,6 +536,65 @@ Upstream `urltest` всегда выбирает единственную нод
 **📖 [Полный справочник →](../docs/configuration/outbound/urltest.md)** — каждое поле, семантика
 липкости по компонентам, правила наполнения/поддержки пула и советы по тюнингу.
 
+### 3.4 failover — держаться до отказа
+
+**Выбор.** Группа берёт самый быстрый узел на момент выбора, без `tolerance`; порядок в списке
+`outbounds` роли не играет.
+
+**Удержание.** Пока узел работает, группа остаётся на нём, даже если другой стал быстрее. Каждый
+`interval` пробуется **только удерживаемый узел** — одна проба вместо N, остальные узлы спят.
+
+**Деградация (SPEC 126).** Если удерживаемый узел ответил больше чем вдвое медленнее самого
+быстрого из остальных узлов той же сети (по их последней задержке), он сразу пробуется ещё раз.
+Снова больше 2× — полный прогон, и группа переезжает на самый быстрый узел, только если тот
+больше чем в 1,5 раза быстрее; иначе остаётся (просела сеть, а не узел). Ключа конфига нет.
+
+**Отказ.** Два вида:
+
+- проба удерживаемого узла не ответила → полный прогон по всем узлам → самый быстрый из живых;
+- дайл через него упал с ошибкой «путь мёртв» → штраф и fallback-дайл SPEC 054 → выбор переезжает
+  без `Interrupt`.
+
+После переезда новый узел становится удерживаемым. Деградировавший узел (выше) уходит так же.
+
+**Ручной тест.** Тест группы из UI, CLI (`sing-box api group urltest <tag>`) или Clash API всегда
+`force`: пробует все узлы и перевыбирает самый быстрый. Это единственный способ вернуться на
+лучший узел, пока удерживаемый жив.
+
+**Что не действует.** `tolerance` — игнорируется, при старте выводится предупреждение; `balancer` —
+ошибка старта.
+
+Задержки невыбранных узлов в UI — на момент последнего полного прогона.
+
+#### Пример — urltest с failover
+
+```jsonc
+{
+  "type": "urltest",
+  "tag": "auto",
+  "outbounds": ["proxy-a", "proxy-b", "proxy-c", "proxy-d", "proxy-e"],
+  "url": "https://www.gstatic.com/generate_204",
+  "interval": "15m",
+  "mode": "failover"
+  // tolerance не задаётся: переключений «по скорости» нет (ненулевое значение — предупреждение)
+  // balancer не задаётся: с failover это ошибка старта
+}
+```
+
+Когда выбирать: мобильные профили и случаи, где стабильность узла важнее всегда актуального самого
+быстрого (см. [lx-energy.ru.md §6](lx-energy.ru.md#6-urltest-пробы-и-как-они-научены-не-мешать)).
+
+### 3.5 Сравнение и выбор режима
+
+| Что важнее | Режим |
+|---|---|
+| минимум переключений и одна проба в `interval` | `failover` |
+| распределение нагрузки по нескольким узлам | `round_robin` |
+| всегда самый быстрый узел любой ценой проб | `least_test` |
+
+По энергии: `least_test` будит все узлы каждый `interval`, `round_robin` — только пул (при `pool_tolerance: 0`), `failover` —
+один узел; подробнее в [lx-energy.ru.md §6](lx-energy.ru.md#6-urltest-пробы-и-как-они-научены-не-мешать).
+
 ---
 
 ## 4. MASQUE outbound — Cloudflare WARP (SPEC 021)
@@ -473,25 +609,28 @@ WARP enroll) делает клиент, не ядро.
 
 > ⚠️ **Версия HTTP задаётся полем `vhttp`, а не `network`** (SPEC 062). В старых конфигах
 > `h3`/`h2` жили в `network` — обратно тому, что `network` значит на всех остальных outbound.
-> Старая форма ещё принимается и печатает deprecation; таблица миграции ниже.
+> Ключ снят в `v1.14.3-lx.18`: masque-outbound с `network` больше не разбирается
+> (`unknown field "network"`) — переименуй его в `vhttp`. Плоские TLS-поля пока принимаются
+> с deprecation; таблица миграции ниже.
 
 Обязательные поля — `server`/`server_port`, пара ключей (`private_key`/`public_key`, для
 дефолтного профиля `cloudflare`) и хотя бы один из `ip`/`ipv6` (твой локальный адрес
 *внутри* туннеля, не выходной IP). У всего остального есть дефолт: `profile: cloudflare`,
-`vhttp: auto`, `tls.server_name: www.cloudflare.com`, `mtu: 1280`, `idle_timeout` выкл,
+`vhttp: auto`, `tls.server_name: www.cloudflare.com`, `mtu: 1280`, `idle_timeout` выкл (или глобальный
+`lx.masque.idle_timeout`, [§13](#13-корневой-блок-lx-spec-098); ключ узла сильнее, `"0"` тоже),
 `keep_alive_period: 30s`, `network_list: tcp+udp`. TLS — в стандартном блоке `tls`
 outbound'а.
 
 > **SNI по умолчанию — `www.cloudflare.com`, а не имя эндпоинта** — назвать MASQUE-эндпоинт
-> в ClientHello это ровно то, по чему его режет DPI. Эндпоинт аутентифицируется пиннингом
+> в ClientHello это то, по чему его режет DPI. Эндпоинт аутентифицируется пиннингом
 > `public_key`, поэтому SNI волен отличаться.
 
 > **📖 Полный справочник полей — каждое поле с типом и дефолтом, матрица профилей
 > (`cloudflare` vs `standard`), формат ключевого материала, гайд `vhttp` h3-vs-h2,
 > поведение idle-suspend/keepalive, валидация при старте, таблица миграции с до-SPEC-062
 > и частые грабли — в
-> [lx-protocols-transports.ru.md §3](lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)**
-> ([EN](lx-protocols-transports.md#3-masque-outbound-connect-ip--warp)).
+> [protocols-transports.ru.md §3](protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)**
+> ([EN](protocols-transports.md#3-masque-outbound-connect-ip--warp)).
 
 ### Пример — WARP (дефолты: `vhttp: auto`)
 
@@ -514,7 +653,10 @@ outbound'а.
 ```
 
 `"vhttp": "auto"` — **дефолт** — сначала пробует h3 и падает на h2, если QUIC-хендшейк не
-уложился в 3 с; победивший режим запоминается до конца работы процесса. Отказ, ради которого
+уложился в 3 с. Победа h3 запоминается; победа h2 — на окно по лестнице (1 с → 10 с → 30 с → 5 мин → 10 мин, ступень за каждую
+следующую победу h2; победа h3 возвращает на первую), после которого h3 пробуется снова
+(SPEC 121); если запомненный режим перестал подниматься, память сбрасывается и в той же
+попытке пробуется другой. Отказ, ради которого
 он существует: эндпоинт (или TCP-only-хоп перед ним — HTTP CONNECT в `detour`, звено
 VLESS/Trojan в цепочке) **молча игнорирует QUIC** — ошибки нет, есть зависание; поймано в поле
 на проксированном хопе, где Cloudflare отвечал по TCP:443 и не отвечал по QUIC (SPEC 074). На
@@ -532,12 +674,23 @@ VLESS/Trojan в цепочке) **молча игнорирует QUIC** — о�
 
 Для `h2` (CONNECT-IP over TCP:443) меняется одно поле: `"vhttp": "h2"`. Путь `h2` гонит свой
 TLS через общий слой `common/tls`, поэтому получает фрагментацию ClientHello наравне с любым
-другим TLS-outbound — включая автоматическую под `detour`
-([§9](#9-автоматическая-фрагментация-clienthello-под-detour-spec-060)). `h3` этим не затронут:
-QUIC не несёт TLS поверх TCP вовсе.
+другим TLS-outbound: узловые `fragment` / `record_fragment` и секцию `tls` блока
+[`lx.sniff_guard`](#lxsniff_guard--защита-от-перенаправления-по-sni). Нога `h3` защищается
+секцией `quic` того же блока; в `auto` у ног отдельные метки пути. Без блока ClientHello через
+`detour` не режется ([§9](#9-clienthello-под-detour--без-дефолта-spec-060)).
 
 > Нужен блок `dns` верхнего уровня — userspace-стек работает на L3 и сам домены не резолвит;
 > outbound резолвит их через DNS-роутер перед dial.
+
+> **Размер пакета и WARP (SPEC 120).** Внешний QUIC к серверу стартует с `InitialPacketSize` =
+> `mtu + 51` (кламп 1200…1452; при `mtu` 1280 — 1331), чтобы внутренний пакет размером `mtu`
+> помещался в датаграмму с первого пакета, а не после первой пробы PMTUD. WARP пропускает
+> внутренние IPv4-фрагменты и **теряет IPv6-фрагменты**: узел над masque, чей пакет не влезает в
+> `mtu` (QUIC-прокси с payload 1280 = 1328 байт по IPv6), по IPv6 молчит, по IPv4 работает. Узел
+> над masque — через `detour`, группу или как звено `chain` — получает размер пакета под `mtu`
+> автоматически ([§13, `lx.mtu_align`](#lxmtu_align--выравнивание-mtu-и-размера-пакета-по-пути));
+> вручную — `initial_packet_size: 1232` у QUIC-узла или `mtu: 1340` у masque (второе требует
+> внешнего пути ≈ 1440 байт до WARP).
 
 > **h3 vs h2 — что выбрать.** `h3` (QUIC) — по умолчанию и быстрее. Но на сетях, где режется
 > входящий UDP:443, QUIC-handshake виснет и `h3` не поднимается — переключите такой узел на
@@ -549,13 +702,13 @@ QUIC не несёт TLS поверх TCP вовсе.
 > **Статус.** Device-verified end-to-end на реальных Wi-Fi и LTE — `warp=on`, реальный трафик на
 > обоих `h3` и `h2`, idle-suspend + самовосстановление подтверждены на устройстве.
 
-**📖 [Полный справочник →](lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)**
-([EN](lx-protocols-transports.md#3-masque-outbound-connect-ip--warp)) — полная таблица
+**📖 [Полный справочник →](protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)**
+([EN](protocols-transports.md#3-masque-outbound-connect-ip--warp)) — полная таблица
 параметров, матрица профилей, формат ключевого материала, валидация при старте и частые грабли.
 
 ---
 
-## 5. Группа DNS-серверов (SPEC 033/035)
+## 5. Группа DNS-серверов (SPEC 033/035/143)
 
 Несколько DNS-серверов под одним тегом со стратегией выбора. Решает проблему
 «один мёртвый DNS-сервер роняет резолв целиком»: upstream'овский `dns.final` —
@@ -575,6 +728,9 @@ QUIC не несёт TLS поверх TCP вовсе.
 {
   "type": "group",                  // селектор — строго "group"
   "tag": "public",
+  "hosts": ["local"],               // необязательное: только теги серверов hosts.
+                                    //   Опрашиваются первыми, в этом порядке;
+                                    //   серверами группы не считаются (без здоровья и веера)
   "servers": ["google", "cloudflare", "quad9"], // ОБЯЗАТЕЛЬНОЕ, ≥1 тегов.
                                     //   Порядок НЕ значим ни в одном режиме
   "mode": "stable",                 // stable (дефолт) | fastest | parallel
@@ -588,7 +744,7 @@ QUIC не несёт TLS поверх TCP вовсе.
 ответ — **валидные ответы** (и соревновательные победы, если пришли первыми).
 
 **Режимы** (цель выбирается среди чистых; **чистых нет** — любой режим
-делает ровно ОДНУ попытку к наименее грязному и никогда не фанится —
+делает одну попытку к наименее грязному и никогда не фанится —
 анти-шторм, «режим выживания»):
 
 - `stable` — липкость прежде случайности: остаёмся на текущем, пока он
@@ -619,6 +775,35 @@ QUIC не несёт TLS поверх TCP вовсе.
 > всем чистым участникам; `parallel` — каждым запросом. Не смешивайте
 > внутренние и публичные резолверы в одной группе.
 
+### Локальные имена первыми: `hosts`
+
+SPEC 143. Необязательный ключ `hosts` перечисляет серверы типа `hosts`, которые
+группа опрашивает **до** выбора цели, в порядке ключа:
+
+- **Попадание** — запрос A или AAAA, участник знает имя и отвечает NOERROR:
+  этот ответ отдаётся как есть, сетевые участники не опрашиваются. Сюда входит
+  и **пустой** NOERROR, когда в записи есть только другое семейство адресов:
+  имя только с IPv4 на запрос AAAA получает пустой ответ, и в сеть запрос
+  не уходит. Поэтому `strategy: ipv6_only` на таком имени адреса не даёт —
+  так же, как `hosts`-файл ОС.
+- **Промах** — имя неизвестно, другой тип запроса или ответ не NOERROR: запрос
+  уходит в `servers` по режиму группы без изменений.
+- У участников `hosts` нет записей здоровья, они не входят в веер и режим
+  выживания, не становятся текущими и отсутствуют в `GetDNSGroups`. Попадание
+  видно как ответивший сервер — участник `hosts` — с одной пробой `answered`;
+  промах следа не оставляет.
+- `servers` остаётся обязательным и непустым. Сервер `hosts` (или `fakeip`)
+  внутри `servers` по-прежнему отвергается при загрузке, и ошибка указывает
+  на ключ `hosts`. Ключ принимает только теги типа `hosts`, без дубликатов
+  и без пересечения с `servers`.
+
+Работает везде, где принимается тег группы: `domain_resolver` (у узла или
+`route.default_domain_resolver`), `dns.final`, правила. Зачем он нужен: адреса
+серверов outbound и endpoint резолвятся через `domain_resolver`, который идёт
+в сервер напрямую, минуя DNS-правила, поэтому ни действие правила `predefined`,
+ни правило `server: hosts` до них не доходят. Сам `hosts` таким резолвером быть
+не может: на любое другое имя он отвечает NXDOMAIN.
+
 ### Пример — отказоустойчивый публичный DNS по умолчанию
 
 ```jsonc
@@ -635,6 +820,34 @@ QUIC не несёт TLS поверх TCP вовсе.
   }
 }
 ```
+
+### Пример — одно локальное имя для WireGuard-сервера с IPv4 и IPv6
+
+Свой WireGuard-сервер (или WARP), доступный по IPv4 и IPv6 под одним локальным
+именем (issue #60):
+
+```jsonc
+{
+  "dns": {
+    "servers": [
+      { "type": "hosts", "tag": "local",
+        "predefined": { "wg.home": ["203.0.113.10", "2001:db8::10"] } },
+      { "type": "udp", "tag": "google",     "server": "8.8.8.8" },
+      { "type": "udp", "tag": "cloudflare", "server": "1.1.1.1" },
+      { "type": "group", "tag": "resolver",
+        "hosts": ["local"],
+        "servers": ["google", "cloudflare"],
+        "mode": "stable" }
+    ],
+    "final": "resolver"
+  },
+  "route": { "default_domain_resolver": { "server": "resolver", "strategy": "prefer_ipv6" } }
+}
+```
+
+`wg.home` в адресе сервера endpoint'а получает оба адреса из `local`, семейство
+выбирает `strategy`; любое другое имя идёт в `google` / `cloudflare` по режиму
+`stable`.
 
 > ⚠️ Контракт v1 (`mode: failover|race`, `interval`, `down_time`,
 > отгружался в `v1.14.0-lx.16-rc.1`) УДАЛЁН: такие конфиги не загружаются.
@@ -732,11 +945,16 @@ mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>[.<padding>…].<ключ>[
 - **`GetRules()`** — снимок таблицы маршрутных правил (route-правила + DNS-правила).
 - **`GetGroups()`** — снимок outbound-групп (те же данные, что пушит поток групп).
 - **`GetOutbounds()`** — плоский список outbound/endpoint (нужен рядом с `GetGroups`, потому что
-  отдельно стоящие outbounds не входят ни в одну группу).
+  отдельно стоящие outbounds не входят ни в одну группу). Элемент WG/AWG-endpoint'а несёт ещё
+  `EndpointState` (`never_built` / `building` / `up` / `asleep` / `torn_down` / `down` /
+  `disabled`) и `IdleSinceSeconds` (с последнего дайла); у прочих outbound'ов оба пусты/0
+  (SPEC 097; см. [lx-energy.ru.md §11](lx-energy.ru.md#11-ленивая-сборка-и-бюджет-сборок-spec-097)).
+  `disabled` выставляет `SetEndpointEnabled` (SPEC 106, ниже;
+  см. [lx-energy.ru.md §12](lx-energy.ru.md#12-ручной-переключатель-spec-106)).
 - **`GetPool(groupTag)`** — прочитать текущий пул ротации round_robin группы `urltest`, слот за
-  слотом (SPEC 019; см. [§3](#3-балансировка-нагрузки-round_robin-spec-019)).
+  слотом (SPEC 019; см. [§3](#3-режимы-выбора-узла-в-urltest-spec-019--116)).
 - **`GetDNSGroups()`** — live-состояние каждого DNS-сервера `group` (SPEC 035; см.
-  [§5](#5-группа-dns-серверов-spec-033035)): по каждому члену `clean` / `liveErrors` /
+  [§5](#5-группа-dns-серверов-spec-033035143)): по каждому члену `clean` / `liveErrors` /
   `lastErrorAgeMs` / `liveWins` / `current`.
 - **`GetRunningConfig()`** — канонический JSON options, из которых реально построен
   работающий box, post-override (SPEC 037). Возвращается объектом с аксессором `Content()` —
@@ -750,6 +968,9 @@ mlkem768x25519plus.<native|xorpub|random>.<0rtt|1rtt>[.<padding>…].<ключ>[
   по позициям разрешённый узел и, для позиций ≥ 1, звено (`starting|active|idle`, живые
   соединения, эффективный MTU и причина, что снял `strip`, применён ли `rewrite`, последняя
   ошибка), плюс счётчики дозвонов/ошибок/звеньев.
+- **`SetEndpointEnabled(tag, enabled)`** — выключить или включить WG/AWG-endpoint на ходу
+  (SPEC 106; см. [lx-energy.ru.md §12](lx-energy.ru.md#12-ручной-переключатель-spec-106)). Возвращает
+  объект `EndpointToggleResult`, поле `State` — состояние endpoint'а после вызова.
 
 SPEC 017 также обогащает существующий поток соединений: отслеживаемое `Connection` теперь несёт
 отдельное поле **`detourList`** — хвост transport-detour'а финального outbound, выставленный
@@ -763,37 +984,51 @@ make -f Makefile.lx lx-build   # включает with_lx_command (и with_xhttp
 
 ---
 
-## 9. Автоматическая фрагментация ClientHello под `detour` (SPEC 060)
+## 9. ClientHello под `detour` — без дефолта (SPEC 060)
 
-**Это не ключ конфига, а изменённый дефолт.** Когда TLS-over-TCP outbound (VLESS, trojan,
-vmess, anytls, shadowtls, http, masque `h2`, …) диалит **через `detour`**, `record_fragment`
-теперь по умолчанию **включён**.
+> ⚠️ **Изменение поведения без ошибки загрузки.** В прежних релизах TLS-over-TCP outbound
+> (VLESS, trojan, vmess, anytls, shadowtls, http, masque `h2`, …), который диалит **через
+> `detour`**, по умолчанию резал ClientHello на TLS-записи (`record_fragment`). Этого дефолта
+> больше нет. Без блока `lx.sniff_guard` ядро ведёт себя как апстрим: ClientHello режется только
+> там, где у узла задан `fragment` или `record_fragment`, через `detour` тоже. Конфиг без блока
+> загружается, а TLS-узлы через релеи, которые перенаправляют соединение по SNI, перестают
+> подниматься.
 
-Почему: нижнее плечо пересылает наш ClientHello от своего имени, а PMTU за тем сервером может
-быть ниже размера ClientHello. ICMP *Fragmentation Needed* до нас не доходит — пакет просто
-исчезает, и снаружи это выглядит как `tls handshake: EOF` через 12–17 с. Воспроизводится голым
-`curl`, то есть причина в пути, а не в sing-box, — но обойти её можно только фрагментацией
-первой TLS-записи. Замер через сломанное плечо: без фрагментации ❌ отказ за 12 с;
-`fragment` ✅ 0.6 с; `record_fragment` ✅ **0.1 с**.
+Зачем был дефолт: релей может прочитать SNI из ClientHello и отправить соединение на это имя
+вместо назначения узла — так работает Xray `sniffing` с `destOverride` без `routeOnly`. Узел, у
+которого SNI — маскировка (WARP с чужим именем, REALITY), получает соединение не туда: хендшейк
+висит и падает `tls handshake: EOF` через 12–17 с либо приходит чужой ключ. ClientHello,
+разрезанный на TLS-записи, TLS-сниффер Xray не разбирает. Замер через сниффящее плечо: без
+разреза ❌ отказ за 12 с; `fragment` ✅ 0.6 с; `record_fragment` ✅ **0.1 с**.
 
-Правила:
+Защиту возвращает блок [`lx.sniff_guard`](#lxsniff_guard--защита-от-перенаправления-по-sni)
+(§13). Минимальный блок:
 
-- **Явное значение в конфиге всегда сильнее.** `fragment: true` не апгрейдится до
-  record-split — если выбран packet-split, это остаётся твоим выбором.
-- **Фрагментируется только хендшейк**, никогда не трафик после него. Постоянного налога нет.
-- **`h3`/QUIC не затронут** — там нет TLS поверх TCP, а quic-go и так держит Initial ниже
-  порога (masque `h3` через detour: 4/4 ОК).
-- Вложенные цепочки покрыты автоматически: у каждого звена свой `detour`.
-- **REALITY-узлы тоже — с SPEC 088.** До неё REALITY-клиент строил uTLS-соединение на голом
-  сокете, поэтому и явные `fragment` / `record_fragment`, и этот дефолт конфигом принимались, но там
-  молча не действовали. Гибридный ClientHello после
-  [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) — 1,5–1,9 КБ (два TCP-сегмента),
-  так что это стало важнее, чем было. Поможет ли фрагментация в сети, которая теряет такой первый
-  пакет, — свойство той сети; второй рычаг — §7.
+```json
+"lx": { "sniff_guard": { "tls": { "method": "record_fragment" } } }
+```
 
-> ⚠️ **Известное ограничение:** явный `"record_fragment": false` неотличим от «не задано»,
-> поэтому под `detour` авто всё равно включится. Чтобы диалить через detour другим режимом,
-> ставь `"fragment": true`; способа «под detour вообще без фрагментации» сейчас нет.
+С ним путь через любой релей, кроме `ssh` и `socks`, стартует с разрезом, прямой путь — без.
+Путь через `ssh` и `socks` стартует без разреза и включает его, если узел на нём упал без разреза
+и прошёл с ним. Чтобы с разрезом стартовали все релеи, как при прежнем дефолте, добавьте
+`"detour_type": {"ssh": "suspect", "socks": "suspect"}` — карта накладывается поверх дефолтов,
+поэтому перечислять нужно только то, что меняется. Узлы, у которых SNI совпадает с `server`,
+блок по умолчанию не защищает (`nodes.sni_mismatch`); прежний дефолт резал и их — для этого
+`"nodes": {"sni_mismatch": false}`. В отличие от прежнего дефолта, блок
+учится по исходу подключений и может снять разрез с пути, где он мешает.
+
+Узловые ключи апстрима:
+
+- **`fragment` / `record_fragment` у узла действуют как в апстриме**, с блоком и без него.
+  Блок перекрывает их только при `"override": true`.
+- **`"record_fragment": false`** (SPEC 156) — узел просит ClientHello одной записью. Под
+  блоком без `override` такой узел идёт без разреза на любом пути.
+- **REALITY-узлы — с SPEC 088.** До неё REALITY-клиент строил uTLS-соединение на голом сокете,
+  и `fragment` / `record_fragment` там молча не действовали. Гибридный ClientHello после
+  [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) — 1,5–1,9 КБ (два TCP-сегмента).
+  Поможет ли разрез в сети, которая теряет такой первый пакет, — свойство той сети; второй
+  рычаг — §7.
+- Разрезается только хендшейк, трафик после него не трогается.
 
 ---
 
@@ -855,15 +1090,20 @@ endpoint или группа любой вложенности; все три ф
 - **`direct` на позиции ≥ 1 прозрачен** — «хопа нет»; положите `direct` в селектор, чтобы
   выключать позицию на лету. `block` отвергает. Все-`direct` позиции ≥ 1 делают цепочку
   равной позиции 0.
-- **MTU туннельных звеньев (WireGuard, MASQUE) понижается автоматически**: `mtu` в конфиге
-  узла означает «как самостоятельного»; цепочка вычитает точные накладные IP-туннелей
-  *под* звеном (WG внутри IP-туннеля −60/−80 по семейству адреса сервера, MASQUE ≈ −90),
-  беря худший случай по участникам группы. Над потоковыми прокси (vless/trojan/ss по TCP,
-  mux) и датаграммными прокси MTU не меняется.
+- **MTU и размер пакета звеньев выравниваются автоматически** — общим механизмом
+  `lx.mtu_align` ([§13](#lxmtu_align--выравнивание-mtu-и-размера-пакета-по-пути)),
+  тем же, что работает под обычным `detour`: `mtu` в конфиге узла означает «как
+  самостоятельного»; цепочка вычитает точные накладные IP-туннелей *под* звеном (WG внутри
+  IP-туннеля −60/−80 по семейству адреса сервера, MASQUE −79/−99), беря худший случай по
+  участникам группы. QUIC-звенья (hysteria2, tuic, hysteria) на позициях ≥ 1 получают
+  `initial_packet_size` под ёмкость хопа ниже и `disable_path_mtu_discovery: true`. Над
+  любым прокси (vless/trojan/ss/hysteria2/…) ничего не меняется.
+  Режим (`clamp` по умолчанию, `fill`, `off`) и `except` действуют на звенья так же.
 - **Каталог `strip`** (односторонние, сервер их не видит): `tls.fragment` (пакетная
   фрагментация ClientHello + `fragment_fallback_delay`; **`record_fragment` не трогается** —
-  под `detour` он включается автоматически как защита пути, см. §9),
-  `multiplex.padding`, `xhttp.padding` (минимальный диапазон, obfs-режим выкл.).
+  защиту пути от перенаправления по SNI задаёт `lx.sniff_guard`, см. §9 и §13),
+  `multiplex.padding`, `xhttp.padding` (`x_padding_bytes` фиксируется на нижней границе диапазона узла, `100`
+  без явного диапазона; размещение и obfs-режим не меняются).
   `tls.utls` доступен через `"tls.utls": true` (ошибка старта на узле с `reality`).
   Контракты с сервером — `flow`, `obfs`, `shadowtls`, `plugin`, `udp_over_tcp`, `ech`,
   пути транспортов — не снимаются никогда.
@@ -900,9 +1140,512 @@ make -f Makefile.lx lx-build                     # собирает ./sing-box �
 ./sing-box check -c lx-test/config/xhttp_reality.json
 ./sing-box check -c lx-test/config/awg2_basic.json
 ./sing-box check -c lx-test/config/awg3_full.json     # набор полей AmneziaWG 3.1
+./sing-box check -c lx-test/config/lx_block.json      # корневой блок lx, все ключи
+make -f Makefile.lx lx-check                     # сборка + check каждого lx-test/config/*.json
 
 # Android (опционально): libbox.aar с зашитыми with_xhttp+with_awg (нужны NDK r28 + OpenJDK 17)
 make lib_install && make lib_android             # → libbox.aar (SDK23) + libbox-legacy.aar (SDK21)
 ```
 
 CI (`.github/workflows/lx-ci.yml`) собирает матрицу фич (`baseline` / `xhttp` / `awg` / `full`), кросс-платформенную матрицу **и Android `libbox.aar`** (gomobile), прогоняя `check` на соответствующих примерах конфигов. Push тега `v*-lx.*` запускает `lx-release.yml`, который публикует десктоп-бинари **и** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` как ассеты GitHub Release. Также публикуется legacy-бинарь **Windows 7 (32-бит)** (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) — собранный Win7-патченным Go и **без `with_naive_outbound`** (у `cronet-go` нет сборки под windows/386; все остальные фичи без изменений).
+
+## 13. Корневой блок `lx` (SPEC 098)
+
+Глобальные ручки форка живут в одном корневом блоке `lx`, сгруппированные по подсистеме. Всё, что
+описывает конкретный узел, остаётся в его объекте, как в апстриме: поля AWG — в endpoint'е, `xhttp` —
+в `transport`, собственный `idle_timeout` masque-узла — в узле. Все подблоки и ключи опциональны;
+пустой `lx` и отсутствующий равнозначны. Опечатка в имени ключа — ошибка загрузки, не тихий дефолт.
+
+```jsonc
+"lx": {
+  "wg": {
+    "idle_suspend": "30s",
+    "idle_suspend_reachable": "5m",
+    "idle_teardown": "10m",
+    "lazy_build": true,
+    "build_max": 4,
+    "build_overflow": "wait"
+  },
+  "masque": {
+    "idle_timeout": "5m"
+  },
+  "trusttunnel": {
+    "idle_timeout": "5m"
+  },
+  "mtu_align": "clamp",
+  "sniff_guard": {
+    "tls": { "method": "record_fragment" },
+    "quic": { "method": "decoy_first_byte" }
+  }
+}
+```
+
+### `lx.wg` — endpoint'ы WireGuard / AmneziaWG
+
+| Ключ | Тип | Дефолт | Значение |
+|---|---|---|---|
+| `idle_suspend` | длительность | выкл | Порог простоя endpoint'а вне активного дерева маршрутизации: после него устройство уводится в Down (сокеты закрыты, приёмные буферы свободны), следующий дайл будит. Отсутствие или `0` выключает механизм, тик не стартует |
+| `idle_suspend_reachable` | длительность | выкл | Второй, более длинный порог для endpoint'ов в дереве (член urltest-пула, выбранный узел, final); без него они не спят. Обязан быть ≥ `idle_suspend`, требует его |
+| `idle_teardown` | длительность, явный `"0"` допустим | наследует `idle_suspend_reachable` | Сколько уже спящий endpoint спит до разборки устройства и netstack'а; считается от засыпания. `"0"` запрещает разборку. Требует `idle_suspend` |
+| `lazy_build` | bool | `false` | Endpoint'ы стартуют разобранными, устройство собирается при первом дайле. Требует `idle_suspend` |
+| `build_max` | целое ≥ 0 | `0` = без потолка | Не больше N собранных устройств одновременно |
+| `build_overflow` | `wait` \| `build` | `wait` | Когда все `build_max` устройств держат живые соединения: ждать в пределах дедлайна дайла или собрать сверх потолка с предупреждением |
+
+Три ключа сна сохраняют семантику SPEC 020 — таймлайны и рекомендованный мобильный конфиг в
+[lx-energy.ru.md](lx-energy.ru.md). `lazy_build`, `build_max` и `build_overflow` — SPEC 097;
+порядок выбора жертвы и состояния — в
+[lx-energy.ru.md §11](lx-energy.ru.md#11-ленивая-сборка-и-бюджет-сборок-spec-097):
+
+- `lazy_build` не действует на endpoint с `listen_port` (его никто не дайлит).
+- `build_max` без `lazy_build` допустим: устройства собираются на старте, как раньше, а потолок
+  действует с первой пересборки (пробуждения после `idle_teardown`).
+- `wait` из `build_overflow` длится до дедлайна самого дайла, не дольше 15 с.
+- `build_max` ниже числа одновременно используемых узлов заставляет их разбирать друг друга при
+  каждом переключении, и каждый дайл платит сборку устройства. Ставить для сессий с массовыми
+  пробами, а не как общую ручку памяти.
+
+Все ключи `lx.wg` действуют только в сборках с `with_lx_idle_suspend` (мобильный AAR).
+Десктоп/CLI-бинарь отвергает их на старте — любое окно простоя, явный `idle_teardown` (включая `"0"`),
+`lazy_build`, ненулевой `build_max` или `build_overflow: "build"`:
+`lx.wg.* is set but this build lacks idle-suspend support; rebuild with -tags with_lx_idle_suspend (mobile-only feature)`.
+`sing-box check` валидирует ключи, но роутер не стартует, поэтому на десктопе их принимает.
+
+Ошибки валидации называют полный путь ключа:
+
+- `lx.wg.idle_suspend_reachable must be >= lx.wg.idle_suspend`
+- `lx.wg.idle_suspend_reachable requires lx.wg.idle_suspend`, так же для `idle_teardown`, `lazy_build`
+- `lx.wg.<ключ> must be >= 0` для отрицательной длительности, `lx.wg.build_max must be >= 0`
+- `lx.wg.build_overflow must be "wait" or "build"`
+
+### `lx.masque` — MASQUE-outbound'ы
+
+| Ключ | Тип | Дефолт | Значение |
+|---|---|---|---|
+| `idle_timeout` | длительность ≥ 0 | выкл | Глобальное окно простоя для всех `masque`-узлов без своего `idle_timeout`: после него сессия (netstack, насосы, QUIC keepalive) разбирается, следующий дайл собирает её заново |
+
+Приоритет: `idle_timeout` узла > `lx.masque.idle_timeout` > выкл. Явный `"0"` в узле держит его
+туннель поднятым даже при заданном глобальном значении. Сессия MASQUE и так собирается лениво,
+потолка здесь нет.
+
+Ошибка валидации: `lx.masque.idle_timeout must be >= 0` для отрицательной длительности.
+
+### `lx.trusttunnel` — TrustTunnel-outbound'ы
+
+| Ключ | Тип | Дефолт | Значение |
+|---|---|---|---|
+| `idle_timeout` | длительность ≥ 0 | `5m` | Глобальное окно простоя для всех `trusttunnel`-узлов без своего `idle_timeout`: после него сессия закрывается локально, следующий дайл открывает её заново. Отсутствие ключа или `0` — 5 минут |
+
+Приоритет: `idle_timeout` узла > `lx.trusttunnel.idle_timeout` > 5 минут. Явный `"0"` в узле
+отключает разборку его сессии при любом глобальном значении. В отличие от `lx.masque`, глобальный
+`0` здесь не выключает окно, а означает «не задано»: выключить разборку можно только в узле.
+SPEC 133. Поля самого outbound'а, включая его `idle_timeout`, — в
+[protocols-transports.ru.md §6.2](protocols-transports.ru.md#62-поля-outbound).
+
+Ошибка валидации: `lx.trusttunnel.idle_timeout must be >= 0` для отрицательной длительности.
+
+### `lx.mtu_align` — выравнивание MTU и размера пакета по пути
+
+Узел, стоящий прямо над IP-туннелем — через `detour`, через группу под `detour` или как звено
+`chain` ([§10](#10-outbound-chain--виртуальная-цепочка-хопов-из-групп-и-узлов-spec-073)), —
+получает размер пакета, который в этот туннель влезает: `mtu` у туннелей (`wireguard`,
+`masque`), `initial_packet_size` плюс `disable_path_mtu_discovery: true` у QUIC-прокси
+(`hysteria2`, `tuic`, `hysteria`). Считается один раз на старте по конфигу, до создания узлов;
+апстримные конструкторы читают уже поправленные опции. Значения только понижаются, каждое
+изменённое поле видно в логе старта с причиной. SPEC 120; исходная заявка — issue #37
+(hysteria2 через `detour` на WARP работал на IPv4-сервер и молчал на IPv6-сервер).
+
+Один ключ в корневом блоке `lx`, две формы записи:
+
+```jsonc
+"lx": { "mtu_align": "clamp" }                                        // строка — режим
+"lx": { "mtu_align": { "mode": "clamp", "except": ["my-wg"] } }       // объект — режим + исключения
+```
+
+| Режим | Поле не задано | Задано явно и **больше** предела | Задано явно и влезает |
+|---|---|---|---|
+| `off` | не трогается | не трогается | не трогается |
+| `fill` | дописывается предел | не трогается; предупреждение «не влезет под `<tag>`» | не трогается |
+| `clamp` **(дефолт)** | дописывается предел | **понижается** до предела; в лог: configured → effective и причина | не трогается |
+
+Ни один режим не повышает значения. `except` — теги узлов, которые не трогаются ни в одном режиме
+(неизвестный режим отвергается при разборе конфига, неизвестный тег — позже, при сборке
+экземпляра, когда известны все узлы). Отсутствие ключа = `clamp`; это тот же
+контракт, который `chain` держал с SPEC 073 («`mtu` в конфиге = как самостоятельного, цепочка только
+понижает»), теперь он действует и под обычным `detour`.
+
+Ошибки валидации (все три ловит и `sing-box check`):
+
+- `lx.mtu_align.mode must be "off", "fill" or "clamp"` — неизвестный режим, в строковой и в
+  объектной форме; при разборе конфига
+- `lx.mtu_align.except: empty tag` — пустая строка в `except`
+- `lx.mtu_align.except: unknown outbound/endpoint tag: <теги>` — тега нет ни среди outbound'ов, ни
+  среди endpoint'ов; проверяется перед выравниванием, до создания узлов
+
+**Ёмкость узла** — сколько байт IP-пакета он пронесёт для узла над собой:
+
+| Узел снизу | Ёмкость |
+|---|---|
+| `masque`, `wireguard` (endpoint и legacy outbound), `openvpn-client`, `openconnect` | его **эффективный** `mtu` (после собственного выравнивания, рекурсивно вниз) |
+| `tailscale` endpoint | `system_interface_mtu`, иначе 1280 |
+| `selector`, `urltest` | min по всем достижимым членам, рекурсивно |
+| `chain` как цель `detour` | без предела + предупреждение (цепочка выравнивает себя сама) |
+| любой другой узел — `direct` и любой прокси (vless, trojan, ss, socks, hysteria2, tuic, …), с `detour` или без | без предела: прокси доставляет пакет узла над собой целиком (потоком TCP или своей нарезкой), и то, что лежит под его `detour`, верхний узел не ограничивает (SPEC 144) |
+
+Ёмкость наверх несут только туннели и группы. Единственный случай, который это не покрывает:
+туннель над `shadowsocks` / `socks` по **UDP**, у которых свой `detour` на туннель, — они пропускают
+датаграммы как есть, и ограничение под ними настоящее; там `mtu` верхнему туннелю задаётся руками.
+
+**Что получает узел сверху** (`ipudp` = 28 для IPv4-сервера, 48 для IPv6; домен или неразобранный
+адрес считаются IPv6; у WG-endpoint семейство берётся из `peers[0].address`):
+
+| Узел сверху | Поле | Предел | Накладные v4 / v6 |
+|---|---|---|---|
+| `wireguard` | `mtu` | `ёмкость − 32 − s4 − ipudp` (`s4` — транспортный паддинг AmneziaWG, 0 у обычного WG) | 60 / 80 (+ `s4`) |
+| `masque` | `mtu` | `ёмкость − 51 − ipudp` | 79 / 99 |
+| `hysteria2`, `tuic`, `hysteria` | `initial_packet_size` (+ `disable_path_mtu_discovery: true`) | `ёмкость − ipudp`, кламп 1200…1452 | — |
+| `openvpn-client`, `openconnect` | — | не выводится; одно предупреждение, если под узлом есть ёмкость | неизвестны |
+
+**Пол IPv6 (SPEC 144).** Туннель, несущий IPv6 внутри — `wireguard`-endpoint с IPv6-префиксом в
+`address`, `masque` всегда, — никогда не выравнивается ниже 1280: gvisor молча не поднимает IPv6 на
+канале с меньшим MTU, а мёртвый IPv6 внутри туннеля хуже фрагментов. Если путь оставляет меньше
+1280, туннель получает 1280 и строку Warn (`… is above the path: … leaves 1220 bytes, below the IPv6
+minimum 1280; outer packets will be fragmented`). Туннель только с IPv4 внутри опускается ниже 1280
+как раньше; явный `mtu` ниже 1280 никогда не повышается.
+
+Если предел QUIC-узла ниже 1200 (туннель с `mtu` < 1248 под IPv6-сервером), ставится 1200 с
+предупреждением — ниже минимума QUIC опуститься нельзя. PMTUD выключается вместе с выведенным
+`initial_packet_size`, потому что quic-go умеет только искать размер вверх до 1452: по IPv6 пробы
+теряются вместе с фрагментами, по IPv4 «проходят» фрагментацией, и каждый пакет едет двумя. Узел с
+явным `initial_packet_size` не трогается целиком, включая PMTUD.
+
+**Пример — WARP по умолчанию** (`masque` с `mtu` 1280) и hysteria2 с `detour` на него:
+
+```jsonc
+{ "type": "masque", "tag": "warp", "mtu": 1280, /* … */ },
+{ "type": "hysteria2", "tag": "hy2", "server": "2001:db8::1", "detour": "warp", /* … */ }
+```
+
+`hy2` получает `initial_packet_size: 1232` (1280 − 48) и `disable_path_mtu_discovery: true`; с
+IPv4-сервером — 1252 (1280 − 28). Без выравнивания quic-go шлёт пакеты с payload 1280, по IPv6 это
+1328 байт, туннель режет их на фрагменты, и WARP их теряет ([§4](#4-masque-outbound--cloudflare-warp-spec-021)).
+
+**Группы.** Под группой берётся min по всем членам на старте; при переключении селектора/urltest
+значение не пересчитывается — размер QUIC-пакета фиксируется при создании клиента, MTU
+WG-устройства — при создании устройства, и живое соединение на новый путь не переезжает. Цена на
+широком члене группы: до 200 байт на пакет (1452 → 1252) и выключенный PMTUD. Если это критично —
+явное значение в `fill`, тег в `except` или `off`.
+
+**Лог старта** — одна Info-строка на изменённое поле, предупреждения — Warn:
+
+```
+mtu_align: hy2 initial_packet_size → 1232 (detour warp[masque] mtu 1280 − 48 ipv6; pmtud off)
+mtu_align: wg-exit mtu 1420 → 1200 clamped (limited by warp[masque] mtu 1280 via sel −80 ipv6)
+```
+
+У `chain` то же решение видно в `ChainInfo` (`mtu_configured` / `mtu_effective` / `mtu_reason`
+с префиксом режима `clamped:` / `filled:`). Решения по `detour` в lx RPC пока не отдаются.
+
+**Не выравниваются:** xhttp по h3 и naive (cronet) — свой QUIC-транспорт; `openvpn-client` и
+`openconnect` как верхние узлы — только предупреждение; направление «сервер → клиент» —
+управляется сервером. Чем masque отвечает на это снизу (внешний `InitialPacketSize` = `mtu + 51`,
+ICMP Packet Too Big с фактическим бюджетом) — в [§4](#4-masque-outbound--cloudflare-warp-spec-021).
+
+### `lx.sniff_guard` — защита от перенаправления по SNI
+
+Между клиентом и сервером может стоять узел, который читает имя из первого пакета рукопожатия и
+отправляет соединение на это имя, а не на набранный адрес. Так работает Xray-инбаунд с
+`sniffing.destOverride` без `routeOnly` — на релее под `detour` или на роутере с VPN или
+прозрачным прокси в локальной сети. Пока SNI — собственное имя сервера, подмена приводит туда же;
+когда SNI — маскировка (REALITY, WARP, hysteria2 или tuic с подставным SNI, QUIC-маскировка
+AmneziaWG), соединение уходит на чужой хост, и узел выглядит мёртвым. Блок делает первый пакет
+рукопожатия нечитаемым для сниффера, не меняя того, что получает сервер, и по исходу подключений
+учится, на каких путях это нужно.
+
+Без блока, как и без `method` в секции, защиты нет: рукопожатие уходит как в апстриме. Блок, в
+котором ни у одной секции нет метода, равнозначен отсутствию блока. Сам блок не включается —
+дефолты защиты выставляет приложение, которое пишет конфиг.
+
+```jsonc
+"lx": {
+  "sniff_guard": {
+    "nodes": {
+      "sni_mismatch": true,                 // нет ключа = true; false — фильтра нет
+      "outbound_type": ["vless", "masque"]  // false | нет ключа — фильтра нет
+    },
+    "detour_type": {                        // нет detour = "direct"
+      "direct": "clean",
+      "ssh":    "clean",
+      "socks":  "clean",
+      "*":      "suspect"
+    },
+    "override": false,
+    "tls": {
+      "method": "record_fragment",          // record_fragment | fragment | delay | off
+      "delay": "300ms",
+      "persist": true
+    },
+    "quic": {
+      "method": "decoy_first_byte",         // decoy_first_byte | delay | off
+      "detour_type": { "socks": "never" },
+      "persist": true
+    }
+  }
+}
+```
+
+**Кого защищать — `nodes`.** Два фильтра; узел защищается, если проходит оба. Узел, не прошедший
+фильтры, работает как без блока. Без блока `nodes` действует `sni_mismatch: true`: узел с
+собственным именем проходит сниффящий релей и без защиты. Защиту всем узлам, которые её умеют,
+даёт `sni_mismatch: false`.
+
+| Ключ | Значения | Без ключа | Смысл |
+|---|---|---|---|
+| `sni_mismatch` | `true`, `false` | `true` | `true` — только узлы, у которых SNI не совпадает с адресом `server`; `false` — фильтра нет |
+| `outbound_type` | список типов, `false` | фильтра нет | Только узлы перечисленных типов. `true`, пустой список и неизвестный тип — ошибка загрузки; известный тип, который защиту не умеет, допустим и пропускается |
+
+Совпадение SNI с `server` проверяется при загрузке сравнением строк, без DNS: без учёта регистра
+и завершающей точки, поддомен — другое имя. Сравнивается имя, которое реально уйдёт в ClientHello
+или Initial; при ECH — внешнее, публичное. Внешнее имя берётся только из конфига ECH, заданного
+в самом узле (`ech.config`); при `ech.config_path` и ECH из DNS сравнивается обычный
+`server_name`.
+
+| `server` | SNI | Результат |
+|---|---|---|
+| домен | не задан или тот же домен | совпадает |
+| домен | другое имя | не совпадает |
+| IP | имя | не совпадает |
+| IP | не задан | совпадает — снифферу нечего читать |
+| любой | SNI не отправляется (`disable_sni`) | совпадает |
+| hysteria2 с обфускацией Salamander | любое | совпадает — Initial снифферу не прочитать |
+| REALITY, masque (WARP), QUIC-маскировка AWG | любое | не совпадает всегда |
+
+Узел за CDN (`server` — IP CDN, SNI — свой домен) попадает под фильтр без нужды, защита ему не
+мешает. Узел, для имени которого DNS релея отдаёт другой адрес, фильтр `sni_mismatch` не
+пройдёт — для него `sni_mismatch: false`, при нужде с `outbound_type`.
+
+**Стартовое состояние пути — `detour_type`.** Карта «тип носителя → состояние, с которого путь
+начинает». Носитель — ближайший не-групповой outbound, через который фактически идёт
+подключение: группа (`selector`, `urltest`) разворачивается в выбранного участника. Узел без
+`detour`, с `detour` в `direct` или в группу, где сейчас выбран `direct`, идёт по пути типа
+`direct`. Если носитель определить не удалось, путь считается неизвестным: защиты нет, метка не
+ведётся.
+
+| Значение | Смысл |
+|---|---|
+| `never` | На этом пути защиты нет никогда: метка не ведётся, повторов нет, узловые ключи работают как в апстриме |
+| `clean` | Старт без защиты |
+| `suspect` | Старт с защитой |
+
+Ключ `"*"` — все типы, которых нет в карте. Группы ключами быть не могут. Дефолт карты: `direct`,
+`ssh`, `socks` — `clean`; `"*"` — `suspect`. Секция `tls` или `quic` может перекрыть отдельные
+типы своей картой `detour_type`, остальные берутся из общей. `"socks": "never"` в секции `quic`
+примера — по полевому случаю: через `socks` с UDP-over-TCP байт-приманка ломала туннель без
+сниффера на пути.
+
+**Секции `tls` и `quic`, `override`.**
+
+| Ключ | Значения | Без ключа | Смысл |
+|---|---|---|---|
+| `tls.method` | `record_fragment`, `fragment`, `delay`, `off` | `off` | Метод для TLS поверх TCP (таблица ниже) |
+| `quic.method` | `decoy_first_byte`, `delay`, `off` | `off` | Метод для QUIC |
+| `delay` (в секции) | положительная длительность | `300ms` | Пауза метода `delay` этой секции. Против Xray нужна больше 200 мс; меньшее значение допустимо для сниффера с более коротким ожиданием. Ноль и отрицательное — ошибка загрузки |
+| `persist` (в секции) | `true`, `false` | `false` | Сохранять метки зашифрованных релеев в `experimental.cache_file`. `true` без включённого `cache_file` — ошибка загрузки |
+| `detour_type` (в секции) | карта, как выше | общая карта | Перекрытие стартовых состояний для протокола |
+| `override` (общий) | `true`, `false` | `false` | `false` — узловые `fragment` / `record_fragment` сильнее блока, узел с явным значением идёт по нему. `true` — для узла, прошедшего `nodes`, форму ClientHello определяет метка пути: на `suspect` — метод блока, на `clean` — без разреза, даже если узел просил разрез. На пути `never` блок не действует. У QUIC узловых ключей нет, там `override` ни на что не влияет |
+
+Узловые `tls.fragment`, `tls.record_fragment` (явный `false` — отказ от разреза) и
+`tls.fragment_fallback_delay` работают при любом состоянии блока, как в апстриме.
+
+**Методы.** Сервер в каждом случае получает корректное рукопожатие. После рукопожатия трафик не
+трогается.
+
+| Метод | Что уходит в сеть | Против сниффера Xray | Цена |
+|---|---|---|---|
+| `tls.record_fragment` | ClientHello разрезан на несколько TLS-записей, точки разреза внутри имени SNI | Сниффер разбирает только первую запись, она обрывается посреди расширений — «не ClientHello» с первой попытки | Нет |
+| `tls.fragment` | ClientHello одной записью, кусками по TCP-сегментам с ожиданием ACK (на сокете устройства) или паузой (через релей) | Защищает, пока пауза между кусками больше 200 мс: через релей это `fragment_fallback_delay` (500 мс), на прямом пути за прозрачным прокси ядро выдерживает ту же паузу | Пауза `fragment_fallback_delay` через релей и на прямом пути за прозрачным прокси |
+| `tls.delay` | ClientHello одной записью, двумя кусками с разрезом внутри SNI и паузой `delay` между ними | Первый кусок неполон, сниффер ждёт продолжения 200 мс и сдаётся | Пауза `delay` на каждом защищённом рукопожатии |
+| `quic.decoy_first_byte` | Датаграмма из одного байта `0x00` перед первым Initial; сервер её отбрасывает | QUIC-сниффер решает по первой датаграмме: «не QUIC» | Нет |
+| `quic.delay` | Второй Initial задерживается на `delay` | Сниффер собирает ClientHello из Initial-пакетов в пределах 200 мс и не успевает | Пауза `delay` на каждом защищённом рукопожатии |
+
+**Какие узлы умеют защиту.** TLS поверх TCP: vless, trojan, vmess, anytls, shadowtls, http с TLS,
+masque `h2`, trusttunnel `h2`, XHTTP на `h2`. QUIC: masque `h3`, hysteria2, tuic, trusttunnel с
+QUIC, XHTTP на `h3`, wireguard с QUIC-образной маскировкой AmneziaWG. Не умеют и пропускаются
+молча: naive и узлы с системным TLS-движком (`engine: apple`, `windows`).
+
+| Метод | Применим | Не применим |
+|---|---|---|
+| `tls.record_fragment`, `tls.fragment`, `tls.delay` | все TLS-узлы из списка выше | naive, системные TLS-движки |
+| `quic.decoy_first_byte` | все QUIC-узлы из списка, включая AmneziaWG | — |
+| `quic.delay` | QUIC-узлы, у которых ClientHello занимает два Initial-пакета | AmneziaWG; узел, чей ClientHello уместился в один Initial; hysteria2 с обфускацией Salamander. На таком узле метод ничего не делает |
+
+Узел, к которому метод секции не применим, идёт как без блока и метку пути не двигает.
+
+**Как учится метка пути.** Метка ведётся на пару «путь + протокол»: путь — `direct` или тег
+ближайшего релея, протокол — `tls` или `quic`. Ключ — тег, а не тип: два VLESS-релея с разной
+настройкой сниффинга различаются. Метка общая для всех узлов, которые идут этим путём; TLS и QUIC
+друг на друга не влияют. На `clean` узел идёт без защиты, на `suspect` — с защитой.
+
+Метка меняется только парой исходов на одном узле:
+
+- узел упал без защиты, затем прошёл с ней → путь становится `suspect`;
+- узел упал с защитой, затем прошёл без неё → путь становится `clean`;
+- любой другой исход метку не трогает. Мёртвый узел, который падает в обоих случаях, ничего не
+  меняет, поэтому массовая проверка узлов, часть которых мертва, защиту с пути не снимает.
+
+Быстрая ошибка (не таймаут) повторяется в том же дайле с противоположным решением. Таймаут
+отдаёт ошибку, а противоположное решение достаётся следующему дайлу этого узла на этом пути
+(в пределах 10 минут). На пути `suspect` попытка без защиты после неудачи допускается не чаще раза
+в 10 минут на путь; в остальное время неудача на `suspect` ничего за собой не тянет.
+
+В пару идут только попытки, в которых рукопожатие действительно состоялось и решение блока к
+нему применено. Дайл, севший на уже поднятую сессию (mux, пул anytls, XHTTP, долгая QUIC-сессия
+masque, hysteria2, tuic, trusttunnel), и узел с собственным выбором при `override: false` в пару
+не идут.
+
+Метку двигают только узлы, у которых SNI не совпадает с `server` (по таблице выше), — независимо
+от фильтра `sni_mismatch`: узел с собственным именем проходит сниффящий релей и без защиты, его
+исходы о сниффере ничего не говорят. Такой узел защиту по метке получает только при
+`sni_mismatch: false`. На пути `clean` он
+повторов не делает. На пути `suspect`, если он упал с защитой и прошёл без неё, узел запоминает
+**личный отказ**: дальше на этом пути он идёт без защиты, а метка пути и остальные узлы не
+меняются. Обратная пара на этом узле (упал без защиты, прошёл с ней) отказ снимает. Повтор для
+такого узла — не чаще раза в 10 минут. Личный отказ живёт, пока жив экземпляр ядра, и не
+сохраняется.
+
+Особенности протоколов:
+
+- **hysteria2, tuic** — рукопожатие идёт внутри библиотеки QUIC, исход оценивается по сроку жизни
+  соединения: закрытое раньше 30 с после дозвона — неудача, прожившее дольше — успех. Успех
+  засчитывается, как только соединение прожило 30 с; неудача — при следующем новом соединении
+  узла. Повтора в том же дайле нет, пара складывается через следующий дайл. При порт-хопе hysteria2 сокеты следующих
+  хопов рукопожатия не несут и не защищаются; режим realm у hysteria2 не защищается вовсе.
+- **masque `auto`** — ноги живут по разным меткам: h3 по `quic`, h2 по `tls`. Быстро упавший h3
+  повторяется с противоположным решением до отката на h2; молчащий h3 откатывается на h2 как
+  раньше, а противоположное решение достаётся следующей ноге h3.
+- **AmneziaWG** — endpoint `wireguard` под блок попадает, если его маскировка `ip: "quic"` или у
+  него непустой `i1`; байт уходит только перед QUIC-образной пачкой. Решение берётся из метки на
+  момент создания сокета, исход рукопожатия метку не двигает, так что AmneziaWG метку пути не
+  двигает никогда. Если других QUIC-узлов на пути нет, метка остаётся стартовой; узлу AWG на пути
+  со стартом `clean` (прямой, `socks`) защита задаётся явно — `suspect` для этого типа носителя в
+  `quic.detour_type`.
+
+Каждая смена метки и каждая постановка или снятие личного отказа пишут строку в лог на уровне
+info: путь, протокол, старое и новое состояние, узел и исходы обеих попыток. Отдельного API нет.
+
+**Цена обучения.**
+
+- Первая неудача на пути `clean`: сниффер, уводящий на имя, где никто не отвечает, даёт таймаут,
+  а не ошибку. Первый дайл узла висит до дедлайна, первый URL-тест узла падает, защита приходит
+  со второго дайла.
+- Узел с быстрым отказом стоит двух рукопожатий вместо одного.
+- Случайный сбой на чистом пути (неудача без защиты, следом успех с ней) ставит `suspect`, и снять
+  его может только обратная пара. Для `record_fragment` и `decoy_first_byte` это бесплатно; для
+  `delay` и `fragment` — пауза на каждом рукопожатии, с `persist` и после перезапуска.
+
+**Смена сети и `persist`.** Смена сети сбрасывает в стартовое состояние метки пути `direct` и
+незашифрованных носителей (`socks`, `http` без TLS) вместе с личными отказами и ожидающими
+повторами на них. Метки зашифрованных релеев смену сети переживают. Если под тем же тегом
+оказался другой релей (тип, адрес или порт), его метки и отказы сбрасываются. Без `persist` метки
+живут, пока жив экземпляр ядра: перезапуск и применение нового конфига начинают со стартовых
+состояний. С `persist` метки зашифрованных релеев пишутся в `experimental.cache_file` и
+поднимаются при старте, если под тем же тегом тот же релей; запись для пути, который карта теперь
+объявляет `never`, не применяется. Метки `direct` и незашифрованных носителей не сохраняются.
+
+**Ошибки загрузки.** Все их ловит `sing-box check`. `<key>` — полный путь ключа, например
+`lx.sniff_guard.quic.detour_type`.
+
+| Причина | Сообщение |
+|---|---|
+| Неизвестный метод | `lx.sniff_guard.tls.method must be one of "record_fragment", "fragment", "delay", "off"`; `lx.sniff_guard.quic.method must be one of "decoy_first_byte", "delay", "off"` |
+| `nodes.outbound_type: true` | `lx.sniff_guard.nodes.outbound_type: true is not a filter; list the types, or use false for no filter` |
+| `nodes.outbound_type: []` | `lx.sniff_guard.nodes.outbound_type: empty list; list the types, or use false for no filter` |
+| Тип, которого не знает ни один outbound или endpoint этой сборки, в `nodes.outbound_type` или ключом `detour_type` | `<key>: unknown outbound type "<t>"` |
+| Группа в `nodes.outbound_type` | `lx.sniff_guard.nodes.outbound_type: "<t>" is a group; a group is never dialled itself, name the member types` |
+| Группа ключом `detour_type` | `<key>: "<t>" is a group; name the member types, a group is resolved to the member it picks` |
+| Неизвестное значение в карте `detour_type` | `<key>.<type> must be "never", "clean" or "suspect"` |
+| `delay` ноль или отрицательный | `<key>.delay must be > 0` (`<key>` — `lx.sniff_guard.tls` или `lx.sniff_guard.quic`) |
+| `persist: true` без включённого `experimental.cache_file` | `lx.sniff_guard.tls.persist: requires experimental.cache_file to be enabled`; то же с `.quic` |
+| Неизвестный ключ или значение, которое не объект | сообщение начинается с ключа: `lx.sniff_guard`, `lx.sniff_guard.nodes`, `lx.sniff_guard.tls`, `lx.sniff_guard.quic` |
+| Удалённый ключ `lx.quic_sniff_decoy` | `lx.quic_sniff_decoy is removed: the QUIC sniff decoy is configured by lx.sniff_guard.quic` |
+
+Проверки неизвестного типа и `persist` выполняются, только если хотя бы у одной секции задан
+метод; `persist` проверяется у секции, у которой метод есть.
+
+**Границы.**
+
+- Сниффер напрямую не обнаруживается и от других причин отказа не отличается — только по паре
+  исходов на одном узле; случайный сбой может сложиться в ложную пару.
+- Рукопожатие, которое без ошибки завершилось не там, успехом и считается: `tuic` с `insecure` и
+  SNI, который резолвится в живой QUIC-хост. masque защищён пином ключа, hysteria2 —
+  аутентификацией, TLS-узлы — проверкой сертификата (без `insecure`).
+- Полный gRPC-транспорт (`grpc`, не lite) не защищается: его рукопожатие идёт вне дайла узла.
+  Такой узел идёт как без блока.
+- На прямом пути не защищаются shadowtls v2/v3 и любой узел с `tcp_fast_open`: путь для них
+  определить нельзя. Через `detour` они защищаются как все.
+- shadowtls v3 без uTLS не защищается ни на каком пути: его рукопожатие идёт мимо TLS-слоя ядра.
+  С uTLS — как остальные.
+- Релей блок не лечит; на стороне релея лечение — `"routeOnly": true` в `sniffing`.
+- Против снифферов, кроме Xray, не проверено. sing-box как релей назначение по сниффингу не
+  подменяет, защита через него не нужна. Ожидание 200 мс — константа Xray; для другого сниффера
+  `delay` подбирается ключом.
+- DPI, который дропает защищённое рукопожатие (разрез на записи как сигнатура), блок не обходит:
+  метка такого пути по паре уходит в `clean`.
+
+### `lx.quic_sniff_decoy` — удалён
+
+Заменён блоком `lx.sniff_guard` (SPEC 060). Любое значение ключа — ошибка загрузки:
+`lx.quic_sniff_decoy is removed: the QUIC sniff decoy is configured by lx.sniff_guard.quic`;
+обратной совместимости нет. Байт `0x00` перед QUIC Initial теперь —
+метод `"decoy_first_byte"` в секции `quic`:
+
+```json
+"lx": { "sniff_guard": { "quic": { "method": "decoy_first_byte" } } }
+```
+
+| Было | Стало |
+|---|---|
+| `mode`, `detour_type` | карта `detour_type` (общая или `quic.detour_type`): `never` для путей, где байт не нужен |
+| `send: "always"` | стартовое состояние `suspect` |
+| `send: "retry"` | стартовое состояние `clean`; защита включается по паре исходов |
+| `outbound_type` | `nodes.outbound_type`; фильтр общий для секций `tls` и `quic` |
+
+Память `clean → armed → decoy` на outbound заменена общей меткой на тег релея и протокол. История —
+[SPEC 060](../SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md).
+
+### `lx.awg_masquerade` — удалён
+
+Удалён в lx.33 (SPEC 060, владелец 2026-11-07). Любое значение — ошибка загрузки:
+`lx.awg_masquerade is removed: the AmneziaWG masquerade burst is sent on every path`. Маскировочная
+пачка AmneziaWG (приманка `ip`/`id`/`ib`, `i1`…`i5`, junk `jc`) шлётся на любом пути, в том числе
+через `detour`, как при дефолте `all` в lx.32. Ключ из конфига убрать; случай релея со сниффингом
+(issue #64) закрывается секцией `quic` блока `lx.sniff_guard` (`decoy_first_byte`). История —
+[SPEC 153](../SPECS/TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md).
+
+### Удалённые `route.lx_idle_*`
+
+| Старый ключ (удалён) | Ключ |
+|---|---|
+| `route.lx_idle_suspend` | `lx.wg.idle_suspend` |
+| `route.lx_idle_suspend_reachable` | `lx.wg.idle_suspend_reachable` |
+| `route.lx_idle_teardown` | `lx.wg.idle_teardown` |
+
+Устаревшие алиасы удалены (владелец 2026-11-02): конфиг, в котором они остались, не загружается с
+ошибкой неизвестного поля, как при любой опечатке в ключе. Значения переносятся в `lx.wg`.
+
+Running-config (`GetRunningConfig`, SPEC 037) отдаёт блок `lx` в канонической форме (пустые
+подблоки отброшены).
+
+### Зарезервировано: `lx.naive`
+
+`single_engine` и `lazy_start` зарезервированы за SPEC 096. До неё подблок `lx.naive` отвергается
+как любой неизвестный ключ.
+
+## 14. Tailscale: выключить Taildrop (SPEC 149)
+
+Ключ `disable_taildrop` на endpoint'е `tailscale`. Без ключа Taildrop работает как в апстриме.
+
+```json
+{ "type": "tailscale", "tag": "ts", "disable_taildrop": true }
+```
+
+С `true` узел не принимает файлы: отправитель получает ошибку 403 `Taildrop is disabled on this node`. Отправка с узла тоже отвергается, в статусе `canShareFiles = false`. Файлы, полученные раньше, остаются в `taildrop_directory`, их можно открыть и удалить. Другие устройства tailnet по-прежнему видят узел получателем, это задаёт админка Tailscale, а не узел.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/lxmemory" // lx: SPEC 148
 	"github.com/sagernet/sing-box/common/networkquality"
 	"github.com/sagernet/sing-box/common/stun"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
@@ -21,8 +22,10 @@ import (
 	"github.com/sagernet/sing-box/experimental/locale"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/group"
+	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/memory"
+	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/observable"
 	"github.com/sagernet/sing/service"
 
@@ -55,6 +58,7 @@ type StartedService struct {
 	// userID           int
 	// groupID          int
 	// systemProxyEnabled      bool
+	oomMemoryLimitHeap      bool // lx: SPEC 148
 	lifecycleAccess         sync.Mutex
 	serviceAccess           sync.RWMutex
 	closed                  bool
@@ -90,6 +94,7 @@ type ServiceOptions struct {
 	// UserID             int
 	// GroupID            int
 	// SystemProxyEnabled bool
+	OOMMemoryLimitHeap bool // lx: SPEC 148
 }
 
 func NewStartedService(options ServiceOptions) *StartedService {
@@ -107,6 +112,7 @@ func NewStartedService(options ServiceOptions) *StartedService {
 		// userID:           options.UserID,
 		// groupID:          options.GroupID,
 		// systemProxyEnabled:      options.SystemProxyEnabled,
+		oomMemoryLimitHeap:      options.OOMMemoryLimitHeap, // lx: SPEC 148
 		serviceStatus:           &ServiceStatus{Status: ServiceStatus_IDLE},
 		serviceStatusSubscriber: observable.NewSubscriber[*ServiceStatus](4),
 		logSubscriber:           observable.NewSubscriber[*log.Entry](128),
@@ -260,15 +266,22 @@ func (s *StartedService) StartOrReloadService(ctx context.Context, profileConten
 		s.instance = nil
 		s.updateStatus(ServiceStatus_STOPPING)
 		s.serviceAccess.Unlock()
+		oomRecorder := service.FromContext[*oomkiller.Recorder](s.ctx)
+		if oomRecorder != nil {
+			oomRecorder.BeginReload()
+			defer oomRecorder.EndReload()
+		}
 		_ = oldInstance.Close()
 		runtimeDebug.FreeOSMemory()
 		s.serviceAccess.Lock()
 	}
 	s.startInterrupted = false
 	s.updateStatus(ServiceStatus_STARTING)
-	s.resetLogs()
+	if oldInstance == nil {
+		s.resetLogs()
+	}
 	s.serviceAccess.Unlock()
-	instance, err := s.newInstance(ctx, profileContent, options)
+	instance, err := s.newInstance(ctx, profileContent, options, oldInstance != nil)
 	if err != nil {
 		s.serviceAccess.Lock()
 		s.updateStatusError(err)
@@ -504,6 +517,7 @@ func (s *StartedService) SubscribeStatus(request *SubscribeStatusRequest, server
 func (s *StartedService) readStatus() *Status {
 	var status Status
 	status.Memory = memory.Total()
+	status.MemoryRuntime = lxmemory.Runtime() // lx: SPEC 148
 	status.Goroutines = int32(runtime.NumGoroutine())
 	s.serviceAccess.RLock()
 	nowService := s.instance
@@ -608,7 +622,9 @@ func (s *StartedService) readGroups() *Groups {
 		g.Tag = iGroup.Tag()
 		g.Type = iGroup.Type()
 		_, g.Selectable = iGroup.(*group.Selector)
-		g.Selected = iGroup.Now()
+		if selected := iGroup.Selected(N.NetworkTCP); selected != nil {
+			g.Selected = selected.Tag()
+		}
 		// lx:begin lx_command
 		// Mode tells a balanced urltest group from a least_test one. Type-asserted rather
 		// than switched on *group.URLTest, mirroring poolProvider: a non-urltest group
@@ -632,7 +648,7 @@ func (s *StartedService) readGroups() *Groups {
 			var item GroupItem
 			item.Tag = itemTag
 			item.Type = itemOutbound.Type()
-			if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, itemOutbound)); history != nil {
+			if history := historyStorage.LoadURLTestHistory(group.RealTag(itemOutbound, N.NetworkTCP)); history != nil {
 				item.UrlTestTime = history.Time.Unix()
 				item.UrlTestDelay = int32(history.Delay)
 			}
@@ -1195,7 +1211,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					Tag:  ob.Tag(),
 					Type: ob.Type(),
 				}
-				if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, ob)); history != nil {
+				if history := historyStorage.LoadURLTestHistory(group.RealTag(ob, N.NetworkTCP)); history != nil {
 					item.UrlTestTime = history.Time.Unix()
 					item.UrlTestDelay = int32(history.Delay)
 				}
@@ -1206,7 +1222,7 @@ func (s *StartedService) SubscribeOutbounds(_ *emptypb.Empty, server grpc.Server
 					Tag:  ep.Tag(),
 					Type: ep.Type(),
 				}
-				if history := historyStorage.LoadURLTestHistory(group.RealTag(boxService.outboundManager, ep)); history != nil {
+				if history := historyStorage.LoadURLTestHistory(group.RealTag(ep, N.NetworkTCP)); history != nil {
 					item.UrlTestTime = history.Time.Unix()
 					item.UrlTestDelay = int32(history.Delay)
 				}
@@ -1665,6 +1681,7 @@ func tailscaleEndpointStatusToProto(tag string, s *adapter.TailscaleEndpointStat
 		ReceivingFileCount: s.ReceivingFileCount,
 		UnreadFileCount:    s.UnreadFileCount,
 		CertDomains:        s.CertDomains,
+		Health:             s.Health, // lx: SPEC 115
 	}
 	if s.Self != nil {
 		result.Self = tailscalePeerToProto(s.Self)
@@ -1694,6 +1711,13 @@ func tailscalePeerToProto(peer *adapter.TailscalePeer) *TailscalePeer {
 		TxBytes:         peer.TxBytes,
 		KeyExpiry:       peer.KeyExpiry,
 		LastSeen:        peer.LastSeen,
+		// lx:begin tailscale-status (SPEC 115)
+		Path:           tailscalePeerPathToProto(peer.Path),
+		Endpoint:       peer.Endpoint,
+		PeerRelay:      peer.PeerRelay,
+		DerpRegionCode: peer.DERPRegionCode,
+		LastHandshake:  peer.LastHandshake,
+		// lx:end tailscale-status
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/experimental/locale"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
@@ -26,6 +27,11 @@ import (
 )
 
 func (t *Endpoint) SendTaildropFile(ctx context.Context, peerStableID string, fileName string, size int64, content io.Reader, progress func(sentBytes int64)) error {
+	// lx:begin tailscale-taildrop
+	if t.taildropDisabled {
+		return adapter.ErrTaildropDisabled
+	}
+	// lx:end tailscale-taildrop
 	if !t.started.Load() {
 		return E.New("Tailscale is not ready yet")
 	}
@@ -55,7 +61,7 @@ func (t *Endpoint) SendTaildropFile(ctx context.Context, peerStableID string, fi
 	if !peer.Valid() {
 		return E.New("taildrop: peer not found: ", peerStableID)
 	}
-	if peer.Hostinfo().OS() == "tvOS" {
+	if !peer.Hostinfo().Valid() || peer.Hostinfo().OS() == "tvOS" {
 		return E.New("taildrop: peer cannot receive files")
 	}
 	if self.User() != peer.User() && !nodeBackend.PeerHasCap(peer, tailcfg.PeerCapabilityFileSharingTarget) {
@@ -173,7 +179,7 @@ func (r *taildropProgressReader) Read(buffer []byte) (int, error) {
 }
 
 func (t *Endpoint) taildropTargets() (canShareFiles bool, targets map[string]bool) {
-	if !t.started.Load() {
+	if !t.started.Load() || t.taildropDisabled { // lx: SPEC 149 disable_taildrop
 		return false, nil
 	}
 	localBackend := t.server.ExportLocalBackend()
@@ -187,7 +193,7 @@ func (t *Endpoint) taildropTargets() (canShareFiles bool, targets map[string]boo
 	}
 	targets = make(map[string]bool)
 	for _, peer := range nodeBackend.Peers() {
-		if !peer.Valid() || peer.Hostinfo().OS() == "tvOS" {
+		if !peer.Valid() || !peer.Hostinfo().Valid() || peer.Hostinfo().OS() == "tvOS" {
 			continue
 		}
 		if self.User() != peer.User() && !nodeBackend.PeerHasCap(peer, tailcfg.PeerCapabilityFileSharingTarget) {

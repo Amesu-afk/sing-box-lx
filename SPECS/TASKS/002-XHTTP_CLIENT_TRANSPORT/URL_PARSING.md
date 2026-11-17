@@ -60,7 +60,7 @@ JSON-ключи sing-box — **snake_case**. Источник в URL — camelCa
 | URL-параметр | → transport JSON | Тип | Дефолт | Примечание |
 |--------------|------------------|-----|--------|------------|
 | `host`       | `host`           | str | SNI/server | HTTP Host header |
-| `path`       | `path`           | str | `/`    | префикс пути; **обрезать `?…` хвост** (см. §4) |
+| `path`       | `path`           | str | `/`    | префикс пути; **передавать целиком, с `?…` хвостом** (см. §4) |
 | `mode`       | `mode`           | str | `auto` | `auto`\|`packet-up`\|`stream-up`\|`stream-one` |
 | `xPaddingBytes` | `x_padding_bytes` | str | `100-1000` | формат `"min-max"` или одиночное число |
 | `noGRPCHeader` | `no_grpc_header` | bool | `false` | |
@@ -118,10 +118,10 @@ JSON-ключи sing-box — **snake_case**. Источник в URL — camelCa
 |--------------|--------|------------|
 | `security=tls`     | `tls.enabled=true` | |
 | `security=reality` | `tls.enabled=true` + `tls.reality.enabled=true` | |
-| `security=none` / отсутствует | без `tls` (plaintext h2c) | редкие plain-XHTTP ноды |
+| `security=none` / отсутствует | без `tls` (HTTP/1.1 без TLS, до SPEC 104 — h2c) | редкие plain-XHTTP ноды |
 | `sni`              | `tls.server_name` | |
 | `fp`               | `tls.utls.fingerprint` (+ `tls.utls.enabled=true`) | `chrome`/`firefox`/… |
-| `alpn`             | `tls.alpn` (split по `,`) | напр. `h2,http/1.1` → `["h2","http/1.1"]` |
+| `alpn`             | `tls.alpn` (split по `,`) | напр. `h2,http/1.1` → `["h2","http/1.1"]`; задаёт версию HTTP (§6) |
 | `pbk`              | `tls.reality.public_key` | только при reality |
 | `sid`              | `tls.reality.short_id` | только при reality |
 | `spx`              | (Xray spiderX) — у sing-box нет аналога, опустить | |
@@ -131,9 +131,10 @@ JSON-ключи sing-box — **snake_case**. Источник в URL — camelCa
 
 ## 4. Подводные камни (обязательно учесть)
 
-1. **`path` с query-хвостом.** Реальные ноды дают `path=/GaMeOpTiMiZeR?ed=2048`. Часть после `?` — это
-   НЕ путь; либо отрезать (`path` = `/GaMeOpTiMiZeR`), либо сохранить как есть, если ваш клиент это умеет.
-   sing-box-lx сам нормализует путь, но `?` внутри `path` лучше срезать на стороне парсера.
+1. **`path` с query-хвостом.** Реальные ноды дают `path=/GaMeOpTiMiZeR?ed=2048` или `path=/?proxyip=…`.
+   Часть после `?` — query запроса: ядро делит `path` по первому `?` и отправляет хвост как query,
+   как Xray ([SPEC 119](../119-XHTTP_PATH_QUERY/SPEC.md)). Парсер передаёт `path` **целиком**, не срезая
+   хвост: релеи (Cloudflare Worker и т. п.) читают из него свои параметры, без них узел не работает.
 2. **`extra` — это JSON, не query.** Сначала `urldecode`, потом `JSON.parse`. Не пытаться парсить как `&k=v`.
 3. **Числа vs строки в `extra`.** `scMaxEachPostBytes`/`scMinPostsIntervalMs` приходят числами →
    привести к строке `"min-max"` (см. §2.4).
@@ -242,11 +243,11 @@ vless://c59eb5ed-…@199.232.244.214:443?type=xhttp&mode=packet-up&security=tls&
 - `downloadSettings` (асимметричный download-транспорт) — не поддержан; `mode=auto`+reality+downloadSettings
   у нас всё равно даст stream-one, не stream-up.
 - `spx` (spiderX), Xray browser-dialer — нет аналога.
-- **HTTP/3 (`alpn=h3` / QUIC).** Наш XHTTP-клиент работает поверх **HTTP/2** (`http2.Transport`). Xray
-  умеет H1/H2/H3. Ноды, помеченные `alpn=h3`, мы обслуживаем по H2 (если сервер допускает); если сервер
-  **требует строго h3** — коннект не встанет. Это архитектурное ограничение транспорта, вне SPEC 002
-  (отдельная будущая задача «XHTTP over HTTP/3»). Парсеру: `alpn` маппить как есть, но `h3`-only ноды
-  помечать как потенциально неработающие.
+- **Версия HTTP (`alpn`).** `alpn` маппится в `tls.alpn` как есть; версию клиент выбирает по правилу Xray
+  ([SPEC 104](../104-XHTTP_HTTP_VERSION_PARITY/SPEC.md)): `alpn=h3` (один элемент) → HTTP/3 по QUIC/UDP,
+  работает в сборках с `with_quic` (все поставляемые); `alpn=http/1.1` → HTTP/1.1; иначе и при REALITY →
+  HTTP/2. `fp` на HTTP/3 не применяется (предупреждение, узел грузится). Помечать `h3`-ноды
+  неработающими больше не нужно.
 - `fragment` / `fm` (TLS-фрагментация Xray) — не часть XHTTP; маппить в свою TLS-fragment-фичу (если есть)
   или опускать.
 
@@ -258,7 +259,7 @@ vless://c59eb5ed-…@199.232.244.214:443?type=xhttp&mode=packet-up&security=tls&
 - [ ] `extra` декодируется как URL-encoded JSON и вливается в transport.
 - [ ] Числовые `sc*`-поля из `extra` → строка `"min-max"`.
 - [ ] camelCase → snake_case по таблицам §2.
-- [ ] `path` с `?`-хвостом обрезается/обрабатывается.
+- [ ] `path` с `?`-хвостом передаётся целиком (хвост — query запроса).
 - [ ] `security=reality` → `tls.reality.{public_key,short_id}` из `pbk`/`sid`.
 - [ ] `mode=auto` передаётся как есть (резолвится в ядре).
 - [ ] `flow=""` для XHTTP.

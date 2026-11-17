@@ -2,8 +2,10 @@ package group
 
 import (
 	"context"
+	"io"
 	"maps"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,13 +34,13 @@ func RegisterURLTest(registry *outbound.Registry) {
 var (
 	_ adapter.OutboundGroup           = (*URLTest)(nil)
 	_ adapter.InterfaceUpdateListener = (*URLTest)(nil)
+	_ adapter.Referrer                = (*URLTest)(nil)
 )
 
 type URLTest struct {
 	outbound.Adapter
 	ctx                          context.Context
 	outbound                     adapter.OutboundManager
-	connection                   adapter.ConnectionManager
 	logger                       log.ContextLogger
 	tags                         []string
 	link                         string
@@ -49,7 +51,7 @@ type URLTest struct {
 	checkAccess                  sync.Mutex
 	interruptExternalConnections bool
 	balancer                     *balancer // lx: SPEC 019 — nil for least_test (default)
-	passiveCheck                 bool      // lx: SPEC 019 — skip probes for passively-confirmed nodes
+	failover                     bool      // lx: SPEC 116 — mode: failover
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
@@ -64,16 +66,15 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 	if balancer == nil && options.Balancer != nil {
 		return nil, E.New("urltest: balancer is only valid with mode: round_robin")
 	}
-	if options.PassiveCheck && balancer != nil && balancer.poolTolerance > 0 {
-		// pool_tolerance > 0 ranks ALL nodes by fresh delay every cycle — passive
-		// liveness cannot substitute for a measurement there.
-		logger.Warn("urltest: passive_check has no effect with balancer.pool_tolerance > 0 (that mode must measure every node)")
+	// lx: SPEC 116 — failover holds the working node until it fails.
+	failover := isFailoverMode(options)
+	if warnFailoverTolerance(failover, options) {
+		logger.Warn("urltest: tolerance is ignored in failover mode")
 	}
 	outbound := &URLTest{
 		Adapter:                      outbound.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
 		ctx:                          ctx,
 		outbound:                     service.FromContext[adapter.OutboundManager](ctx),
-		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
 		tags:                         options.Outbounds,
 		link:                         options.URL,
@@ -82,74 +83,52 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
 		balancer:                     balancer,
-		passiveCheck:                 options.PassiveCheck,
+		failover:                     failover,
 	}
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
 	}
+	for i, tag := range outbound.tags {
+		if slices.Contains(outbound.tags[:i], tag) {
+			return nil, E.New("duplicate tag: ", tag)
+		}
+	}
 	return outbound, nil
 }
 
-func (s *URLTest) Start() error {
-	outbounds := make([]adapter.Outbound, 0, len(s.tags))
-	for i, tag := range s.tags {
-		detour, loaded := s.outbound.Outbound(tag)
-		if !loaded {
-			return E.New("outbound ", i, " not found: ", tag)
+func (s *URLTest) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	switch stage {
+	case adapter.StartStateStart:
+		outbounds := make([]adapter.Outbound, 0, len(s.tags))
+		for i, tag := range s.tags {
+			detour, loaded := s.outbound.Outbound(tag)
+			if !loaded {
+				return E.New("outbound ", i, " not found: ", tag)
+			}
+			outbounds = append(outbounds, detour)
 		}
-		outbounds = append(outbounds, detour)
-	}
-	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
-	if err != nil {
-		return err
-	}
-	group.balancer = s.balancer // lx: SPEC 019 v2 — health-check drives the pool through it
-	group.groupTag = s.Tag()    // lx: SPEC 020 — probe gating needs the group's own tag
-	group.passiveCheck = s.passiveCheck
-	if s.balancer != nil {
-		// lx: SPEC 020 — a pool rebuild changes the active routing tree; invalidate
-		// the router's reachable cache. ctx captured here has the invalidator.
-		ctx := s.ctx
-		s.balancer.onChange = func() {
-			invalidateReachability(ctx)
+		group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
+		if err != nil {
+			return err
 		}
+		group.balancer = s.balancer // lx: SPEC 019 v2 — health-check drives the pool through it
+		group.groupTag = s.Tag()    // lx: SPEC 020 — probe gating needs the group's own tag
+		group.failover = s.failover // lx: SPEC 116
+		if s.balancer != nil {
+			// lx: SPEC 020 — a pool rebuild changes the active routing tree; invalidate
+			// the router's reachable cache. ctx captured here has the invalidator.
+			ctx := s.ctx
+			s.balancer.onChange = func() {
+				invalidateReachability(ctx)
+			}
+			s.balancer.alive = s.slotAlive // lx: SPEC 138 — pick skips slots that failed their last probe
+		}
+		s.group = group
+	case adapter.StartStateStarted:
+		s.group.PostStart()
+		scope.Add(s.group.Close)
 	}
-	s.group = group
 	return nil
-}
-
-func (s *URLTest) PostStart() error {
-	s.group.PostStart()
-	return nil
-}
-
-func (s *URLTest) Close() error {
-	return common.Close(
-		common.PtrOrNil(s.group),
-	)
-}
-
-func (s *URLTest) Now() string {
-	// lx: SPEC 019 — balanced modes have no single "current" node; report the last picked tag.
-	if s.balancer != nil {
-		return s.group.lastSelected.Load()
-	}
-	if s.group.selectedOutboundTCP != nil {
-		return s.group.selectedOutboundTCP.Tag()
-	} else if s.group.selectedOutboundUDP != nil {
-		return s.group.selectedOutboundUDP.Tag()
-	}
-	// lx: SPEC 019 — cold start: before the first URL-test, selectedOutbound* is nil but
-	// traffic already flows via the Select() fallback (outbounds[0] when no history yet).
-	// Mirror exactly what the next DialContext would pick, so the UI shows the real node
-	// instead of blank. Select() is the same source of truth DialContext uses.
-	if outbound, _ := s.group.Select(N.NetworkTCP); outbound != nil {
-		return outbound.Tag()
-	}
-	if outbound, _ := s.group.Select(N.NetworkUDP); outbound != nil {
-		return outbound.Tag()
-	}
-	return ""
 }
 
 func (s *URLTest) All() []string {
@@ -175,13 +154,13 @@ func (s *URLTest) Pool() []PoolSlot {
 	slots := make([]PoolSlot, len(tags))
 	for i, tag := range tags {
 		var delay uint16
-		// History is keyed by RealTag(manager, detour) (a nested-group member is tested and
+		// History is keyed by RealTag(detour, tcp) (a nested-group member is tested and
 		// stored under its live leaf, not the group tag); read it the same way, or
 		// the slot's delay is always 0/dead for group members (SPEC 022 #5). Fall
 		// back to the raw slot tag if the outbound can't be resolved.
 		historyTag := tag
 		if node, loaded := s.outbound.Outbound(tag); loaded {
-			historyTag = RealTag(s.outbound, node)
+			historyTag = RealTag(node, N.NetworkTCP)
 		}
 		if history := s.group.history.LoadURLTestHistory(historyTag); history != nil {
 			delay = history.Delay
@@ -203,7 +182,52 @@ func (s *URLTest) Mode() string {
 	if s.balancer != nil {
 		return C.URLTestModeRoundRobin
 	}
+	if s.failover { // lx: SPEC 116
+		return C.URLTestModeFailover
+	}
 	return C.URLTestModeLeastTest
+}
+
+func (s *URLTest) Selected(network string) adapter.Outbound {
+	// lx: SPEC 019 — balanced modes have no single selected node; report the last pick.
+	if s.balancer != nil {
+		if selected, loaded := s.outbound.Outbound(s.group.lastSelected.Load()); loaded {
+			return selected
+		}
+	}
+	var outbound adapter.Outbound
+	selectedTCP, selectedUDP := s.group.selectedLx() // lx: SPEC 139
+	if network == N.NetworkUDP {
+		outbound = selectedUDP
+	} else {
+		outbound = selectedTCP
+	}
+	if outbound == nil {
+		outbound, _ = s.group.Select(network)
+	}
+	return outbound
+}
+
+func (s *URLTest) AttachConnection(closer io.Closer) func() {
+	s.group.Touch()
+	return s.group.interruptGroup.Add(closer, true)
+}
+
+func (s *URLTest) References() []string {
+	group := s.group
+	if group == nil {
+		return nil
+	}
+	var references []string
+	selectedTCP, selectedUDP := group.selectedLx() // lx: SPEC 139
+	if selectedTCP != nil {
+		references = append(references, selectedTCP.Tag())
+	}
+	if selectedUDP != nil && selectedUDP != selectedTCP {
+		references = append(references, selectedUDP.Tag())
+	}
+	references = append(references, s.poolReferences()...) // lx: SPEC 109
+	return references
 }
 
 func (s *URLTest) URLTest(ctx context.Context) (map[string]uint16, error) {
@@ -227,7 +251,7 @@ func (s *URLTest) selectBalanced(ctx context.Context, network string, destinatio
 		return node
 	})
 	if selected != nil {
-		s.group.lastSelected.Store(selected.Tag())
+		s.group.balancedPicked(ctx, selected) // lx: SPEC 139 — group stage; a probe leaves Now() alone
 	}
 	return selected
 }
@@ -269,7 +293,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 		case N.NetworkTCP, N.NetworkUDP:
 			// lx: SPEC 054 — penalty-aware pick: аварийный режим обходит кеш
 			// selectedOutbound*; обычный — апстримная семантика (кеш, иначе Select).
-			outbound = s.group.pickForDial(N.NetworkName(network))
+			outbound = s.group.pickForDial(ctx, N.NetworkName(network)) // lx: SPEC 139 (ctx: group stage)
 		default:
 			return nil, E.Extend(N.ErrUnknownNetwork, network)
 		}
@@ -279,7 +303,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	}
 	// lx:begin chain
 	// SPEC 073: внутри цепочки выбранный узел подменяется его звеном для хопа
-	// (звено несёт тег оригинала — история/штрафы/passive-check ниже не меняются).
+	// (звено несёт тег оригинала — история/штрафы ниже не меняются).
 	outbound, err := adapter.ResolveChainLeaf(ctx, outbound)
 	if err != nil {
 		return nil, err
@@ -287,13 +311,8 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	conn, err := outbound.DialContext(ctx, network, destination)
 	// lx:end chain
 	if err == nil {
-		// lx: SPEC 019 passive_check — a successful TCP dial proves two-way
-		// liveness of the node (the handshake traversed the whole chain).
-		if s.passiveCheck && N.NetworkName(network) == N.NetworkTCP {
-			s.group.markPassiveAlive(outbound.Tag())
-		}
 		if s.balancer == nil {
-			s.group.penaltyReset(RealTag(s.outbound, outbound)) // lx: SPEC 054 — успех = доказательство жизни
+			s.group.penaltyResetOnDial(ctx, RealTag(outbound, N.NetworkTCP)) // lx: SPEC 054 — успех = доказательство жизни; SPEC 139 — not for a probe
 		}
 		return s.group.interruptGroup.NewConn(conn, interrupt.IsExternalConnectionFromContext(ctx)), nil
 	}
@@ -302,7 +321,7 @@ func (s *URLTest) DialContext(ctx context.Context, network string, destination M
 	// unknown (dead node vs. dead destination vs. local network drop). Only the health-check
 	// changes pool membership. least_test keeps the upstream behaviour (drop the history).
 	if s.balancer == nil {
-		s.group.history.DeleteURLTestHistory(outbound.Tag())
+		s.group.deleteHistoryOnDialError(ctx, outbound.Tag()) // lx: SPEC 139 — a probe keeps the history
 		// lx: SPEC 054 — «путь мёртв» → штраф + один fallback-дайл; успех
 		// переносит выбор группы на fallback (без Interrupt).
 		if fbConn, fallback, ok := s.group.penaltyFailoverDial(ctx, N.NetworkName(network), destination, outbound, err); ok {
@@ -321,7 +340,7 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	} else {
 		// lx: SPEC 054 — общий penalty-aware выбор (штрафы копит только TCP,
 		// UDP ими пользуется).
-		outbound = s.group.pickForDial(N.NetworkUDP)
+		outbound = s.group.pickForDial(ctx, N.NetworkUDP) // lx: SPEC 139 (ctx: group stage)
 	}
 	if outbound == nil {
 		return nil, E.New("missing supported outbound")
@@ -339,19 +358,9 @@ func (s *URLTest) ListenPacket(ctx context.Context, destination M.Socksaddr) (ne
 	s.logger.ErrorContext(ctx, err)
 	// lx: SPEC 019 v2 — round_robin dial error leaves the pool untouched (see DialContext).
 	if s.balancer == nil {
-		s.group.history.DeleteURLTestHistory(outbound.Tag())
+		s.group.deleteHistoryOnDialError(ctx, outbound.Tag()) // lx: SPEC 139 — a probe keeps the history
 	}
 	return nil, err
-}
-
-func (s *URLTest) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	s.connection.NewConnection(ctx, s, conn, metadata, onClose)
-}
-
-func (s *URLTest) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
-	s.connection.NewPacketConnection(ctx, s, conn, metadata, onClose)
 }
 
 type URLTestGroup struct {
@@ -370,6 +379,7 @@ type URLTestGroup struct {
 	checking                     atomic.Bool
 	selectedOutboundTCP          adapter.Outbound
 	selectedOutboundUDP          adapter.Outbound
+	selectedAccess               sync.RWMutex // lx: SPEC 139 — guards the two fields above for lock-free readers (urltest_selected_lx.go)
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
 	access                       sync.Mutex
@@ -381,13 +391,10 @@ type URLTestGroup struct {
 	lastSelected                 common.TypedValue[string] // lx: SPEC 019 — Now() in balanced modes
 	balancer                     *balancer                 // lx: SPEC 019 v2 — round_robin pool; nil for least_test
 	groupTag                     string                    // lx: SPEC 020 — set by URLTest.Start (probe gating)
+	failover                     bool                      // lx: SPEC 116 — set by URLTest.Start
+	lastTickRunEnd               atomic.Int64              // lx: SPEC 125 — end of the last non-forced probe run, UnixNano
+	failoverSlow                 atomic.Pointer[tagSet]    // lx: SPEC 126 — confirmed-slow held tags during a failover reselect
 	reachability                 adapter.ReachabilityReporter
-	// lx: SPEC 019 passive_check — tag → unix-nano of the last successful TCP
-	// dial through that node. A fresh entry (< interval) is proof of two-way
-	// liveness (the TCP handshake traversed the whole chain), letting the
-	// health-check skip probing that node.
-	passiveCheck bool
-	passiveOK    sync.Map
 	// lx: SPEC 054 — penalty failover (least_test): tag → счётчик отказов «путь
 	// мёртв»; сброс только доказательством жизни (успешный дайл / ответ на пробу).
 	// forcedRetestRunning + lastForcedRetest — уровень-триггер аварийного
@@ -491,18 +498,19 @@ func (g *URLTestGroup) Close() error {
 func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 	var minDelay uint16
 	var minOutbound adapter.Outbound
+	selectedTCP, selectedUDP := g.selectedLx() // lx: SPEC 139
 	switch network {
 	case N.NetworkTCP:
-		if g.selectedOutboundTCP != nil {
-			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, g.selectedOutboundTCP)); history != nil {
-				minOutbound = g.selectedOutboundTCP
+		if selectedTCP != nil {
+			if history := g.history.LoadURLTestHistory(RealTag(selectedTCP, N.NetworkTCP)); history != nil {
+				minOutbound = selectedTCP
 				minDelay = history.Delay
 			}
 		}
 	case N.NetworkUDP:
-		if g.selectedOutboundUDP != nil {
-			if history := g.history.LoadURLTestHistory(RealTag(g.outbound, g.selectedOutboundUDP)); history != nil {
-				minOutbound = g.selectedOutboundUDP
+		if selectedUDP != nil {
+			if history := g.history.LoadURLTestHistory(RealTag(selectedUDP, N.NetworkUDP)); history != nil {
+				minOutbound = selectedUDP
 				minDelay = history.Delay
 			}
 		}
@@ -511,7 +519,7 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		if !common.Contains(detour.Network(), network) {
 			continue
 		}
-		history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour))
+		history := g.history.LoadURLTestHistory(RealTag(detour, network))
 		if history == nil {
 			continue
 		}
@@ -566,36 +574,6 @@ func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{})
 	}
 }
 
-// selectedPassivelyConfirmed reports whether the least_test selection is
-// passively proven alive: the TCP-selected node has a fresh passive signal, and
-// the UDP selection (which gets no passive signal — ListenPacket has no
-// handshake to confirm) is either absent or the very same node.
-func (g *URLTestGroup) selectedPassivelyConfirmed() bool {
-	if g.selectedOutboundTCP == nil || !g.passiveFresh(g.selectedOutboundTCP.Tag()) {
-		return false
-	}
-	return g.selectedOutboundUDP == nil || g.selectedOutboundUDP == g.selectedOutboundTCP
-}
-
-// markPassiveAlive records a successful TCP dial through the node as passive
-// proof of liveness. lx: SPEC 019 passive_check.
-func (g *URLTestGroup) markPassiveAlive(tag string) {
-	g.passiveOK.Store(tag, time.Now().UnixNano())
-}
-
-// passiveFresh reports whether the node has passive proof of liveness younger
-// than the probe interval — recent enough to stand in for a URL probe.
-func (g *URLTestGroup) passiveFresh(tag string) bool {
-	if !g.passiveCheck {
-		return false
-	}
-	value, ok := g.passiveOK.Load(tag)
-	if !ok {
-		return false
-	}
-	return time.Since(time.Unix(0, value.(int64))) < g.interval
-}
-
 func (g *URLTestGroup) CheckOutbounds(ctx context.Context, force bool) {
 	_, _ = g.urlTest(ctx, force)
 }
@@ -612,29 +590,24 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 		return make(map[string]uint16), nil
 	}
 	defer g.checking.Store(false)
+	if !force && g.tickTooSoon() { // lx: SPEC 125 — quiet pause after a long tick run
+		return make(map[string]uint16), nil
+	}
 	// lx: SPEC 019 v2 — round_robin uses a lazy, pool-bounded health-check that tests no more
 	// nodes than needed (unless force, e.g. a manual URLTest, which always tests everything).
 	if g.balancer != nil && !force {
 		return g.balancePool(ctx), nil
 	}
-	// lx: SPEC 019 passive_check (least_test) — while the currently selected node
-	// is passively confirmed alive (fresh successful TCP dial through it), skip
-	// the whole periodic re-test cycle: nothing is broken, so don't wake N-1
-	// suspended members with probes just to refresh delay numbers. A manual test
-	// (force) always runs. Cost: history goes stale until the passive signal
-	// lapses; the selection stays pinned to a working node — fewer switches.
-	// lx: SPEC 054 — в аварийном режиме passive-skip отключён: рабочий запасной
-	// пассивно подтверждается, циклы пропускались бы, и оштрафованный бывший
-	// лучший никогда не получил бы пробу, которая сбрасывает его штрафы.
-	if g.passiveCheck && !force && !g.penaltyEmergency(N.NetworkTCP) && g.selectedPassivelyConfirmed() {
-		return make(map[string]uint16), nil
+	// lx: SPEC 116 — failover probes only the held nodes; a failure escalates to a full run.
+	if g.failover && !force {
+		return g.failoverCheck(ctx), nil
 	}
 	result := g.testNodes(ctx, g.outbounds, force)
 	if g.balancer != nil {
 		// force path (manual URLTest tested all nodes): rebuild the pool from fresh results.
 		g.rebuildPool()
 	} else {
-		g.performUpdateCheck()
+		g.performSelectionUpdate(force) // lx: SPEC 116 — a forced full run re-selects in failover
 	}
 	return result, nil
 }
@@ -644,6 +617,9 @@ func (g *URLTestGroup) urlTest(ctx context.Context, force bool) (map[string]uint
 // and the round_robin pool paths; upstream's nested-group-aware batch (66beaf541) with the
 // SPEC 054 hook: a probe answer is proof of life and resets the node's penalties.
 func (g *URLTestGroup) testNodes(ctx context.Context, outbounds []adapter.Outbound, force bool) map[string]uint16 {
+	if !force { // lx: SPEC 125 — freshness from the previous tick run, not a fixed interval
+		return g.testNodesTick(ctx, outbounds)
+	}
 	return urlTestOutbounds(ctx, g.outbound, g.history, g.logger, outbounds, g.link, g.interval, force, g.penaltyReset)
 }
 
@@ -687,7 +663,7 @@ func urlTestOutbounds(ctx context.Context, outboundManager adapter.OutboundManag
 	testBatch.test(outbounds, link, interval, force)
 	b.Wait()
 	for _, outboundGroup := range testBatch.groups {
-		groupHistory := history.LoadURLTestHistory(RealTag(outboundManager, outboundGroup))
+		groupHistory := history.LoadURLTestHistory(RealTag(outboundGroup, N.NetworkTCP))
 		if groupHistory != nil {
 			testBatch.result[outboundGroup.Tag()] = groupHistory.Delay
 		}
@@ -740,6 +716,9 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 					testResult.err = testCtx.Err()
 				}
 				if testResult.err != nil {
+					if b.ctx.Err() != nil {
+						return nil, nil
+					}
 					b.logger.Debug("outbound ", tag, " unavailable: ", testResult.err)
 					b.history.DeleteURLTestHistory(tag)
 				} else {
@@ -762,28 +741,43 @@ func (b *urlTestBatch) test(outbounds []adapter.Outbound, link string, interval 
 }
 
 func (g *URLTestGroup) performUpdateCheck() {
+	g.performSelectionUpdate(false) // lx: SPEC 116
+}
+
+// performSelectionUpdate is upstream performUpdateCheck with the failover reselect flag:
+// reselect drops the hold and picks the fastest node (SPEC 116); other modes ignore it.
+func (g *URLTestGroup) performSelectionUpdate(reselect bool) {
 	g.updateAccess.Lock()
 	defer g.updateAccess.Unlock()
-	var updated bool
-	var changed bool // lx: SPEC 020 — ANY selection change (incl. nil→first) re-shapes the active tree
+	var (
+		updated  bool
+		selected bool
+		changed  bool // lx: SPEC 020 — ANY selection change (incl. nil→first) re-shapes the active tree
+	)
 	// lx: SPEC 054 — переизбор с учётом штрафов (в аварийном режиме — штрафы ↑, задержка ↑).
-	if outbound, exists := g.selectPenaltyAware(N.NetworkTCP); outbound != nil && (g.selectedOutboundTCP == nil || (exists && outbound != g.selectedOutboundTCP)) {
-		if g.selectedOutboundTCP != nil {
+	// lx: SPEC 116 — failover держит текущий узел (selectForUpdate).
+	// lx: SPEC 139 — the dial path (moveSelection) writes the selection outside
+	// updateAccess, so it is read through the guarded snapshot.
+	selectedTCP, selectedUDP := g.selectedLx()
+	if outbound, exists := g.selectForUpdate(N.NetworkTCP, reselect); outbound != nil && (selectedTCP == nil || (exists && outbound != selectedTCP)) {
+		if selectedTCP != nil {
 			updated = true
 		}
-		if outbound != g.selectedOutboundTCP {
+		if outbound != selectedTCP {
 			changed = true
 		}
-		g.selectedOutboundTCP = outbound
+		g.setSelectedTCPLx(outbound) // lx: SPEC 139
+		selected = true
 	}
-	if outbound, exists := g.selectPenaltyAware(N.NetworkUDP); outbound != nil && (g.selectedOutboundUDP == nil || (exists && outbound != g.selectedOutboundUDP)) {
-		if g.selectedOutboundUDP != nil {
+	if outbound, exists := g.selectForUpdate(N.NetworkUDP, reselect); outbound != nil && (selectedUDP == nil || (exists && outbound != selectedUDP)) {
+		if selectedUDP != nil {
 			updated = true
 		}
-		if outbound != g.selectedOutboundUDP {
+		if outbound != selectedUDP {
 			changed = true
 		}
-		g.selectedOutboundUDP = outbound
+		g.setSelectedUDPLx(outbound) // lx: SPEC 139
+		selected = true
 	}
 	if updated {
 		g.interruptGroup.Interrupt(g.interruptExternalConnections)
@@ -794,6 +788,9 @@ func (g *URLTestGroup) performUpdateCheck() {
 		// cache computed from the cold-start fallback would otherwise stay stale
 		// (wrong node held live / real node suspended) until the next auto-switch.
 		invalidateReachability(g.ctx)
+	}
+	if selected {
+		g.history.NotifyUpdated()
 	}
 }
 
@@ -833,24 +830,9 @@ func (g *URLTestGroup) balancePoolFirstLive(ctx context.Context, size int) map[s
 			inPool[tag] = true
 		}
 	}
-	// 1. Re-test current pool members — except those passively confirmed alive
-	// (lx: SPEC 019 passive_check — a fresh successful TCP dial through the slot
-	// proves two-way liveness, no probe needed; with the option off passiveFresh
-	// is always false). Collect which slots went dead.
-	poolNodes := make([]adapter.Outbound, 0, len(current))
-	passiveLive := make(map[string]bool, len(current))
-	for _, node := range g.outboundsByTags(current) {
-		if g.passiveFresh(node.Tag()) {
-			passiveLive[node.Tag()] = true
-			continue
-		}
-		poolNodes = append(poolNodes, node)
-	}
-	result := g.testNodes(ctx, poolNodes, true)
+	// 1. Re-test current pool members; collect which slots went dead.
+	result := g.testNodes(ctx, g.outboundsByTags(current), true)
 	liveTag := func(tag string) bool {
-		if passiveLive[tag] {
-			return true
-		}
 		_, ok := result[tag]
 		return ok
 	}
@@ -973,7 +955,7 @@ func (g *URLTestGroup) rebuildPool() {
 	results := make(map[string]candidate, len(g.outbounds))
 	for _, detour := range g.outbounds {
 		tag := detour.Tag()
-		if history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour)); history != nil {
+		if history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP)); history != nil {
 			results[tag] = candidate{tag: tag, delay: history.Delay, alive: true}
 		} else {
 			results[tag] = candidate{tag: tag, alive: false}
@@ -1025,7 +1007,7 @@ func (g *URLTestGroup) seedPool() {
 	// Nodes with existing history first (top by delay), then config order to fill.
 	withHistory := make([]candidate, 0, len(g.outbounds))
 	for _, detour := range g.outbounds {
-		if history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour)); history != nil {
+		if history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP)); history != nil {
 			withHistory = append(withHistory, candidate{tag: detour.Tag(), delay: history.Delay, alive: true})
 		}
 	}

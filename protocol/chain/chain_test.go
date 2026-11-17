@@ -6,6 +6,7 @@ package chain
 
 import (
 	"context"
+	"io"
 	"net"
 	"slices"
 	"strconv"
@@ -166,8 +167,12 @@ type fakeGroup struct {
 	tags    []string
 }
 
-func (g *fakeGroup) Now() string   { return g.tags[0] }
 func (g *fakeGroup) All() []string { return g.tags }
+func (g *fakeGroup) Selected(string) adapter.Outbound {
+	selected, _ := g.manager.Outbound(g.tags[0])
+	return selected
+}
+func (g *fakeGroup) AttachConnection(io.Closer) func() { return func() {} }
 
 func (g *fakeGroup) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	picked, _ := g.manager.Outbound(g.tags[0])
@@ -195,6 +200,7 @@ type stand struct {
 	registry *fakeRegistry
 	outbound *outbound.Manager
 	endpoint *endpoint.Manager
+	scope    *adapter.Scope
 }
 
 func newStand(t *testing.T) *stand {
@@ -218,11 +224,32 @@ func newStand(t *testing.T) *stand {
 			name:     options.Name,
 		}, nil
 	})
+	// masque под фейковым конструктором (SPEC 120): накладные по семейству сервера.
+	outbound.Register[option.MASQUEOutboundOptions](registry, C.TypeMASQUE, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.MASQUEOutboundOptions) (adapter.Outbound, error) {
+		fakes.record(tag, fakeOptions{DialerOptions: options.DialerOptions, Name: "mtu=" + itoa(int(options.MTU))})
+		return &fakeOutbound{
+			Adapter:  outbound.NewAdapterWithDialerOptions(C.TypeMASQUE, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+			registry: fakes,
+			manager:  service.FromContext[adapter.OutboundManager](ctx),
+			detour:   options.Detour,
+		}, nil
+	})
 	// wireguard под фейковым конструктором: опции настоящие (для MTU-логики), узел фейковый.
 	outbound.Register[option.WireGuardEndpointOptions](registry, C.TypeWireGuard, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WireGuardEndpointOptions) (adapter.Outbound, error) {
 		fakes.record(tag, fakeOptions{DialerOptions: options.DialerOptions, Name: "mtu=" + itoa(int(options.MTU))})
 		return &fakeOutbound{
 			Adapter:  outbound.NewAdapterWithDialerOptions(C.TypeWireGuard, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
+			registry: fakes,
+			manager:  service.FromContext[adapter.OutboundManager](ctx),
+			detour:   options.Detour,
+		}, nil
+	})
+	// hysteria2 под фейковым конструктором (SPEC 120): опции настоящие, Name
+	// фиксирует initial_packet_size и флаг PMTUD, которые читал бы конструктор.
+	outbound.Register[option.Hysteria2OutboundOptions](registry, C.TypeHysteria2, func(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2OutboundOptions) (adapter.Outbound, error) {
+		fakes.record(tag, fakeOptions{DialerOptions: options.DialerOptions, Name: "ips=" + itoa(options.InitialPacketSize) + " pmtud_off=" + strconv.FormatBool(options.DisablePathMTUDiscovery)})
+		return &fakeOutbound{
+			Adapter:  outbound.NewAdapterWithDialerOptions(C.TypeHysteria2, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.DialerOptions),
 			registry: fakes,
 			manager:  service.FromContext[adapter.OutboundManager](ctx),
 			detour:   options.Detour,
@@ -255,13 +282,13 @@ func newStand(t *testing.T) *stand {
 	ctx = service.ContextWith[adapter.EndpointRegistry](ctx, epRegistry)
 	ctx = service.ContextWith[log.Factory](ctx, logFactory)
 	epManager := endpoint.NewManager(logFactory.NewLogger("endpoint"), epRegistry)
-	manager = outbound.NewManager(logFactory.NewLogger("outbound"), registry, epManager, "")
+	manager = outbound.NewManager(registry, epManager, "")
 	ctx = service.ContextWith[adapter.OutboundManager](ctx, manager)
 	ctx = service.ContextWith[adapter.EndpointManager](ctx, epManager)
 	manager.Initialize(func() (adapter.Outbound, error) {
 		return registry.CreateOutbound(ctx, nil, logFactory.NewLogger("direct"), "direct", C.TypeDirect, &option.DirectOutboundOptions{})
 	})
-	return &stand{t: t, ctx: ctx, registry: fakes, outbound: manager, endpoint: epManager}
+	return &stand{t: t, ctx: ctx, registry: fakes, outbound: manager, endpoint: epManager, scope: adapter.NewScope(ctx, logFactory.Logger())}
 }
 
 func itoa(v int) string {
@@ -297,10 +324,10 @@ func (s *stand) chain(tag string, positions []string, mutate ...func(*option.Cha
 
 func (s *stand) start() error {
 	for _, stage := range adapter.ListStartStages {
-		if err := s.endpoint.Start(stage); err != nil {
+		if err := s.scope.Start("endpoint", s.endpoint, stage); err != nil {
 			return err
 		}
-		if err := s.outbound.Start(stage); err != nil {
+		if err := s.scope.Start("outbound", s.outbound, stage); err != nil {
 			return err
 		}
 	}
@@ -312,7 +339,7 @@ func (s *stand) mustStart() {
 	if err := s.start(); err != nil {
 		s.t.Fatalf("start: %v", err)
 	}
-	s.t.Cleanup(func() { s.outbound.Close() })
+	s.t.Cleanup(func() { s.scope.Close() })
 }
 
 func (s *stand) chainOf(tag string) *Chain {
@@ -705,6 +732,112 @@ func TestChainMTU(t *testing.T) {
 			t.Fatalf("mtu %s", got)
 		}
 	})
+	// SPEC 120: a QUIC link over a tunnel gets initial_packet_size =
+	// capacity − ip/udp of its server, and PMTUD off with it.
+	hy2 := func(tag, server string, packetSize int) func(*stand) {
+		return func(s *stand) {
+			options := &option.Hysteria2OutboundOptions{}
+			options.Server = server
+			options.ServerPort = 443
+			options.InitialPacketSize = packetSize
+			s.add(tag, C.TypeHysteria2, options)
+		}
+	}
+	t.Run("hysteria2 over wg", func(t *testing.T) {
+		s := newStand(t)
+		wg("wg-in", 1408, "1.2.3.4")(s)
+		hy2("hy2-v6", "2606:4700:104::2", 0)(s)
+		hy2("hy2-v4", "5.6.7.8", 0)(s)
+		s.chain("v6", []string{"wg-in", "hy2-v6"})
+		s.chain("v4", []string{"wg-in", "hy2-v4"})
+		s.mustStart()
+		if got := s.registry.lastOptions("hy2-v6").Name; got != "ips=1360 pmtud_off=true" {
+			t.Fatalf("v6 %s", got)
+		}
+		if got := s.registry.lastOptions("hy2-v4").Name; got != "ips=1380 pmtud_off=true" {
+			t.Fatalf("v4 %s", got)
+		}
+		st := s.chainOf("v6").ChainStatus().Positions[1].Clone
+		if st.MTUConfigured != 0 || st.MTUEffective != 0 || !strings.HasPrefix(st.MTUReason, "initial_packet_size 1360: filled: limited by wg-in(wireguard) mtu 1408 − 48 ipv6") {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("hysteria2 over stream proxy keeps defaults", func(t *testing.T) {
+		s := newStand(t)
+		s.fake("vless")
+		hy2("hy2", "5.6.7.8", 0)(s)
+		s.chain("virt", []string{"vless", "hy2"})
+		s.mustStart()
+		if got := s.registry.lastOptions("hy2").Name; got != "ips=0 pmtud_off=false" {
+			t.Fatalf("%s", got)
+		}
+	})
+	t.Run("explicit initial_packet_size in fill is kept", func(t *testing.T) {
+		s := newStand(t)
+		s.ctx = service.ContextWithPtr(s.ctx, &option.LXResolved{MTUAlign: option.LXMTUAlignResolved{Mode: option.LXMTUAlignFill}})
+		wg("wg-in", 1408, "1.2.3.4")(s)
+		hy2("hy2", "5.6.7.8", 1400)(s)
+		s.chain("virt", []string{"wg-in", "hy2"})
+		s.mustStart()
+		if got := s.registry.lastOptions("hy2").Name; got != "ips=1400 pmtud_off=false" {
+			t.Fatalf("%s", got)
+		}
+		st := s.chainOf("virt").ChainStatus().Positions[1].Clone
+		if !strings.HasPrefix(st.MTUReason, "initial_packet_size 1400: kept (explicit, fill)") {
+			t.Fatalf("status %+v", st)
+		}
+	})
+	t.Run("mode off leaves wg mtu alone", func(t *testing.T) {
+		s := newStand(t)
+		s.ctx = service.ContextWithPtr(s.ctx, &option.LXResolved{MTUAlign: option.LXMTUAlignResolved{Mode: option.LXMTUAlignOff}})
+		wg("wg-in", 1408, "1.2.3.4")(s)
+		wg("wg-exit", 1408, "5.6.7.8")(s)
+		s.chain("virt", []string{"wg-in", "wg-exit"})
+		s.mustStart()
+		if got := s.registry.lastOptions("wg-exit").Name; got != "mtu=1408" {
+			t.Fatalf("mtu %s", got)
+		}
+	})
+	t.Run("except keeps the link", func(t *testing.T) {
+		s := newStand(t)
+		s.ctx = service.ContextWithPtr(s.ctx, &option.LXResolved{MTUAlign: option.LXMTUAlignResolved{Mode: option.LXMTUAlignClamp, Except: []string{"wg-exit"}}})
+		wg("wg-in", 1408, "1.2.3.4")(s)
+		wg("wg-exit", 1408, "5.6.7.8")(s)
+		s.chain("virt", []string{"wg-in", "wg-exit"})
+		s.mustStart()
+		if got := s.registry.lastOptions("wg-exit").Name; got != "mtu=1408" {
+			t.Fatalf("mtu %s", got)
+		}
+	})
+	t.Run("masque link overhead by family", func(t *testing.T) {
+		// masque над wg 1408: v4-сервер −79 → 1329 (дефолт 1280 влезает, не пишется);
+		// явный 1400 → 1329; v6-сервер → 1309.
+		s := newStand(t)
+		wg("wg-in", 1408, "1.2.3.4")(s)
+		s.add("warp-v4", C.TypeMASQUE, masqueOptions("162.159.192.1", 1400))
+		s.add("warp-v6", C.TypeMASQUE, masqueOptions("2606:4700:104::2", 1400))
+		s.add("warp-default", C.TypeMASQUE, masqueOptions("162.159.192.1", 0))
+		s.chain("v4", []string{"wg-in", "warp-v4"})
+		s.chain("v6", []string{"wg-in", "warp-v6"})
+		s.chain("default", []string{"wg-in", "warp-default"})
+		s.mustStart()
+		for tag, want := range map[string]string{"warp-v4": "mtu=1329", "warp-v6": "mtu=1309", "warp-default": "mtu=0"} {
+			if got := s.registry.lastOptions(tag).Name; got != want {
+				t.Fatalf("%s: %s, want %s", tag, got, want)
+			}
+		}
+		st := s.chainOf("default").ChainStatus().Positions[1].Clone
+		if st.MTUConfigured != 1280 || st.MTUEffective != 1280 || !strings.HasPrefix(st.MTUReason, "fits (") {
+			t.Fatalf("status %+v", st)
+		}
+	})
+}
+
+func masqueOptions(server string, mtu uint32) *option.MASQUEOutboundOptions {
+	options := &option.MASQUEOutboundOptions{MTU: mtu}
+	options.Server = server
+	options.ServerPort = 443
+	return options
 }
 
 func TestChainValidation(t *testing.T) {
@@ -791,7 +924,7 @@ func TestChainCloseRemovesHopsAndClones(t *testing.T) {
 	if _, ok := s.outbound.Outbound("virt#0"); !ok {
 		t.Fatal("hop missing")
 	}
-	s.outbound.Close()
+	s.scope.Close()
 	if _, ok := s.outbound.Outbound("virt#0"); ok {
 		t.Fatal("hop must be removed on close")
 	}
@@ -1071,7 +1204,7 @@ func TestChainToggleInterrupt(t *testing.T) {
 	openUDP := func(chainTag string, external bool) net.PacketConn {
 		ctx := s.ctx
 		if external {
-			ctx = interrupt.ContextWithIsExternalConnection(ctx)
+			ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 		}
 		pconn, err := s.chainOf(chainTag).ListenPacket(ctx, M.ParseSocksaddr("1.1.1.1:53"))
 		if err != nil {
@@ -1153,5 +1286,50 @@ func TestChainCloneConfigJSON(t *testing.T) {
 	c.evictIdle(time.Now().Add(c.idleTimeout + time.Second))
 	if _, err := c.CloneConfigJSON(1); err == nil {
 		t.Fatal("evicted link must not serve a config")
+	}
+}
+
+// The XHTTP server validates the padding length against its own range and
+// reads it from the configured placement, so the strip may only narrow the
+// range to its lower bound.
+func TestApplyStripXHTTPPadding(t *testing.T) {
+	set := stripSet{"xhttp.padding": true}
+	for _, tc := range []struct {
+		name     string
+		padding  any
+		want     any
+		stripped bool
+	}{
+		{"default range", nil, "100", true},
+		{"empty", "", "100", true},
+		{"explicit range", "200-500", "200", true},
+		{"reversed range", "500-200", "200", true},
+		{"spaced range", " 300 - 900 ", "300", true},
+		{"single value", "150", "150", false},
+		{"unparsable", "abc", "abc", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			transport := map[string]any{"type": "xhttp", "x_padding_obfs_mode": true, "x_padding_placement": "cookie"}
+			if tc.padding != nil {
+				transport["x_padding_bytes"] = tc.padding
+			}
+			stripped, err := applyStrip(map[string]any{"transport": transport}, set)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if transport["x_padding_bytes"] != tc.want {
+				t.Fatalf("x_padding_bytes=%v, want %v", transport["x_padding_bytes"], tc.want)
+			}
+			if got := len(stripped) == 1 && stripped[0] == "xhttp.padding"; got != tc.stripped {
+				t.Fatalf("stripped=%v, want reported=%v", stripped, tc.stripped)
+			}
+			if transport["x_padding_obfs_mode"] != true || transport["x_padding_placement"] != "cookie" {
+				t.Fatalf("padding placement is a server contract and must stay: %v", transport)
+			}
+		})
+	}
+	other := map[string]any{"type": "ws"}
+	if stripped, _ := applyStrip(map[string]any{"transport": other}, set); len(stripped) != 0 || other["x_padding_bytes"] != nil {
+		t.Fatalf("non-xhttp transport touched: %v %v", stripped, other)
 	}
 }

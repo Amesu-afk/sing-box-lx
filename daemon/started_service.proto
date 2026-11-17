@@ -67,6 +67,15 @@ service StartedService {
   rpc GetChains(google.protobuf.Empty) returns (ChainList) {}
   rpc SetChainPositionEnabled(SetChainPositionEnabledRequest) returns (SetChainPositionEnabledResponse) {}
   rpc GetChainCloneConfig(GetChainCloneConfigRequest) returns (RunningConfig) {}
+  rpc SetEndpointEnabled(SetEndpointEnabledRequest) returns (SetEndpointEnabledResponse) {}
+  // Per-endpoint status snapshots (SPEC 114, SPEC 115): one unary getter per
+  // endpoint type, so GetOutbounds stays a plain node list.
+  rpc GetWireGuardStatus(WireGuardStatusRequest) returns (WireGuardEndpointStatus) {}
+  rpc GetTailscaleStatus(TailscaleStatusRequest) returns (TailscaleEndpointStatus) {}
+  // Login of a Tailscale endpoint with a new auth key without a box restart
+  // (SPEC 149); on/off of the endpoint is SetEndpointEnabled.
+  rpc TailscaleLogin(TailscaleLoginRequest) returns (google.protobuf.Empty) {}
+  rpc StartConnectionTest(ConnectionTestRequest) returns (stream ConnectionTestProgress) {}
 
   // lx:end lx_command
 }
@@ -125,6 +134,9 @@ message Status {
   int64 downlink = 7;
   int64 uplinkTotal = 8;
   int64 downlinkTotal = 9;
+  // lx: SPEC 148 — memory held by the Go runtime (runtime/metrics total − released),
+  // the quantity debug.SetMemoryLimit governs; `memory` stays the process RSS.
+  uint64 memoryRuntime = 10;
 }
 
 message Groups {
@@ -158,6 +170,21 @@ message GroupItem {
   string type = 2;
   int64 urlTestTime = 3;
   int32 urlTestDelay = 4;
+
+  // lx:begin lx_command
+
+  // WG/AWG endpoint state: never_built / building / up / asleep / torn_down /
+  // down / disabled; empty for every other outbound. Filled by GetOutbounds
+  // only. lx: SPEC 097, disabled — SPEC 106.
+  string endpointState = 5;
+  // Seconds since the last dial through the endpoint; 0 for every other
+  // outbound. lx: SPEC 097.
+  int64 idleSinceSeconds = 6;
+  // 7 carried WG/AWG peers in rc.1 of SPEC 114; they moved to
+  // GetWireGuardStatus → WireGuardEndpointStatus.peers.
+  reserved 7;
+
+  // lx:end lx_command
 }
 
 message URLTestRequest {
@@ -328,6 +355,11 @@ message TailscaleEndpointStatus {
   int32 receivingFileCount = 13;
   int32 unreadFileCount = 14;
   repeated string certDomains = 15;
+  // lx:begin lx_command
+  // Health warnings from the Tailscale backend (no DERP connection, exit node
+  // offline, ...); empty when healthy. lx: SPEC 115.
+  repeated string health = 16;
+  // lx:end lx_command
 }
 
 message TailscaleUserGroup {
@@ -356,6 +388,18 @@ message TailscalePeer {
   bool shareeNode = 15;
   int64 lastSeen = 16;
   bool canReceiveFiles = 17;
+  // lx:begin lx_command
+  // Path to the peer as magicsock would send right now (SPEC 115). The verdict
+  // is the core's: endpoint set → DIRECT; else peerRelay set → PEER_RELAY; else
+  // the node has ever sent to the peer → DERP; else NONE. Fresh on every
+  // GetTailscaleStatus; in SubscribeTailscaleStatus it is the snapshot taken at
+  // the last event. Field names match TailscalePingResponse.
+  TailscalePeerPath path = 18;
+  string endpoint = 19;        // ip:port of the direct UDP path; empty otherwise
+  string peerRelay = 20;       // ip:port:vni of the peer relay; empty otherwise
+  string derpRegionCode = 21;  // peer's home DERP region; also set when direct; empty until known
+  int64 lastHandshake = 22;    // Unix seconds of the last WireGuard handshake; 0 = none yet
+  // lx:end lx_command
 }
 
 message TailscalePingRequest {
@@ -475,6 +519,11 @@ message TaildropFile {
   int64 size = 2;
   string senderName = 3;
   int64 modifiedAt = 4;
+  // lx:begin lx_command
+  // Stable node ID of the sender; empty for files received before the core
+  // restarted, like senderName. lx: SPEC 149.
+  string senderID = 5;
+  // lx:end lx_command
 }
 
 message TaildropReceivingFile {
@@ -876,6 +925,102 @@ message GetURLViaOutboundResponse {
   string error = 7;
 }
 
+// lx:begin lx_command
+// lx: SPEC 139
+
+// On whose behalf the test runs. All fields are optional; fill those the
+// rules use to tell sources apart on the given platform.
+message ConnectionTestSource {
+  string inbound = 1;      // inbound tag; empty — no inbound
+  string packageName = 2;  // Android
+  int32 uid = 3;           // 0 — not set; on Android derived from packageName when the platform provides a package manager (§7)
+  string processPath = 4;  // desktop
+  string sourceIP = 5;     // router: address of a LAN device
+  string sourceMAC = 6;
+  string authUser = 7;
+}
+
+message ConnectionTestRequest {
+  string link = 1;                      // http/https URL
+  string outboundTag = 2;               // empty — through the router; a tag — directly through that node or endpoint
+  ConnectionTestSource source = 3;
+  bool appDNS = 4;                      // first issue the DNS queries the app would issue
+  string connectIP = 5;                 // connect to this address instead of the DNS answer
+  bool fresh = 6;                       // false — as in operation (cache, live connections); true — everything from scratch
+  ConnectionTestDepth depth = 7;
+  string network = 8;                   // "tcp" (default) or "udp"
+  uint32 timeout = 9;                   // ms; 0 — default 15000; ceiling 60000
+  uint32 maxBytes = 10;                 // as in GetURLViaOutbound: default 256 KiB, ceiling 1 MiB
+  repeated HttpHeaderPair headers = 11;
+}
+
+enum ConnectionTestDepth {
+  DEPTH_HTTP = 0;      // the full path up to the HTTP response
+  DEPTH_DNS = 1;       // only the app's DNS queries (implies appDNS)
+  DEPTH_ROUTE = 2;     // DNS (if appDNS) + rule, group and node selection; nothing is dialed
+  DEPTH_CONNECT = 3;   // up to an established tunnel, no request to the target
+}
+
+message ConnectionTestAttr {
+  string key = 1;
+  string value = 2;
+}
+
+enum ConnectionTestStageResult {
+  STAGE_RUNNING = 0;
+  STAGE_OK = 1;
+  STAGE_FAILED = 2;
+  STAGE_SKIPPED = 3;        // not run: an earlier stage failed or the depth does not reach it
+  STAGE_REUSED = 4;         // not run: something ready was used (cache, live connection, tunnel already up)
+  STAGE_NO_ACK = 5;         // run, but the protocol does not confirm its success
+  STAGE_NOT_EVALUATED = 6;  // not computed: data was missing (e.g. the address is unknown)
+}
+
+message ConnectionTestStage {
+  uint32 id = 1;            // unique within the test, increasing
+  uint32 parent = 2;        // 0 — top-level stage
+  string kind = 3;          // vocabulary — §4
+  string subject = 4;       // what the stage is about: tag, domain, address
+  uint32 startMs = 5;       // since the start of the test
+  uint32 durationMs = 6;
+  ConnectionTestStageResult result = 7;
+  string error = 8;         // the cause as is; empty unless FAILED
+  repeated ConnectionTestAttr attrs = 9;
+}
+
+enum ConnectionTestFindingLevel {
+  FINDING_INFO = 0;
+  FINDING_WARNING = 1;
+  FINDING_PROBLEM = 2;
+}
+
+message ConnectionTestFinding {
+  string code = 1;                      // vocabulary — §6
+  ConnectionTestFindingLevel level = 2;
+  repeated uint32 stages = 3;           // stages it refers to
+  repeated ConnectionTestAttr attrs = 4;
+}
+
+message ConnectionTestResult {
+  string error = 1;         // error of the test itself (invalid request); empty — the test ran
+  uint32 rootCause = 2;     // stage id; 0 — the path was completed
+  repeated ConnectionTestFinding findings = 3;
+  uint32 httpStatus = 4;
+  bytes body = 5;
+  bool truncated = 6;
+  string contentType = 7;
+  uint32 elapsedMs = 8;
+  bool stagesTruncated = 9; // the stage cap (§5.15) was hit; the tree is incomplete
+}
+
+message ConnectionTestProgress {
+  oneof event {
+    ConnectionTestStage stage = 1;    // a new stage (RUNNING) or its completion — same id
+    ConnectionTestResult result = 2;  // the last message of the stream
+  }
+}
+// lx:end lx_command
+
 message Rule {
   string type = 1;
   string payload = 2;
@@ -1052,6 +1197,79 @@ message SetChainPositionEnabledResponse {
 message GetChainCloneConfigRequest {
   string chainTag = 1;
   int32 position = 2;
+}
+
+// SPEC 106 — manual on/off switch of a WG/AWG endpoint. Disable brings the
+// device down (established flows are cut) and refuses every dial; enable wakes
+// a suspended device, a torn-down or never-built one is built by the next
+// dial. Not persisted: a reload starts every endpoint enabled.
+message SetEndpointEnabledRequest {
+  string tag = 1;
+  bool enabled = 2;
+}
+message SetEndpointEnabledResponse {
+  string state = 1; // GroupItem.endpointState after the call
+}
+
+// lx: SPEC 149 — login of a Tailscale endpoint on the running backend, the way
+// the endpoint start does it. An empty authKey starts an interactive login
+// (AuthURL in the status). Refused for a logged-in or disabled node; a
+// rejected key shows in the backend state and health, as at start.
+message TailscaleLoginRequest {
+  string endpointTag = 1;
+  string authKey = 2;
+}
+
+// One WireGuard peer of a WG/AWG endpoint. Raw facts, no "connected" verdict:
+// the consumer derives liveness from lastHandshakeUnix. lx: SPEC 114.
+message PeerStatus {
+  // Base64, as public_key in the config — the peer identity.
+  string publicKey = 1;
+  // Current remote ip:port: configured, or learned from the peer's packets
+  // (server side, roaming). Last known address; empty until known.
+  string endpoint = 2;
+  // Unix seconds of the last completed handshake of the current session; 0 =
+  // none yet. A session starts at the device build and at every Up after a
+  // Down (enable, wake from sleep, network wake); an older handshake belongs
+  // to destroyed keys and is not reported (SPEC 145).
+  int64 lastHandshakeUnix = 3;
+  // Device totals since it was built, service traffic included.
+  int64 rxBytes = 4;
+  int64 txBytes = 5;
+  // Since the start of the current session (SPEC 145).
+  int64 sessionRxBytes = 6;
+  int64 sessionTxBytes = 7;
+}
+
+// SPEC 114 — status snapshot of one WG/AWG endpoint: device state and peers in
+// one answer, so an empty peer list is explained by endpointState without a
+// second call. Never builds or wakes a device.
+message WireGuardStatusRequest {
+  string tag = 1; // endpoint tag, as in the config
+}
+message WireGuardEndpointStatus {
+  string endpointTag = 1;
+  // never_built / building / up / asleep / torn_down / down / disabled — the
+  // same value as GroupItem.endpointState.
+  string endpointState = 2;
+  // Seconds since the last dial through the endpoint; 0 while active.
+  int64 idleSinceSeconds = 3;
+  // Config order; empty while there is no device (see endpointState).
+  repeated PeerStatus peers = 4;
+}
+
+// SPEC 115 — the same TailscaleEndpointStatus SubscribeTailscaleStatus streams,
+// read on demand with a fresh backend snapshot (peer paths, handshakes, health).
+message TailscaleStatusRequest {
+  string endpointTag = 1;
+}
+
+// SPEC 115 — which path magicsock would use for a peer right now.
+enum TailscalePeerPath {
+  TAILSCALE_PEER_PATH_NONE = 0;       // never sent to the peer; no path chosen
+  TAILSCALE_PEER_PATH_DIRECT = 1;     // direct UDP, see TailscalePeer.endpoint
+  TAILSCALE_PEER_PATH_PEER_RELAY = 2; // via a peer relay, see TailscalePeer.peerRelay
+  TAILSCALE_PEER_PATH_DERP = 3;       // via DERP, see TailscalePeer.derpRegionCode
 }
 
 // lx:end lx_command

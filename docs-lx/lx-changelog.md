@@ -28,6 +28,902 @@ required for stable tags); this changelog section is the fallback used for pre-r
 > тогда. Пользовательские ноты билингвальны там, где это важно, — в
 > [`releases/`](releases/).
 
+#### v1.14.4-lx.35
+
+Stable после `v1.14.4-lx.34`, без rc-линии. Одна тема: закрыт дрейф, отложенный в lx.34. База — sing-box `v1.14.4` + 71 коммит `upstream/stable` (`56bf27b23`, 2026-11-14, апстримного тега нет), дрейф 0; `go.mod` — по апстриму этой точки, Go `go1.26.10`. Сабмодули: `utls` — `5b1d579` (перенос на `metacubex/utls v1.9.0-alpha.1`), `sing-tun` — `5138715` (апстримный пин `78e734ea0994`), `wireguard-go` и `gvisor` без изменений. Поверх lx.34 своих изменений поведения нет, кроме перечисленных ниже следствий синка.
+
+- 🔧 **Синк `upstream/stable` v1.14.4 + 71 (`56bf27b23`, 22 коммита от 2026-11-13/14).** Из апстрима: REALITY-клиент берёт время и корневой пул из конфигурации узла, запрос-прикрытие при несошедшейся проверке уходит до возврата ошибки и живёт в контексте рукопожатия, из ClientHello больше не вырезается X25519MLKEM768 (у нас так с SPEC 083) и снята недействующая подмена ALPN; ShadowTLS v2 — аутентификация клиента с X25519MLKEM768; из `random`-отпечатка uTLS убраны Edge 85 и iOS 14; SSH-outbound — таймаут рукопожатия; QUIC — размеры буферов сокетов, скрытых от quic-go; сниффер — ECH public name больше не перекрывает домен из DNS-отображения, снифферы не стирают обратное отображение, удалён неиспользуемый `override_destination` у действия `sniff`; обратное DNS-отображение учитывает адресные подсказки HTTPS-записей; auto-redirect — старые ядра Linux, чужие fwmark, работа без `nft_fib`/`nft_queue`, ENOBUFS на больших наборах правил; таблица соседей после переполнения netlink; интерфейс по умолчанию в контейнерах OpenVZ; правки документации. Зависимости: `metacubex/utls v1.9.0-alpha.1`, `quic-go mod.14`, `sing-quic`, `sing-shadowtls`, `sing-tun`, `netlink`, `nftables`. Конфликты мержа: `common/tls/reality_client.go`, `go.sum`.
+- 🔧 **REALITY: версия клиента остаётся `26.3.27` ([SPEC 053](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/053-REALITY_MIN_CLIENT_VER/SPEC.md)).** Апстрим поднял объявляемую версию до `1.8.2`; она по-прежнему ниже `minClientVer` Xray ≥ v26.7.11, поэтому наше значение сохранено. `reality.key_share` (SPEC 089), `fragment`/`record_fragment` в REALITY (SPEC 088), вердикт рукопожатия (SPEC 139) и освобождение состояния после него (SPEC 122) перенесены на новый код апстрима без изменения поведения.
+- 🔧 **Форк `utls` перенесён на `metacubex/utls v1.9.0-alpha.1` ([SPEC 086](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/086-UTLS_FORK_FIREFOX148/SPEC.md)).** Firefox 148 с общим X25519-ключом и Safari 26.3 теперь приходят из самого metacubex; поверх тега остались пять коммитов — пресет Chrome 155 с кодпоинтами ML-DSA (`chrome_155` включается явно, `chrome` = 133) и `UConn.ReleaseHandshakeState`. История metacubex между тегами пересобрана, поэтому ветка `lx` форка получила коммит с двумя родителями (старая линия и перенесённая) без форс-пуша; проверка дрейфа в ритуале теперь сравнивает деревья.
+- 🐛 **AmneziaWG: QUIC-маскировка теряла transport parameters после бампа utls.** С `v1.9.0-alpha.1` вызов `SetTransportParameters` перезаписывает расширение в ClientHello, собранном из пресета; пустое значение, которое мы передавали ради запуска, стирало параметры Chrome/Firefox. Теперь передаются параметры самого расширения. Поймано тестами `TestQUICInitialBrowserFingerprint` и `TestQUICInitialCaptureParity`; в lx.34 ошибки нет — там прежний utls.
+- 🧰 Известное: тесты закрытия сокета в `transport/wireguard` (`TestQuiesceForShutdown*`, `TestDevicePauseLeavesSocketOpen`) нестабильны на нагруженной машине — около трёх запусков из десяти, одинаково на чистых копиях lx.33 и lx.34; к синку отношения не имеют.
+
+#### v1.14.4-lx.34
+
+Stable после `v1.14.4-lx.33`, без rc-линии. База — sing-box `v1.14.4` + 49 коммитов `upstream/stable` (`b33a1a5c6`, 2026-11-10; мерж `7536c99e8`), `go.mod` — по апстриму этой точки, Go как в lx.33 (`go1.26.10`). Сабмодули: `sing-tun` — `3a0e66c` (апстримный пин `cb941cc824bf`, самолечение acceptLoop сохранено), `wireguard-go` — `3ed0471`, `gvisor` и `utls` без изменений. Известный дрейф: 22 коммита `upstream/stable` от 2026-11-13/14 (`56bf27b23`, апстримного тега нет) не взяты — в них бамп `metacubex/utls` до `v1.9.0-alpha.1` (перенос форка utls на новый тег) и правки REALITY-клиента; это отдельный синк с прогоном на устройстве.
+
+- ⚠️ **Снят разрез ClientHello по умолчанию под `detour` — без ошибки загрузки ([SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/SPEC.md), [FEATURE 019](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/019-SNIFF_GUARD/FEATURE.md), [LxBox#215](https://github.com/Leadaxe/LxBox/issues/215)).** TLS-over-TCP узел через `detour` больше не режет ClientHello на записи сам: без блока `lx.sniff_guard` ядро ведёт себя как апстрим, разрез — только по узловым `fragment` / `record_fragment`. Конфиг без блока загружается, а TLS-узлы через релеи, которые перенаправляют соединение по SNI (Xray `sniffing.destOverride` без `routeOnly`), перестают подниматься. Минимальная замена: `"lx": {"sniff_guard": {"tls": {"method": "record_fragment"}}}` — релеи, кроме `ssh`/`socks`, стартуют с разрезом, прямой путь без него; все релеи сразу — плюс `"detour_type": {"ssh": "suspect", "socks": "suspect"}`. Блок режет только узлы с SNI ≠ `server`; прежний дефолт резал и узлы с собственным именем — для них `"nodes": {"sni_mismatch": false}`. Генераторы конфига (LxBox, singbox-launcher) добавляют блок вместе с бампом ядра. `detour` в группу с выбранным `direct` теперь прямой путь — случай LxBox#215 (DPI дропает разрезанный ClientHello) по умолчанию не режется.
+- ⚠️ **`lx.quic_sniff_decoy` удалён — ошибка загрузки, замена `lx.sniff_guard.quic`.** Байт `0x00` перед QUIC Initial — метод `decoy_first_byte`: `"lx": {"sniff_guard": {"quic": {"method": "decoy_first_byte"}}}`. `send: always` ≈ стартовое `suspect`, `send: retry` ≈ стартовое `clean`; `mode`/`detour_type` → карта `detour_type`; `outbound_type` → `nodes.outbound_type` (общий для `tls` и `quic`). Ошибка — на любое значение ключа, включая `null`.
+- 🆕 **`lx.sniff_guard` — единый блок защиты TLS и QUIC от перенаправления по SNI.**
+  - Методы `tls`: `record_fragment` (разрез на записи, ноль по времени), `fragment` (TCP-сегменты, пауза `fragment_fallback_delay`), `delay` (одна запись двумя кусками с паузой, по умолчанию 300 мс); `quic`: `decoy_first_byte`, `delay` (второй Initial держится паузу).
+  - Кого защищать — `nodes.sni_mismatch` (по умолчанию `true`: только узлы с SNI ≠ `server`, `false` — все узлы, которые умеют защиту), `nodes.outbound_type`; с какого состояния стартует путь — карта `detour_type` (`never|clean|suspect`, ключ `"*"`), секция может перекрыть её своей.
+  - Метка пути (`direct` или тег ближайшего релея × протокол) учится по паре исходов на одном узле: упал без защиты и прошёл с ней → `suspect`, обратная пара → `clean`. Двигают метку только узлы с SNI ≠ `server`; узел с собственным именем (под защитой он только при `sni_mismatch: false`) получает личный отказ от защиты, метка не меняется. Проба на спуск и ожидающая пара — раз в 10 мин.
+  - Смена сети сбрасывает `direct` и незашифрованные носители (`socks`, `http` без TLS); метки зашифрованных релеев её переживают, с `persist` — и перезапуск (бакет `experimental.cache_file`, отпечаток релея сверяется при загрузке). `override: true` — блок сильнее узловых ключей.
+  - Швы: обёртка outbound'а (набор методов сверяется рефлексией, при расхождении узел без обёртки с warn), TLS-хук в std/uTLS/REALITY с решением на каждое рукопожатие, masque h2/h3 с порядком ног `auto`, trusttunnel h2/QUIC, XHTTP h2/h3, hysteria2/tuic (успех — когда соединение прожило 30 с), AmneziaWG (`ip: quic` или `i1`; решение на поколение сокета, метку не двигает).
+  - Не защищаются: naive, `engine: apple|windows`, полный gRPC-транспорт, shadowtls v3 без uTLS; на прямом пути — shadowtls v2/v3 и узлы с `tcp_fast_open`.
+  - Loopback-стенды против сниффера Xray (`lx-test/sniffguard/`): trojan+TLS, hysteria2, tuic, AmneziaWG через сниффящий релей и через middlebox на прямом пути — без блока не поднимаются, с каждым методом поднимаются, метки учатся по парам; `fragment` защищает и на прямом пути (апстрим выдерживает `fragment_fallback_delay`, когда ACK приходит быстрее 20 мс).
+- 🐛 **XHTTP-узел в `chain` получал 400 от Xray ([FEATURE 015](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/015-CHAIN/FEATURE.md), [#65](https://github.com/Leadaxe/sing-box-lx/issues/65)).** Strip `xhttp.padding` (в наборе по умолчанию) ставил `x_padding_bytes: "1"` и удалял `x_padding_obfs_mode`. Сервер Xray проверяет длину паддинга по своему диапазону (100–1000 без настройки) и читает его из настроенного размещения, поэтому узел на позиции ≥ 1 не поднимался против сервера с дефолтным паддингом или с obfs-режимом. Теперь длина фиксируется на нижней границе диапазона узла (`100`, если диапазон не задан), размещение и obfs-режим не меняются; значение из одного числа и неразбираемое значение остаются как есть.
+- 🐛 **Гонка на выборе узла urltest между дозвоном и переизбором ([SPEC 139](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/139-CONNECTION_TEST/SPEC.md), [#69](https://github.com/Leadaxe/sing-box-lx/issues/69)).** Штрафной путь читал `selectedOutboundTCP/UDP` без блокировки на каждом дозвоне (`pickForDialNode`), а `moveSelection` писал их под `g.access` мимо `selectedAccess`; поле — интерфейс, чтение могло быть рваным. Все чтения в `urltest_penalty_lx.go`, `urltest_failover_lx.go` и в `performSelectionUpdate` идут через `selectedLx()`, `moveSelection` пишет под `selectedAccess`. Регрессионный тест `TestSelectedOutboundConcurrentPickAndMove` под `-race`.
+- 🐛 **Tailscale уходил на DERP до перезапуска после самолечения WG ([SPEC 041](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/041-WG_HANDSHAKE_GIVEUP_REBIND/SPEC.md), [#66](https://github.com/Leadaxe/sing-box-lx/issues/66), [#67](https://github.com/Leadaxe/sing-box-lx/pull/67)).** Пересоздание сокета по неотвеченным рукопожатиям было включено в форке `wireguard-go` для любого устройства и доставалось встроенному Tailscale. Его magicsock закрывает сокеты и не переоткрывает их, поэтому одно обращение к выключенному узлу tailnet через ~15 с отключало приём прямого UDP: все узлы, включая exit node, шли через DERP. Теперь механизм выключен, пока потребитель не вызвал `SetGiveUpRebind`; WG/AWG-endpoint вызывает его как раньше, поведение туннелей не меняется. Коммит сабмодуля `wireguard-go` — `eec0f4c`.
+- 🐛 **Первое соединение после пробуждения ждало ~5 с при самолечении WG ([SPEC 041](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/041-WG_HANDSHAKE_GIVEUP_REBIND/SPEC.md), [#70](https://github.com/Leadaxe/sing-box-lx/issues/70)).** Приложение шлёт трафик сразу после пробуждения, инициация уходит в мёртвый сокет, следом приходит сигнал «устройство проснулось» и сокет пересоздаётся — но повторную инициацию глотал лимит `rekeyMinTimeout`, и туннель ждал таймер ретрансмита. Теперь пересоздание сокета снимает лимит с инициации, отправленной до него; досрочный триггер при этом шлёт одну инициацию, а не две подряд (вторую сервер отбрасывал как повтор). По юнит-тесту форка туннель поднимается за ~20 мс вместо 5,02 с; на устройстве не замерялось. Коммиты сабмодуля `7e80e35`, `3ed0471`.
+- 🔧 **AWG 3.x: меньше работы на каждый пакет ([#70](https://github.com/Leadaxe/sing-box-lx/issues/70)).** В профилях с `header_protection_key` и S4 на каждый пакет в обе стороны создавался новый шифр ChaCha20 в куче (384 Б), а паддинг S4 заполнялся из `crypto/rand` — системный вызов на пакет на ядрах без vDSO `getrandom` (Android до 6.11). Шифр теперь живёт на стеке вызывающего, паддинг каждый воркер шифрования берёт из своего ChaCha8, засеянного из `crypto/rand`; nonce защиты заголовка остаётся непредсказуемым и неповторяющимся (тест на раздельные источники по воркерам). Формат пакетов не меняется, совместимость проверена автором против amneziawg-go 0.0.20250522. Микробенчмарк на Apple M: защита заголовка 162 нс и 1 аллокация → 147 нс и 0; паддинг 32 байта 176 нс → 15 нс. Коммиты сабмодуля `0beee41`, `34bcc31`.
+- 🐛 **DNS-группа: отменённый запрос помечал здоровый сервер сбойным ([FEATURE 013](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/013-DNS_GROUP/FEATURE.md), [#68](https://github.com/Leadaxe/sing-box-lx/issues/68)).** Если вызывающий бросал запрос (соединение закрылось во время резолва), одиночный обмен и попытка в режиме выживания записывали серверу ошибку на `error_ttl`: медленный, но рабочий сервер терял статус текущего, группа могла уйти в режим выживания. Отмена вызывающим больше не пишет ошибку и не запускает веер; истёкший бюджет запроса по-прежнему считается отказом сервера. Веер эту проверку имел и раньше.
+- 🔧 **Синк `upstream/stable` v1.14.4 + 49 (`b33a1a5c6`, 2026-11-10; мерж `7536c99e8`).** Из апстрима: OpenVPN (совместимость сертификатов Netscape, шифров и групп TLS, перезаключение ключей), AnyConnect (петли аутентификации) и OpenConnect (переподключение после разрыва сервером); Snell (усечение UDP, мёртвые и протекающие переиспользуемые сессии); мультиплекс VMess/VLESS при параллельных потоках; ShadowTLS (кадрирование записей), Shadowsocks UDP, SOCKS (конвейерные данные после запроса, UDP-релей принимал датаграммы чужих хостов), hysteria obfs; link-local IPv6 без зоны и link-local назначения в TUN, GSO-кадры длиннее пачки чтения TUN; перепривязка слушателей и Tailscale после пересоздания интерфейса и смены сети; auto-redirect (зависание после закрытия, ответы входящих потоков в tun); Cloudflare Tunnel (регион после failover, постоянный отказ); обратное DNS-отображение, порядок кешированных sniff-данных, утечки буферов на ошибках маршрутизации, гонка Read/Close в кешированных соединениях. Зависимости `sagernet/*` в `go.mod` подняты по апстриму. Форк `sing-tun` перенесён на апстримный пин `cb941cc824bf` (`3a0e66c`), самолечение acceptLoop сохранено. Конфликты мержа: `common/dialer/default.go` (апстримный блок зоны link-local перед стадией connect SPEC 139), `go.sum`.
+
+#### v1.14.4-lx.33
+
+Stable после `v1.14.4-lx.32`, без rc-линии. База, сабмодули, Go и `go.mod` — как в lx.32 (sing-box `v1.14.4` + 9 коммитов `upstream/stable`, `8eb4395a3`, дрейф 0). Одна тема: QUIC-обманка перестраивается после полевого случая 2026-11-06 (masque h3 через `socks` с UDP-over-TCP без сниффера на пути поднимался только с выключенным байтом). Решения владельца 2026-11-06/07.
+
+- ⚠️ **`lx.quic_sniff_decoy` — только объект, байт по умолчанию на повторе ([SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md) §3–4).** Форма `{mode, outbound_type, detour_type, send}`; строка (`"detour"`) и bool (`true`) из lx.30–lx.32 — ошибка загрузки `lx.quic_sniff_decoy must be an object: {mode, outbound_type, detour_type, send}`. `mode` (`off` дефолт / `direct` / `detour` / `all`) — на каких путях байт разрешён, как раньше. `outbound_type` (дефолт `["masque"]`; допустимы `masque`, `hysteria2`, `tuic`, `trusttunnel`, `vless`, `vmess`, `trojan`, `wireguard`) — какие узлы шлют байт; байт идёт только там, где узел открывает QUIC: masque h3, trusttunnel с `quic: true`, vless/vmess/trojan с xhttp по h3, wireguard перед QUIC-образной пачкой AmneziaWG. `detour_type` (дефолт `["vless"]`; любой тип, кроме групп) — через релеи каких типов; тип ближайшего релея читается при дозвоне по участнику, которого фактически выбрала группа (`adapter/carrier_lx.go`, запись из `DetourDialer` и `ResolveChainLeaf`). `send` (`retry` дефолт / `always`): первая попытка без байта, неудачная повторяется с байтом — сразу при быстрой ошибке не-таймауте, иначе на следующем дозвоне; память на outbound и путь `clean → armed → decoy`, неудача с байтом возвращает в `clean`. `always` — поведение lx.30–lx.32. На `wireguard` `send` не действует: байт на каждом рукопожатии, повторы идут по тому же сокету. hysteria2/tuic судят о неудаче косвенно (conn закрыт раньше 30 с после дозвона). Объект из одних дефолтов канонизируется в отсутствие ключа; env-переопределения нет.
+  - Новые швы: `transport/trusttunnel/client_quic.go`, `transport/v2rayxhttp/http3.go`; masque — цикл попыток в `connectH3WithBudget` (в `auto` повтор с байтом до отката на h2); `common/lxdatagram/truncate.go` оборачивает conn hysteria2/tuic для оценки прошлого дозвона.
+  - Что ретрай не ловит — SPEC 060 HISTORY §3.5: хендшейк, ушедший не туда без ошибки (tuic с `insecure`), молчащий релей (первый URL-тест падает, второй проходит), сниффинг TLS на h2.
+  - Юниты `option/lx_test.go`, `common/lxdatagram/decoy_test.go`, `adapter/carrier_lx_test.go`, `transport/wireguard/handshake_burst_lx_test.go`; стендов на объектной форме ещё нет (стендовые цифры lx.30–lx.32 — SPEC 060 HISTORY §6).
+- ⚠️ **Удалён `lx.awg_masquerade` ([SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md) §3.4, [SPEC 153](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md)).** Любое значение — ошибка загрузки `lx.awg_masquerade is removed: the AmneziaWG masquerade burst is sent on every path`. Маскировочная пачка AmneziaWG шлётся на любом пути, как при дефолте `all` в lx.32; ветка фильтра `direct` снята, сам фильтр в `transport/wireguard/handshake_burst_lx.go` остаётся швом для байта по `outbound_type: wireguard`. Случай issue #64 (`ip=quic` через `detour` на релей со сниффингом) закрывается `lx.quic_sniff_decoy` с `wireguard` в `outbound_type`.
+- 📎 **Клиентам.** Конфиг LxBox 2.25.x с `"quic_sniff_decoy": "detour"` или с `awg_masquerade` на этом ядре не стартует — решение владельца 2026-11-07. В LxBox бамп пина ядра идёт вместе с правкой генератора конфига (writer блока `lx`: объектная форма `quic_sniff_decoy`, ключ `awg_masquerade` не писать) и подсказок; пользовательский конфиг LxBox не переписывает — только свой writer. Остальные клиенты: убрать `awg_masquerade`, перевести `quic_sniff_decoy` в объект (`"detour"` → `{"mode": "detour"}`, `true` → `{"mode": "all"}`; прежнее поведение «байт на каждом дозвоне» — `"send": "always"`).
+
+#### v1.14.4-lx.32
+
+Stable после `v1.14.4-lx.31`, без rc-линии. База, сабмодули, Go и `go.mod` — как в lx.31 (sing-box `v1.14.4` + 9 коммитов `upstream/stable`, `8eb4395a3`, дрейф 0). Темы: определение прямого пути для `lx.awg_masquerade` и `lx.quic_sniff_decoy`, дефолт `lx.awg_masquerade`.
+
+- 🔧 **`lx.awg_masquerade` по умолчанию `"all"` ([SPEC 153](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md)).** Решение владельца 2026-11-05: без ключа маскировочная пачка AWG идёт на любом пути, как до lx.31; `"direct"` (или `false`) — только на сокете ядра, через `detour` одна инициация. В lx.31 дефолтом был `"direct"`. Канонизация: `"all"`/`true` пишутся как отсутствие ключа. Случай issue #64 (`ip=quic` через `detour` на релей со сниффингом Xray) с дефолтами снова не поднимается — нужен `"direct"` либо `lx.quic_sniff_decoy: "detour"`/`"all"`.
+- 🐛 **`detour` на селектор с выбранным `direct` считался путём через прокси ([SPEC 153](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md), [SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md)).** Проверка «сокет ядра под conn» останавливалась на пакетном адаптере, в который группа (selector, urltest) заворачивает `ListenPacket`-сокет участника: AWG-endpoint с доменным адресом peer'а или несколькими peer'ами при `awg_masquerade: "direct"` терял пачку, а `quic_sniff_decoy` выбирал не тот режим. Connect-путь (один peer по IP) классифицировался верно. Вторая причина того же симптома — счётчики power-report дефолтного дайлера (libbox/boxdd с включённым отчётом).
+  - Проверка вынесена в `common/lxdatagram/kernel.go` (`IsKernelSocket`, `IsKernelPacketConn`), общая для SPEC 150/060/153; спускается по заменяемым ридерам, адаптерам групп и счётчикам до `syscall.Conn`, протокольный conn прокси-outbound'а обрывает спуск. Прямой путь — свойство conn после дайла: без `detour`, `detour` на `direct`, `detour` на группу любой вложенности с выбранным `direct`; группа, переключённая на прокси, считается detour со следующего дайла.
+  - Юниты `common/lxdatagram/kernel_test.go` (сбой воспроизведён до правки); сборка под `LX_TAGS`, тесты `option`, `common/lxdatagram`, `transport/wireguard`, `protocol/masque`, `protocol/tuic` зелёные. Живой туннель и устройство не прогонялись.
+
+#### v1.14.4-lx.31
+
+Stable после `v1.14.4-lx.30`, без rc-линии. База — sing-box `v1.14.4` + 9 коммитов `upstream/stable` от 2026-11-03 (`8eb4395a3`, тега апстрима нет), дрейф 0 ([SPEC 154](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/154-UPSTREAM_SYNC_1_14_4_PLUS_9/SPEC.md)); форк `sing-tun` на новом пине, Go 1.26.10 и остальные сабмодули не менялись; `go.mod` — бампы апстрима (cronet-go/naiveproxy v154, sing-openconnect, sing-tun). Темы: AWG с маскировкой через detour на сниффящий релей (SPEC 153, issue #64), туннель на старом узле после смены выбора в селекторе (SPEC 152), TrustTunnel в Android AAR, синк апстрима.
+
+- 🆕 **TrustTunnel в Android AAR ([FEATURE 018](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/018-TRUSTTUNNEL/FEATURE.md)).** Решение владельца 2026-11-05 отменяет «только desktop и роутеры» от 2026-10-16: `with_trusttunnel` добавлен в `sharedTags` `build_libbox` (основной и legacy AAR), `type: trusttunnel` в LxBox больше не отвергается как «not included in this build». Тег теперь во всех сборках релиза.
+- 🐛 **AWG с маскировкой через `detour` на релей со сниффингом Xray не поднимался ([SPEC 153](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md), issue #64).** Приманка QUIC Initial с SNI из `id` шла первой датаграммой ассоциации; Xray с `destOverride: ["quic"]` без `routeOnly` уводил весь WireGuard-поток на это имя. Чистый WG через тот же `detour` работал.
+  - Хук форка `wireguard-go` `SetHandshakeBurstFunc`: маскировочная пачка (`i1`–`i5`, `ip=quic` и т. п.) уходит как голые payload'ы до headroom; корневой ключ `lx.awg_masquerade`: `"direct"` (по умолчанию) — пачка только на сокете ядра, через `detour` одна инициация без пачки; `"all"` — как раньше, на любом пути.
+  - `lx.quic_sniff_decoy` (SPEC 060) достаёт до AWG: байт `0x00` перед QUIC-образной пачкой на выбранных путях (`direct`/`detour`/`all`).
+  - Серверные поля AWG не тронуты. Loopback-стенд 2026-11-05 с Xray `v26.10.31`: все восемь строк матрицы режимов — контроль `all`+`off` 0/3 с подменой назначения, дефолты 3/3, `all`+`detour` 3/3 с байтом, прямой путь 3/3, чистый WG через релей 3/3. Устройство не прогонялось.
+- 🐛 **Туннель с `detour` на селектор оставался на старом узле после смены выбора ([SPEC 152](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/152-TUNNEL_SESSION_INTERNAL_UNDERLAY/SPEC.md)).** `masque`, `trusttunnel`, `hysteria2`, `tuic` поднимали сессию в контексте первого пользовательского соединения; роутер помечал его внешним, и селектор без `interrupt_exist_connections` подложку не рвал — туннель жил через старый узел, пока жива сессия (жалоба LxBox «после смены узла в Направлении туннель надо перезапускать руками»). Апстрим закрыл то же у mux/anytls/ssh/snell через `ContextForMultiplexSession`, hysteria2/tuic — нет.
+  - Помощник `dialer.NewSessionDialerLx` на дайлере подложки: конструкторы masque и trusttunnel, внутри `lxdatagram.Dialer` для hysteria2/tuic; апстримные файлы не тронуты. WG/AWG не затронуты; Tailscale (прямой путь мимо detour) и гонка «выбор до дайла» в селекторе — вне задачи (§4). Юниты; живой стенд не прогонялся.
+- 🔧 **Синк `upstream/stable` v1.14.4 + 9 ([SPEC 154](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/154-UPSTREAM_SYNC_1_14_4_PLUS_9/SPEC.md)).** Из апстрима: установка соединения DNS-транспорта больше не держит пакетный цикл TUN (`exchangeAsync` в горутине); упаковка DNS-запроса копирует сообщение вместо правки общего (гонка параллельных запросов); gVisor-стеки OpenVPN/OpenConnect закрывают UDP-сокеты при смене адресов туннеля — единственный конфликт мержа, наш таймаут connect-фазы SPEC 052 наложен поверх; `sing-openconnect` (повторная аутентификация GPST на HTTP 200, AnyConnect CSD, парсинг опций F5); naiveproxy v154.0.8037.49-2 (`CRONET_GO_VERSION` бамп, зеркало musl SPEC 023 перезапущено).
+  - Форк `sing-tun` `94280f6` на пине `620991c`: strict route без IPv6 в ядре, маршрут по умолчанию при RAS-подключениях на Windows; патчи SPEC 040/130 целы. `wireguard-go`, `gvisor`, `utls` — пины прежние; `go list -m` — все четыре на `./submodules/*`.
+  - Сборка под `LX_TAGS`, тесты `dns/...`, `common/tls`, `route` зелёные; на устройстве не прогонялось (раннбук §1.4 — долг релиза).
+
+#### v1.14.4-lx.30
+
+Stable после `v1.14.4-lx.29`, сводит `rc.1`–`rc.3` и три правки после `rc.3`. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули и Go 1.26.10 не менялись; `go.mod` — бамп `rc.1` (полная релизная сборка прошла на `rc.1`–`rc.3`). Содержимое `rc.N` — в их разделах ниже; здесь только то, что изменилось после `rc.3`.
+
+- 🔧 **`lx.quic_sniff_decoy` — режимы вместо bool ([SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md) §4).** `"off"` (по умолчанию, как и отсутствие ключа), `"direct"` — только дозвоны на собственном сокете устройства (без `detour` или с `detour` на `direct`), `"detour"` — только дозвоны через другой outbound, `"all"`. Путь различается по тому, что лежит под QUIC: сокет ядра или conn другого outbound (та же проверка, что у усечения SPEC 150). `true`/`false` из `rc.3` принимаются и канонизируются в `"all"`/`"off"`; другая строка — ошибка загрузки. Стенд xr: `detour` через сниффящий релей 5/5, `direct` через тот же релей 0/5 (обманки на этом пути нет — так и задумано), `direct` без релея 5/5.
+- ⚠️ **Удалена env-переменная `LX_QUIC_SNIFF_DECOY`** (была в `rc.3` как отладочный оверрайд). Единственный выключатель — ключ.
+- ⚠️ **Удалены алиасы `route.lx_idle_suspend`, `route.lx_idle_suspend_reachable`, `route.lx_idle_teardown`** (SPEC 098, SPEC 020). Конфиг с ними не стартует: `unknown field`. Писать `lx.wg.idle_suspend`, `lx.wg.idle_suspend_reachable`, `lx.wg.idle_teardown`. `option/route.go` снова совпадает с апстримом байт в байт. LxBox и лаунчеру — проверить, что они пишут только `lx.wg.*`.
+
+#### v1.14.4-lx.30-rc.3
+
+Пререлиз после `v1.14.4-lx.30-rc.2`. База та же — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули, `go.mod` и Go 1.26.10 не менялись. Одна тема: QUIC через чужой релей, который сниффит SNI (SPEC 060).
+
+- 🆕 **QUIC-узлы через релей со сниффингом Xray ([SPEC 060](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md)).** Релей с Xray `sniffing` (`destOverride` с `quic`, без `routeOnly`) расшифровывал QUIC Initial, брал SNI и уводил поток на это имя: masque h3 падал с `different public key than pinned`, hysteria2/tuic с подставным SNI попадали на чужой хост. h2 через те же релеи работал (SPEC 060).
+  - Ключ `lx.quic_sniff_decoy` (bool, по умолчанию выключен): каждый дозвон masque h3, hysteria2 и tuic шлёт один байт `0x00` перед первым Initial. Xray решает по первой датаграмме потока — QUIC-сниффер выбывает, назначение остаётся набранным. Сервер отбрасывает байт не разбирая (снят fixed bit QUIC). Без задержки и лишнего хендшейка. Отладка: `LX_QUIC_SNIFF_DECOY=1`/`0` сильнее ключа.
+  - Стенд против Xray `v26.10.31`: masque h3 → WARP 0/5 → 5/5 (хендшейк 454–478 мс), 2 минуты жизни 12/12 без обрывов; hysteria2 и tuic на loopback 0/4 → 4/4. Port hopping hysteria2 (`server_ports`) не покрыт.
+  - Прототип задержки второго Initial (SPEC 150 §3.2, `LX_H3_INITIAL_DELAY`) удалён: он стоил ~200 мс на хендшейк.
+
+#### v1.14.4-lx.30-rc.2
+
+Пререлиз после `v1.14.4-lx.30-rc.1`. База та же — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули, `go.mod` и Go 1.26.10 не менялись. Одна тема: второй запрос LxBox по Taildrop (SPEC 149 §4). rc нужен LxBox и лаунчеру для пина под новый ключ и поле.
+
+- 🆕 **Tailscale: выключатель Taildrop узла и отправитель полученного файла ([SPEC 149 §4](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/149-TAILSCALE_LOGIN_TOGGLE/SPEC.md)).** Узел принимал файлы от своих устройств всегда, если file sharing включён в админке; клиент мог только удалить файл после приёма.
+  - Ключ endpoint'а `disable_taildrop` (bool, по умолчанию — как апстрим). При `true` peer API `/v0/put/` (PUT и GET докачки) отвечает 403 `Taildrop is disabled on this node` до апстримных проверок прав; `SendTaildropFiles` — `FailedPrecondition`; `canShareFiles = false`, у пиров `canReceiveFiles = false`. Файлы на диске остаются во входящих. Меняется reload'ом. Другие устройства по-прежнему видят узел получателем — это решает control, отказ они получают ответом 403.
+  - `TaildropFile.senderID` (proto 5, блок `lx_command`; libbox `TaildropFile.SenderID`) — stable node ID отправителя рядом с `senderName`; в памяти, после перезапуска ядра пустой у файлов с диска.
+  - В апстримных `taildrop.go`, `taildrop_send.go`, `endpoint.go`, `option/tailscale.go`, `adapter/tailscale.go`, `started_service_taildrop.go`, libbox `command_types_taildrop.go` — блоки и строки `// lx: SPEC 149`. Юниты в `protocol/tailscale` (под `-race`) и `daemon`; на живом tailnet не прогонялось, проверка — за LxBox.
+- 🧰 В `rc.1` вошла и [SPEC 150](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/150-QUIC_DETOUR_OVERSIZE_DATAGRAM/SPEC.md) (`6d80663b9`): QUIC-клиент (`masque` h3, `hysteria2`, `tuic`) с UDP через потоковый `detour` больше не умирает на датаграмме длиннее буфера. Раздел `rc.1` её не называл.
+
+#### v1.14.4-lx.30-rc.1
+
+Пререлиз после `v1.14.4-lx.29`. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0, сабмодули и Go 1.26.10 не менялись. Темы: вход по новому ключу и выключатель Tailscale-endpoint'а без перезапуска (SPEC 149, запрос LxBox), бамп `x/net`/`x/crypto`/`grpc` по govulncheck и строка режима oom-killer при старте (SPEC 148 §5). rc нужен LxBox для пина под SPEC 149 и служит полной релизной сборкой после смены зависимостей.
+
+- 🆕 **Tailscale: вход с новым ключом и выключение endpoint'а без перезапуска box ([SPEC 149](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/149-TAILSCALE_LOGIN_TOGGLE/SPEC.md)).** Узел, которому control отказал (`invalid key: API key does not exist`), раньше брал новый ключ только правкой конфига и полным рестартом сервиса.
+  - RPC `TailscaleLogin(endpointTag, authKey)` (блок `lx_command`) повторяет на работающем backend'е старт tsnet: `Start` с ключом и prefs старта, `editPrefs`, `StartLoginInteractive` в `NeedsLogin`; пустой ключ — интерактивный вход, AuthURL появляется в статусе endpoint'а. Вошедший узел (tsnet там ключ игнорирует) и выключенный — `FailedPrecondition`. Ключ не логируется.
+  - Выключатель — `adapter.EndpointToggle` за прежним `SetEndpointEnabled` (SPEC 106): `WantRunning=false/true`, идентичность и состояние узла сохраняются. Дайлы и listen через выключенный endpoint отказывают сразу, до резолва домена, а не по таймауту gVisor; апстримный `Logout` выключенного отказывает. Выключение не переживает рестарт: tsnet ставит `WantRunning=true` при каждом старте.
+  - `GetOutbounds.endpointState` для Tailscale: `up`/`disabled`/`down`. libbox — `CommandClient.TailscaleLogin`, javap-дельта — один метод `tailscaleLogin(String, String)`.
+  - Логика в `protocol/tailscale/toggle_lx.go`, в апстримном `endpoint.go` четыре блока `// lx:`. `protocol/tailscale` добавлен в lx-ci — раньше его тесты не бежали ни в одном шаге. Против живого control (tailnet/Headscale) не прогонялось, проверка — за LxBox.
+- 🔧 **Зависимости по govulncheck.** `golang.org/x/net` v0.57.0 → v0.62.0 (HTTP/2-сервер, квадратичный разбор HTML), `golang.org/x/crypto` v0.54.0 → v0.58.0 (SSH), `google.golang.org/grpc` v1.83.1 → v1.83.2; заодно `x/sys`, `x/text`, `x/term`, `x/sync`, `x/mod`, `x/tools`. govulncheck: 10 достижимых → 0. `x/net` ≥ v0.60 требует `go 1.26.0` в `go.mod` (апстрим — 1.25.5); сборки и раньше шли на `go.version`, Win7 тоже. Расхождение с апстримом — `// lx:` над директивой `go`, на синке брать пины апстрима, когда они не старше.
+- 🧰 **oom-killer пишет режим и пороги при старте слежения (SPEC 148 §5):** `mode: runtime_limit, limit: 200 MB, trigger: 195 MB, armed: 190 MB`, `, report only` при `killer_disabled` — по просьбе LxBox после проверки lx.29 на AVD.
+- 🧰 Мелочи: `lxd` снова собирается под freebsd (`Rlimit.Cur` там `int64`); нестабильный `TestLxNestedSelectorSwitchDuringDetourCloseNoDeadlock` ждёт асинхронного закрытия сокета узла вместо мгновенной проверки; комментарий `build_libbox` и ноты lx.38 — `ts_omit_taildrop` в AAR no-op, Taildrop в AAR есть.
+
+#### v1.14.4-lx.29
+
+Стабильный релиз после `v1.14.4-lx.28`, без rc-линии. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.10 с lx.28 не менялись; dry run релизной сборки не требуется). Одна тема: лимит памяти oom-killer по памяти Go-рантайма вместо RSS процесса и память рантайма в `Status` (SPEC 148, issue #62). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.29.md`.
+
+- 🆕 **Лимит памяти oom-killer сравнивается с памятью Go-рантайма, а не с RSS всего процесса; память рантайма — отдельным полем `Status` ([SPEC 148](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/148-OOM_KILLER_RUNTIME_MEMORY/SPEC.md), [issue #62](https://github.com/Leadaxe/sing-box-lx/issues/62)).**
+  - LxBox встраивает libbox в процесс приложения: Go-ядро, Flutter и Dalvik — один PID. Пользовательский «лимит памяти» (200/384/512/768 МБ) приходит как `SetupOptions.OomMemoryLimit`, режим `memory_limit` сравнивал его с RSS всего процесса (`/proc/self/statm`). У репортёра RSS 461 МБ при лимите 200: первый опрос через 100 мс после старта пробивал порог → `ResetNetwork` (все соединения рвутся), `FreeOSMemory`, отчёт OOM; дальше таймер оставался в `triggered` навсегда (выход требует RSS < 190 МБ) и опрашивал statm 10 раз в секунду; любой лимит > 0 выключал слежение за свободной памятью системы. Живая Go-куча по allocs-профилю репортёра — 42 МБ.
+  - Новый режим политики `runtime_limit` включается флагом `SetupOptions.OomMemoryLimitHeap` (bool, дефолт `false` — поведение апстрима) при лимите > 0. Величина — память, которую рантайм держит у ОС: `runtime/metrics` `/memory/classes/total:bytes − /memory/classes/heap/released:bytes` (ей управляет `debug.SetMemoryLimit`), читается без stop-the-world. Пороги `limit − 5 MiB` (сброс) / `limit − 10 MiB` (armed) и GC soft limit `limit*4/5` не меняются: «200 МБ» — цель GC 160 MiB, сброс при 195 MiB рантайма. Слежение за свободной памятью системы в этом режиме остаётся включённым, состояние — по любому из двух условий; нулевое показание `Available` считается неизвестным (macOS с cgo отдаёт 0 вне jetsam-лимита). Rate-trigger не меняется.
+  - ✨ `Status.memoryRuntime` (10) / `StatusMessage.MemoryRuntime` рядом с `Memory`, который остаётся RSS процесса; отдаётся на каждом тике статуса независимо от настроек oom-killer. javap-дельта — один аддитивный геттер `getMemoryRuntime`. LxBox покажет «Core runtime: X / limit» рядом с RSS процесса.
+  - Флаг, а не автоматика по платформе: тот же путь лимита обслуживает boxdd и lxd, где процесс — само ядро и RSS — правильная мера. Ключа конфига нет: поле опций сервиса внутреннее (`json:"-"`), как `MemoryLimitOverride`, режим доступен только через `SetupOptions`. Без флага, при лимите 0, на iOS NE, в boxdd и lxd ничего не меняется.
+  - Логика — в новых `service/oomkiller/runtime_limit_lx.go` и пакете-помощнике `common/lxmemory`; в апстримных файлах только точки переключения `// lx: SPEC 148`: `policy.go` (`resolvePolicyMode`, `String`), `timer.go` (`readMemorySample`/`nextState`/`belowTrigger`/`logDetails`/`newAdaptiveTimer`, `explicitSafetyMargin`), `option/oom_killer.go`, libbox `setup.go`/`command_server.go`/`command_types.go`, daemon `started_service.go`/`instance.go`, proto. Девять юнитов под `-race` (`service/oomkiller` 6, `common/lxmemory` 3), оба пакета добавлены в lx-ci. На устройстве не прогонялось, проверка — за LxBox после тега: нет `memory threshold reached` на старте с WARP-группой WG и лимитом 200; `MemoryRuntime` ≠ `Memory` в `Status`; тестовая утечка кучи по-прежнему даёт сброс.
+  - Тезис issue «GC soft limit 160 MiB сидит ниже живой кучи с пулами WG» allocs-профилем не подтверждён: живая куча 42 МБ, soft limit не связывающий. Оборот аллокаций там (WG-пулы 108 МБ за жизнь при 16 МБ живых, `x/net socket.recvMsg` 43 МБ) — тема SPEC 020. Rate-trigger на Android не армируется: baseline ставит только darwin-коллбэк давления.
+
+- 🧰 **Сверка зависимостей (раннбук §2a)** — как в lx.28: Go `go1.26.10` = stable, `CRONET_GO_VERSION` совпадает, NDK `r28c` против `r28` осознанно, `upstream.version` = `1.14.4`; `grpc` v1.83.1 и `go-jose/v4` v4.1.4 — наши бампы по Dependabot (lx.22), остаются.
+
+#### v1.14.4-lx.28
+
+Стабильный релиз после `v1.14.4-lx.27`, без rc-линии. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.10 с lx.27 не менялись; dry run релизной сборки не требуется). Две темы по двум пакам поддержки LxBox 2026-11-01: зависание остановки за masque-dial через detour (SPEC 146, issue #61 и #50) и перехват `cache.db` новым Box (SPEC 147, issue #61). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.28.md`.
+
+- 🐛 **Остановка ядра висла навсегда, если в этот момент masque собирал h3-туннель через `detour` ([SPEC 146](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/146-MASQUE_CLOSE_WEDGE_DETOUR_DEADLINE/SPEC.md), [issue #61](https://github.com/Leadaxe/sing-box-lx/issues/61), [issue #50](https://github.com/Leadaxe/sing-box-lx/issues/50)).** Два пака поддержки LxBox 2026-11-01 (ядро lx.26, Android), один стек в обоих: outbound `masque` с `vhttp: h3` и `detour` на selector, выбран vless + WebSocket; пинг узла ещё шёл, когда нажали Stop. `Box.Close` стоял в `masque.Outbound.Close` на `runMu`, который `ensureSession` держит на весь `connect`; dial висел в `quic.DialEarly`: одноразовый транспорт quic-go гаснет, `Transport.Close` делает `SetReadDeadline(now)` чужому `PacketConn` и ждёт выхода слушателя, а у WebSocket-conn `SetReadDeadline` — `os.ErrInvalid`, слои над ним пробрасывают вызов как есть, и слушатель спит на живом TCP к relay. Отмена контекста не помогала: `doDial` после `ctx.Done()` всё равно ждёт результат. Приложение бросало остановку по потолку, старый Box оставался в процессе с `cache.db` под блокировкой, следующий старт падал (#61; второй слой — SPEC 147). Гипотеза #50 про `bindAccess` WG-endpoint'а дампами не подтвердилась (WG в них нет); по решению владельца #50 считается тем же случаем.
+  - `connectH3WithBudget` заворачивает UDP-conn от detour в `deadline.NewConn`, если `deadline.NeedAdditionalReadDeadline(udpConn)` (XUDPConn и vless.Conn его сообщают; websocket-, gRPC- и XHTTP-транспорты по этому признаку уже заворачивают conn для себя): чтение идёт через фоновую горутину, `SetReadDeadline(now)` его прерывает, `Transport.Close` возвращается, dial отдаёт ошибку. Прямой `*net.UDPConn` признак не несёт — путь без detour не меняется.
+  - Состояние (`sess`, `closed`, новый `connectCancel`) — под отдельным `stateMu`, который не держится через I/O; `runMu` остаётся сериализатором сборки туннеля. `Close` под `stateMu` ставит `closed`, отменяет идущий connect и сносит сессию, `runMu` не берёт. Сессия, собравшаяся после `Close`, сносится в `ensureSession`, вызывающий получает `errOutboundClosed`. В `auto` отмена вызывающим по-прежнему не вердикт о ноге (SPEC 108).
+  - Корень в quic-go (`Transport.Close` одноразового транспорта ждёт слушателя, не закрывая чужой conn) не трогаем, пин не правим. Апстримные hysteria2/tuic отдают quic-go detour-conn тем же способом и несут тот же латентный дефект — вне скоупа форка.
+  - `protocol/masque/outbound.go` (`// lx: SPEC 146`), в `lifecycle_test.go` проверки состояния переведены на `stateMu`, новый `close_wedge_lx_test.go`: три юнита red/green под `-race` (dial на conn без дедлайнов возвращается; `Close` не ждёт dial в полёте; сессия, собранная после `Close`, сносится). На устройстве не прогонялось.
+- 🐛 **Старт после зависшей остановки падал с `initialize cache-file: timeout` ([SPEC 147](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/147-CACHEFILE_RELEASE_TAKEOVER/SPEC.md), [issue #61](https://github.com/Leadaxe/sing-box-lx/issues/61)).** LxBox на Android: `start or reload service: initialize cache-file: timeout`, помогали force-stop и «сброс DNS-кэша» (удаление файла). bbolt держит `flock` на собственном открытом файловом описании, поэтому второй `Open` того же файла в том же процессе конфликтует; cache-file — первый внутренний сервис, его cleanup идёт последним в `Scope.Close`, и зависание любого компонента держит файл навсегда. LxBox работает в одном процессе: ограниченная остановка бросает зависший Box, новый Box ждёт файл 10 с (`Timeout: 1s`, десять попыток) и падает; самолечение реагирует только на повреждение файла, не на блокировку.
+  - Новый `experimental/cachefile/release_lx.go`: идемпотентный `CacheFile.Release()` останавливает таймер отложенных метаданных FakeIP и синхронно их записывает, ставит флаг `released`, снимает регистрацию и закрывает bbolt вне `dbAccess`. После флага `view`/`batch`/`update` возвращают `os.ErrClosed` (`Scope.Close` его отфильтровывает), `resetDB` файл не переоткрывает.
+  - Процессный реестр открытых экземпляров по пути: `start()` перед `bbolt.Open` зовёт `Release()` у чужих экземпляров на том же пути (Warn `cache-file: taking over <path> from a previous instance still holding it`) и открывает файл без 10 с ожидания; цикл ожидания остаётся как защита от чужого процесса. Cleanup в `Start` — `c.Release` вместо голого `db.Close()`: штатное закрытие тоже снимает регистрацию, реестр не копит мёртвые экземпляры.
+  - Метаданные FakeIP: `FakeIPMetadata()` на старте читает и удаляет ключ, обратно его пишет `Store.Close` fakeip-хранилища, до которого зависший Box не доходит. Теперь `FakeIPMetadata()` засевает прочитанное в отложенные метаданные (если там пусто), `FakeIPReset()` их обнуляет, `Release()` всегда дописывает указатель — перехват не превращается в сброс FakeIP-выдач.
+  - Отвергнуто: `Release()` первым шагом `Box.Close` (пункт 2 issue) — реестр закрывает внутрипроцессный случай целиком, межпроцессный не лечит ни один вариант, а ранний `Release` ломал бы запись метаданных fakeip-хранилища при каждом штатном стопе на всех платформах.
+  - Если два Box живут одновременно (VPN и проба LxBox), старший теряет кеш: записи — `os.ErrClosed`, чтения — пустые значения; файл он испортить не может.
+  - Вставки `// lx: SPEC 147` в `cache.go` и `fakeip.go`, `box.go` не тронут. Пять юнитов в `release_lx_test.go`, два из них красные без хуков (перехват без ожидания; указатель FakeIP после сессии без выдач); `go test -race` зелёный. Пакет добавлен в lx-ci — раньше его тесты нигде не бежали. На устройстве не прогонялось; страховка LxBox §703 (удалить файл и повторить старт) остаётся дежурной.
+
+- 🧰 **Сверка зависимостей (раннбук §2a)** — как в lx.27: Go `go1.26.10` = stable, `CRONET_GO_VERSION` совпадает, NDK `r28c` против `r28` осознанно, `upstream.version` = `1.14.4`; `grpc` v1.83.1 и `go-jose/v4` v4.1.4 — наши бампы по Dependabot (lx.22), остаются.
+
+#### v1.14.4-lx.27
+
+Стабильный релиз после `v1.14.4-lx.26`, без rc-линии. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.10 с lx.26 не менялись; dry run релизной сборки не требуется). Одна тема: статус пира WG/AWG по сессиям (SPEC 145, запрос LxBox). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.27.md`.
+
+- 🐛 **Статус пира WG/AWG после включения или пробуждения показывал хендшейк уничтоженной сессии ([SPEC 145](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/145-WG_PEER_SESSION_STATUS/SPEC.md)).** `device.Down()` (тумблер SPEC 106, сон по простою SPEC 020, AWG-guard, пауза сети) стирает ключевые пары, но не `lastHandshakeNano` и rx/tx; после следующего `Up` пир в `up` показывал хендшейк прошлой сессии, и потребитель по CONSUMERS §2 видел его «на связи» до 180 с, хотя ключей нет. Карточка LxBox: выкл/вкл тумблером — зелёный пир с «1 min ago».
+  - Сессия начинается при сборке устройства и при каждом `Up` после `Down`; `Up` уже поднятого устройства её не начинает. `lastHandshakeUnix` — только текущей сессии, хендшейк старше её начала отдаётся как `0`. Пока устройство лежит (`asleep`, `disabled`), ответ прежний — видна прошлая сессия.
+  - ✨ `PeerStatus.sessionRxBytes`/`sessionTxBytes` (6/7) — байты с начала сессии; `rxBytes`/`txBytes` остаются итогом устройства с момента сборки. libbox — `SessionRxBytes`/`SessionTxBytes`; CLI `sing-box api peers` — колонки `RX (TOTAL)`/`TX (TOTAL)`: байты сессии, в скобках итог. Расширение, не изменение формы: старый клиент получает правильный `lastHandshakeUnix` без доработки.
+  - `transport/wireguard/peer_session_lx.go` (снимок счётчиков и момент перед `Up`, вычитание в `PeerStatuses`); в `endpoint.go` — вызовы `// lx: SPEC 145` в `Suspend`/`Resume`/`Teardown`/`applyPauseEvent`. wireguard-go и amneziawg-go не тронуты; `TransferTotals` тика простоя читает сырые счётчики. Юниты и живой юнит выкл/вкл на паре endpoint'ов через loopback; на устройстве не прогонялось.
+
+- 🧰 **Сверка зависимостей (раннбук §2a)** — как в lx.26: Go `go1.26.10` = stable, `CRONET_GO_VERSION` совпадает, NDK `r28c` против `r28` осознанно, `upstream.version` = `1.14.4`; `grpc` v1.83.1 и `go-jose/v4` v4.1.4 — наши бампы по Dependabot (lx.22), остаются.
+
+#### v1.14.4-lx.26
+
+Стабильный релиз после `v1.14.4-lx.25`, без rc-линии. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.10 с lx.25 не менялись; dry run релизной сборки не требуется). Две темы: ключ `hosts` у DNS-группы (SPEC 143, issue #60) и поправки выравнивания MTU после полевого случая с WARP над большим селектором (SPEC 144). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.26.md`.
+
+- 🐛 **`lx.mtu_align`: зажим IP-туннеля через прокси и ниже 1280 — IPv6 внутри туннеля молча умирал ([SPEC 144](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/144-MTU_ALIGN_STREAM_BOUNDARY/SPEC.md)).** Поле 2026-10-31 (CPH2411, 4G): WG-endpoint к WARP (`mtu` 1280, IPv4 + IPv6 внутри) с `detour` на selector из ~150 узлов — URLTest `-1`, IPv4 внутри работает, IPv6 висит без ошибки. Один член селектора (vless) ходил через группу с WG `mtu` 1280; по модели 120 «любой узел с `detour`» отдавал ёмкость detour'а наверх, минимум по группе давал 1280, и туннель зажимался до 1220 — а gvisor при MTU < 1280 не поднимает IPv6-endpoint (`calculateNetworkMTU` → `ErrInvalidEndpointState`). Ограничения на пути нет: WG-пакеты идут в vless байтами TCP-потока, TCP под ним сам берёт MSS. Полный отказ от `lxmtu` рассмотрен и отвергнут: он откатил бы дефолт «hysteria2 через WARP на IPv6-сервер работает» (#37, lx.14) и контракт звеньев `chain` 073 §3.5, а перепаковка на входе в туннель невозможна — другой конец чужой (WARP), датаграмма неделима, обратного сигнала к quic-go/стеку верхнего WG нет.
+  - Ёмкость наверх несут только IP-туннели и группы; любой другой узел — граница с ∞, что бы ни лежало под его `detour` (прокси доставляет пакет верхнего узла целиком — потоком или своей нарезкой). Таблица классов по протоколам не заводится (пришлось бы сверять каждый протокол по коду на каждом синке, ошибка молчит); цена — транзит через `shadowsocks`/`socks` UDP с собственным `detour` на туннель больше не выравнивается, там явный `mtu` верхнему туннелю. Предупреждение tuic native снято: sing-quic режет крупные UDP-сообщения сам.
+  - Пол 1280 для IP-туннелей с IPv6 внутри (WG с IPv6-префиксом в `address`; masque всегда): предел ниже 1280 поднимается до 1280, значение выше предела пути получает Warn `… leaves N bytes, below the IPv6 minimum 1280; outer packets will be fragmented`. Туннель только с IPv4 внутри опускается как раньше; явный `mtu` < 1280 не повышается.
+  - AmneziaWG: `s4` входит в накладные (`32 + s4 + IP/UDP`), причина в логе — `− 80 ipv4 (s4 20)`.
+  - `common/lxmtu` (`graph.go`, `map.go`, `table.go`), `protocol/chain/mtu.go`; апстримных файлов ноль. Юниты: полевой случай, граница, пол, `s4`, карта опций chain, пре-пасс `box_lx_mtu_test.go`. На устройстве не прогонялось.
+- ✨ **DNS-группа: ключ `hosts` — локальные имена отвечаются до выбора сетевого сервера ([SPEC 143](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/143-DNS_GROUP_HOSTS_OVERLAY/SPEC.md), [issue #60](https://github.com/Leadaxe/sing-box-lx/issues/60)).** Адреса серверов outbound и endpoint резолвятся через `domain_resolver`, а он идёт в транспорт напрямую, минуя DNS-правила: ни `predefined`, ни правило `server: hosts` до них не доходят. Сам `hosts` резолвером по умолчанию быть не может — на любое имя вне списка он отвечает NXDOMAIN, — а в `servers` группы он запрещён: NXDOMAIN для группы — валидный ответ, и `hosts` выигрывал бы любой режим. Повод — LxBox#185: свой WireGuard-сервер и WARP по IPv4 и IPv6 под одним локальным именем, семейство выбирает `strategy`.
+  - Необязательный ключ группы `hosts` — теги серверов типа `hosts`, опрашиваемых до выбора цели в порядке ключа. Попадание — запрос A/AAAA, участник знает имя (`PreferredDomain`) и ответил NOERROR: ответ отдаётся как есть, сетевые участники не опрашиваются. Пустой NOERROR для семейства, которого нет в записи, — тоже попадание: запись только с IPv4 на запрос AAAA в сеть не уходит, `strategy: ipv6_only` на таком имени адреса не даёт, как `/etc/hosts`. Промах (имя неизвестно, другой тип запроса, не NOERROR) — путь SPEC 033 без изменений во всех режимах.
+  - Участники `hosts` без записей здоровья, вне веера и режима выживания, не становятся `current`, в `GetDNSGroups` не попадают; прото не менялось. На попадании — `effective` = тег `hosts`, одна проба `answered` и стадия `dns_member` проверки соединения (SPEC 139); промах трассу не меняет. Кеш без изменений.
+  - Валидация: `servers` обязателен и непуст; `hosts`/`fakeip` в `servers` отвергаются на старте, ошибка для `hosts` называет ключ `hosts`; в ключе — только тип `hosts`, без дубликатов, без тега самой группы и пересечений с `servers`; теги `hosts` — зависимости старта группы. Конфиг без ключа ведёт себя как прежде.
+  - Поле — в lx-блоке `option/dns.go`, логика — в пакете `dns/transport/group`; апстримных файлов не тронуто. Тесты пакета под `-race`, включая реальный транспорт `hosts` через менеджер. На устройстве не прогонялось.
+
+- 🧰 **Сверка зависимостей (раннбук §2a)** — как в lx.25: Go `go1.26.10` = stable, `CRONET_GO_VERSION` совпадает, NDK `r28c` против `r28` осознанно, `upstream.version` = `1.14.4`; `grpc` v1.83.1 и `go-jose/v4` v4.1.4 — наши бампы по Dependabot (lx.22), остаются.
+
+#### v1.14.4-lx.25
+
+Стабильный релиз после `v1.14.4-lx.24`, без rc-линии. База — sing-box `v1.14.4`, `upstream/stable` `c005f3530`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.10 с lx.24 не менялись; dry run релизной сборки не требуется). Три темы: конвейер аплинка XHTTP `packet-up` (issue #58, SPEC 141), шесть расхождений клиента XHTTP с Xray по инспекции (SPEC 142) и стадии участников DNS-группы с `lost_race` у проигравших её fan (SPEC 139, issue #59 переоткрыт). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.25.md`.
+
+- 🐛 **Проверка соединения: стадия `dns_member` на каждого участника DNS-группы; проигравшие fan — `SKIPPED` с `lost_race`, не `FAILED` (SPEC 139 §4, §5.13, issue #59).** Поле (LxBox v2.25.18-rc.3 на lx.24, эмулятор, группа `dns_ru` = UDP + DoT + DoH, `fastest`, после истечения `win_ttl`): выборы гонят всех трёх, UDP отвечает, `tls` DoT и DoH закрыты `FAILED` `context canceled` через 1–2 мс после `tcp_connect`, рядом под группой, различимые только портом. Группа гонит участников на контексте запроса; после ответа победителя `dns.Client` делает `cancel()`. `lost_race` ставил только dialer на сокетных стадиях.
+  - `dns/transport/group/conntest_lx.go`: стадия `dns_member` (subject = тег, `type`, `outbound`, `rcode` при SERVFAIL) на путях single, survival и fan. `collectFan`: победитель — OK; участник, закончивший после него, — `SKIPPED`, `lost_race=<id dns_member победителя>`; упавший сам при живом запросе — `FAILED`.
+  - `Stage.EndRace(ctx, err)` в `common/lxtrace`: сбой при отменённом (не истёкшем) контексте → `SKIPPED`, `lost_race=0`; таймаут остаётся `FAILED` (§5.11). Им закрываются `tls` (`common/tls/conntest_lx.go`) и `dns` упавшего резолва (`dns/client_trace_lx.go`).
+  - Цена мержа: два существующих вызова `// lx: SPEC 139` в `common/tls/client.go` передают контекст рукопожатия; новых вставок в апстримные файлы нет. Пакет группы — наш.
+  - Тесты: `TestParallelLoserHandshakeLostRace_LX` (настоящий DoT-участник, застрявший в рукопожатии, против быстрого через `dns.Client`) до правки красный с `context canceled`; `TestParallelOwnFailureStaysFailed_LX`, `TestSingleMemberStage_LX`, `TestEndRace`, `TestLxHandshake*`, `TestDNSStageCancelledLostRace_LX`. Под `-race`: `common/lxtrace`, `common/dialer`, `common/tls` (lx), `dns`, `dns/transport/...`, `daemon`, стенд `lx-test/conntest`. На устройстве — нет.
+- 🐛 **XHTTP `packet-up`: аплинк одного потока упирался в одну запись за RTT (issue #58, SPEC 141).** `sendPacket` ждал заголовки ответа каждого upload-POST и дочитывал тело до того, как верхний слой мог записать следующий кусок, а записи не склеивались: при записях 32 КиБ и 100 мс до сервера — около 2,6 Мбит/с при любом канале, для датаграмм поверх VLESS/XHTTP (WG-цепочка, запись = пакет ~1,4 КиБ) на порядок ниже. Задевало `auto` без REALITY — он разворачивается в `packet-up`, то есть большинство узлов за CDN. Теперь как у Xray (`splithttp/dialer.go`): записи копятся в буфере `sc_max_each_post_bytes`, цикл отправки забирает буфер целиком и переходит к следующему POST, как только тело предыдущего записано на провод (`httptrace.WroteRequest`, x/net h2 и quic-go его дают), ответы собираются в фоне — не больше 16 незавершённых на поток; сервер складывает пакеты по `seq` (`uploadQueue`, окно `sc_max_buffered_posts` = 30). На HTTP/1.1 — по одному POST (net/http без pipelining, SPEC 104), склейка действует. Сбой любого POST (ошибка, не-200, таймаут) роняет поток сразу — `Write` и `Read` возвращают причину (дыра в серверной очереди не заживает); таймаут поста растёт с размером (5 с + размер/16 КиБ/с), чтобы полный склеенный POST не валил медленный аплинк. `h_max_request_times`, брейкер SPEC 076 и `GetBody`-повтор, conn-контекст SPEC 072, дедлайны SPEC 050 — без изменений. `packetConn` переехал в `transport/v2rayxhttp/packetup.go`, апстримных файлов ноль. Тесты: стаб с удержанным ответом (POST 1 приходит до ответа POST 0 — проверка из issue), склейка, разбиение, потолок in-flight, сбой, `Close` с удержанным ответом; фикстура issue над живым h2c и над HTTP/3; `-race`. Фикстура репортёра на починенном дереве: 512 КиБ при задержке ответа 100 мс — 1615 мс → 4 мс, одним POST. Против живого Xray и на устройстве не прогонялось.
+- 🐛 **XHTTP: шесть расхождений с Xray по инспекции клиента (SPEC 142).** Инспекция `transport/v2rayxhttp` против Xray `1b1647cd`, проведённая вместе с 141. (1) `stream-up`: горутина upload-POST дренировала ответ, не глядя на статус и конец, — сервер Xray в `packet-up` отвечает 400 на POST без seq, dial проходил, а `Write` висел на пайпе до дедлайна; теперь не-200 и конец ответа рвут пайп с причиной (`unexpected upload status` / `upload stream ended by server`), как у клиента Xray; наш `Close` нейтрален. (2) Слэш базового пути по правилу `GetNormalizedPath` (session или seq в пути → `<path>/`) применялся только к stream-one: при `session_placement` header/query/cookie и `seq_placement: path` (дефолт) download-GET шёл на `/up`, сервер сверяет префикс `/up/` → 404 на каждом dial; теперь правило для всех запросов, размещения вне пути оставляют путь как в конфиге (SPEC 002 §9). (3) h2-транспорт без `IdleConnTimeout`: ClientConn с висящим запросом на вытесненном из пула соединении (fresh-пробы SPEC 139 к молчащему узлу, `Close` packet-up во время POST) не закрывался никогда — теперь 300 с как у Xray, транспорт собирается в `http2.go`. (4) `h_keep_alive_period: 0` на HTTP/2 уходил как `ReadIdleTimeout 0` = без пингов; теперь 45 с (`ChromeH2KeepAlivePeriod`), отрицательное — выкл, как на HTTP/3. (5) Без `User-Agent` на провод шёл `Go-http-client/2.0`, на packet-up POST — `Content-Type: application/octet-stream`; теперь набор Chrome fetch() как `TryDefaultHeadersWith(header, "fetch")` (UA с версией от даты, client hints, `Sec-Fetch-*`, `Priority`, `Cache-Control`/`Pragma`, `Accept`), пользовательские заголовки не перезаписываются, `User-Agent: golang` оставляет дефолт net/http, другой UA — verbatim; `Content-Type` с POST снят. (6) `baseURL` ставил путь через `URLSetPath`: `/a%2Fb/` уходил как `/a/b/`, `/100%/` — ошибка парса; теперь путь буквальный, как у Xray. Тест на каждую находку (`audit_test.go`), `TestSessionPlacement/query` переведён на слэш; `-race` чистый; апстримных файлов ноль. В поле не прогонялось.
+- 🧰 **lx-ci:** `dns/transport/group` добавлен в race-шаг SPEC 139 — тесты DNS-группы до этого не шли ни в одном шаге.
+- 🧰 **Сверка зависимостей (раннбук §2a)** — как в lx.24.
+
+#### v1.14.4-lx.24
+
+Стабильный релиз после `v1.14.3-lx.23`, промоут rc-линии `lx.24` (rc.1–rc.3) плюс правки после rc.3. **База — sing-box `v1.14.4`**, `upstream/stable` `c005f3530`, дрейф 0. Форк-сабмодули, тулчейн и зависимости с rc.3 не менялись: dry run релизной сборки прогнан перед rc.3, rc.3 собран `lx-release` зелёным. Две темы: проверка соединения (SPEC 139, релизы 1 и 2) и синк апстрима до `v1.14.4` (SPEC 140). Пользовательские ноты — `docs-lx/releases/v1.14.4-lx.24.md`.
+
+- 🆕 **`StartConnectionTest` (SPEC 139, issue #59, LxBox#176)** — подробности по rc в секциях rc.1 (протокол, стадии, CLI, libbox), rc.2 (полный ответ `app_dns`), rc.3 (выводы §6, `fresh` на вложенных уровнях, стадии REALITY / WG / MASQUE / TrustTunnel, правило корня). После rc.3:
+  - **Редирект — это ответ.** HTTP-клиент проверки больше не идёт по 3xx (`CheckRedirect` → `http.ErrUseLastResponse`), у стадии `http` атрибут `location`. Полевой случай LxBox на rc.3: `https://ya.ru` → 302, второй маршрутизированный dial отбит правилом «одно соединение на проверку», а ошибка копирования после обмена в `onRouteClosed` ставила `pathFailed` → `http` SKIPPED, `http_status=0`, корня нет. Теперь `onRouteClosed` считает обрывом пути только ошибку до поднятого первого хопа (`dialFinished`). Тесты: `TestStartConnectionTest_RedirectNotFollowed_LX` (через узел), подтест стенда `RedirectIsTheAnswer` (через роутер).
+  - **DoH и DoH3 под `fresh`** идут через одноразовый клиент (`HTTPSTransportWrapper` / `http3.Transport`), закрытый после обмена; стадия `dns` — `connection=new`, `pool=detached`. Таймаут под `fresh` не сбрасывает боевой клиент. Цена мержа: по две `// lx: SPEC 139` в `dns/transport/https.go` и `dns/transport/quic/http3.go`, логика в `https_fresh_lx.go` и `quic/http3_fresh_lx.go`. `dns/transport/quic` добавлен в race-шаг lx-ci.
+  - **`wg_handshake` несёт `detour`** — тег detour'а endpoint'а из `Dependencies()`.
+  - **Hysteria2/TUIC изнутри — не планируется** (SPEC §7): соединение долгоживущее, классификация ошибки покрывает частые случаи, видимость потребовала бы форка sing-quic.
+  - Проверено под `-race`: `daemon`, `protocol/wireguard`, `dns/transport`, `dns/transport/quic`, стенд `lx-test/conntest`. Правки после rc.3 на устройстве не прогонялись; issue #59 открыт до прогона на устройстве.
+- 🧰 **Синк `upstream/stable` до `v1.14.4` (SPEC 140)** — см. rc.3: роутер разворачивает группы сам, наш urltest остановлен на группе (`resolveOutboundLx`), сабмодули `wireguard-go` `7188e15`, `sing-tun` `1cb218d`.
+- 🐛 **Гонка на `selectedOutboundTCP/UDP` urltest (хотфикс, реестр HOTFIXES)** — см. rc.1.
+- 🧰 **Сверка зависимостей (раннбук §2a)** — как в rc.3: Go `go1.26.10` = stable, `CRONET_GO_VERSION` совпадает, NDK `r28c` против `r28` осознанно, `upstream.version` = `1.14.4`; алерты Dependabot (`grpc` < 1.83.2, `chi` < 5.4.0) не закрыты по той же причине.
+
+#### v1.14.4-lx.24-rc.3
+
+Кандидат после `v1.14.3-lx.24-rc.2`. **База — sing-box `v1.14.4`**, `upstream/stable` `c005f3530`, дрейф 0: синк 66 коммитов, отложенный на rc.1 и rc.2, закрыт (SPEC 140). Тулчейн и форк-сабмодули менялись — dry run релизной сборки прогнан перед тегом. Две темы: синк апстрима и релиз 2 проверки соединения.
+
+- 🧰 **Синк `upstream/stable` до `v1.14.4` (SPEC 140).** Мерж `3ff086951`.
+  - Апстрим теперь сам разворачивает группы в роутере (`metadata.OutboundChain`, `Selected(network)`, `AttachConnection`, `Now()` удалён) и отдаёт соединение конечному узлу. Наш urltest выбирает узел в `DialContext` во всех режимах: штрафы и переход на другой узел в том же соединении (SPEC 054), `round_robin` и sticky, failover. Поэтому роутер останавливается на urltest-группе (`resolveOutboundLx`) — поведение групп как в rc.2.
+  - Регистрация Selector для `interrupt_exist_connections` (SPEC 064) снята в пользу апстримной; тесты 064 и дедлока вложенных селекторов (084) переведены и зелёные.
+  - Список соединений по-прежнему показывает узел, а не группу (`displayChainLx`); detour-хвост (SPEC 017) — в `tracker_lx.go`.
+  - Пауза WG применяется по текущему состоянию (апстрим `cc022098f`) внутри нашей асинхронной схемы SPEC 071, страж усыплённого устройства (SPEC 020) сохранён.
+  - Ответ из кэша DNS, отклонённый правилами (новое в апстриме), виден в потоке DNS-запросов как `rejected (cached)`.
+  - Форк-сабмодули: `wireguard-go` `7188e15` (сон учитывается в возрасте ключей и хендшейков, пауза вне замков таймеров), `sing-tun` `1cb218d` (апстрим закрыл реестр Windows 7, наш SPEC 130 упрощён).
+- 🧰 **Сверка зависимостей (раннбук §2a).** Go `go1.26.10` = stable; `go`/`toolchain`, `CRONET_GO_VERSION` совпадают; NDK `r28c` против `r28` — осознанно; `upstream.version` = `1.14.4`; `require` отличается только нашими `grpc` v1.83.1 / `go-jose` v4.1.4 / `genproto` (lx.22). Алерты Dependabot (`grpc` < 1.83.2 — xDS-сервер, `chi` < 5.4.0 — `ClientIPFromXFF`) не закрыты: этот код не используется, а оба бампа тянут `golang.org/x/net` и `x/crypto` новее апстрима.
+- 🆕 **Проверка соединения, релиз 2 (SPEC 139).** `.proto` и публичный API libbox не менялись.
+  - **Выводы:** все 15 кодов §6 с уровнями `info` / `warning` / `problem` — зависимость от узла вне маршрута, резолв по правилам в контексте источника, цикл резолва, правила по адресу не вычислены, пакет вне VPN, fakeip (нет записи, адрес у другого домена, не сохраняется, пул оборачивается быстрее TTL, IPv6 без IPv6 у TUN), отклонённые HTTPS-запрос и QUIC, REALITY не признал клиента, обрыв после `NO_ACK`, частичное переиспользование.
+  - **`fresh`** обходит кэш DNS на вложенных уровнях и берёт собственное соединение из пула DNS; переиспользованное соединение с DNS-сервером — стадия `connection` с `REUSED` и возрастом.
+  - **Новые стадии:** `reality` (`accepted` / `dest_cert` / `invalid_cert`, дочерняя `tls`), `wake` и `wg_handshake` у WG/AWG, `quic` и `auth` у MASQUE и TrustTunnel; `reuse=uncontrolled` при `fresh` там, где модуль сам держит соединения (Hysteria, Hysteria2, TUIC, naive, AnyTLS, mux, gRPC, MASQUE, TrustTunnel).
+  - **Корень:** сбой, который шаг сам пережил (MASQUE откатился с h3 на h2, TrustTunnel заменил протухшую сессию), больше не становится корневой причиной; `DEPTH_CONNECT` с поднятым первым хопом — без корня.
+  - **fakeip:** `connectIP` из диапазона — `route` FAILED с атрибутом `fakeip=no_record`.
+  - Границы (SPEC §7): собственный detour и lookup пира WG-endpoint'а, хоп Hysteria2/TUIC и соединения DoH/DoH3 в трассу не попадают.
+  - Цена мержа: `dns/client.go` +2, `dns/transport/conn_pool.go` +11, по строке в `common/tls/reality_client.go`, `dns/transport/fakeip/store.go`, `protocol/wireguard/endpoint.go`.
+  - Проверено под `-race`: юниты всех затронутых пакетов, стенд `lx-test/conntest` с новым узлом Hysteria2, сквозной REALITY-тест, независимое ревью диффа (четыре находки исправлены). На устройстве — нет.
+
+#### v1.14.3-lx.24-rc.2
+
+Кандидат после `v1.14.3-lx.24-rc.1`. База та же — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`; дрейф по-прежнему отложен: `upstream/stable` впереди на те же 66 коммитов до `c005f3530` (`v1.14.4`), синк — отдельная задача перед стабильным `lx.24`. Тулчейн, зависимости и форк-сабмодули с rc.1 не менялись — dry run релизной сборки не требуется. Одна тема: стадия `app_dns` проверки соединения по полевому прогону rc.1 на LxBox v2.25.18-rc.1.
+
+- 🆕 **`app_dns` отдаёт полный ответ DNS (SPEC 139, issue #59).** Только атрибуты, `.proto` и публичный API libbox не менялись.
+  - **`answer` — по атрибуту на запись**, в порядке секции ответа, в формате представления без класса: `A 300 192.0.2.1`, `CNAME 300 youtube-ui.l.google.com.`, `HTTPS 300 1 . alpn="h2,h3" ech="…"`. Владелец пишется впереди, только когда отличается от запрошенного имени: после CNAME — `youtube-ui.l.google.com. A 300 142.251.154.119`. Значения SvcParam в кавычках, как печатает `dig`. Склеенный атрибут `answers` убран.
+  - **`source`** — `network`, `cache` (с `cache_age` в секундах и `stale=true` для просроченного ответа, отданного на время фонового обновления) или `local` (fakeip и hosts: ядро ответило без запроса). Нет `source`, когда ответило само правило (`predefined`, `reject`).
+  - **`authority` при NXDOMAIN/NODATA** — по атрибуту на запись секции authority в том же формате (`google.com. SOA 30 ns1.google.com. …`); TTL — тот, с которым отрицательный ответ лежит в кэше, min(TTL SOA, minimum).
+  - Стадия `dns` при ответе из кэша (`REUSED`) несёт `cache_age` на любом уровне вложенности. Возраст = TTL, с которым запись положена в кэш, минус остаток её жизни; запись перечитывается только под трассой.
+  - Цена мержа: две строки `// lx: SPEC 139` в `dns/client.go` (попадания в кэш в `beginExchange` и `questionCache`); логика в `dns/client_trace_lx.go`, `daemon/started_service_conntest_lx.go`, `common/lxtrace` (`Stage.Children`).
+  - Проверено под `-race`: тест через настоящий DNS-роутер и клиент (UDP-сервер на loopback, CNAME-цепочка, NODATA, NXDOMAIN, fakeip, hosts), формула возраста на подложенной записи кэша, стенд `lx-test/conntest`. На устройстве — нет.
+
+#### v1.14.3-lx.24-rc.1
+
+Кандидат после `v1.14.3-lx.23`. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`. **Дрейф отложен осознанно:** `upstream/stable` ушёл вперёд на 66 коммитов до `c005f3530` (`v1.14.4`: Go 1.26.10, бампы `sing`, `sing-tun`, `quic-go` mod.12, `sing-quic`, `sing-vmess`, `wireguard-go`, `tailscale`; фиксы «URL test failover for routed connections», «outbound group resolution and interruption for nested groups», «flow close racing with tracker attach», «WireGuard pause and sleep handling» и другие). Синк — отдельная задача по раннбуку §1–3 (сабмодули до ядра) перед стабильным `lx.24`; этот rc выпускается ради полевой проверки SPEC 139 на устройствах и роутере, не дожидаясь мержа. Тулчейн и зависимости с lx.23 не менялись — dry run релизной сборки не требуется. Одна тема: активная проверка соединения.
+
+- 🆕 **`StartConnectionTest` — активная проверка соединения через весь конвейер ядра (SPEC 139, релиз 1; issue #59, LxBox#176).** Ядро выполняет настоящий запрос от имени источника (пакет, процесс, адрес устройства, inbound) и отдаёт потоком дерево стадий: DNS приложения → правило → группа → узел → его detour'ы → резолв адреса узла (потомок dial, со своим DNS-сервером и его detour'ом) → TCP → TLS → транспорт → HTTP. Глубина выбирается: только DNS (`DEPTH_DNS`), до выбора маршрута без соединений (`DEPTH_ROUTE` — закрывает оба вызова из #59: DNS через роутер и матч правила с развёрнутой цепочкой), до поднятого туннеля (`DEPTH_CONNECT`), до HTTP-ответа. Итог несёт корневую причину — самый глубокий сбой, остановивший конвейер, в том числе вне маршрута (мёртвый detour DNS-сервера, который резолвит адрес узла). Переиспользованное (кэш DNS, живое соединение пула XHTTP) помечается `REUSED` с возрастом, а не `OK` с нулём; протоколы без подтверждения (VLESS, VMess, Trojan, Shadowsocks) дают `proxy_header` `NO_ACK`, подтверждает только `first_byte`. Цикл резолва ловится сразу по предкам, не по таймауту. Проверка не меняет состояние групп (выбор selector'а, историю urltest, штрафы, деградацию failover, закрепления `round_robin`, счётчик ротации), все свои соединения закрывает по концу, включая соединение в пуле DNS-транспорта, и видна в списке соединений как `lx-connection-test`. Через роутер или напрямую через узел (`outboundTag`); `connectIP` вместо ответа DNS; `fresh` обходит кэш DNS и пул транспорта XHTTP; одновременно не больше 4 проверок, таймаут 15 с (потолок 60 с), тело до 256 KiB (потолок 1 MiB), потолок 512 стадий с признаком `stagesTruncated`. libbox: `NewConnectionTestRequest()` с сеттерами, `CommandClient.StartConnectionTest(request, handler)` с `OnStage`/`OnResult`/`OnError`, `Cancel()`; CLI `sing-box api connection-test <url>` с флагом на каждое поле. Словари стадий и выводов открыты: неизвестный `kind` клиент рисует как kind + subject + атрибуты. **Релиз 1 без выводов** (`findings` пусты): коды вроде `dependency_outside_route`, `fresh` на вложенных уровнях DNS, вердикт REALITY, стадии WG `wake`/`wg_handshake` и fakeip — релиз 2 по полевому опыту; протокол полон уже сейчас и в релизе 2 не меняется. Без `with_lx_command` — `Unimplemented`. Проверено на стенде `lx-test/conntest` под `-race` (критерии приёмки 1, 2 без вывода, 3, 8, 9, 10, 11), на устройстве и роутере — нет. Цена мержа: однострочные `// lx: SPEC 139` вызовы в `route/route.go`, `route/conn.go`, `common/dialer/{default,detour,resolve}.go`, `common/tls/client.go`, `protocol/wireguard/endpoint.go`, `dns/client.go`, `dns/router.go`, `dns/transport/conn_pool.go`, `protocol/group/urltest.go`; логика в `common/lxtrace` и `*_lx.go`; без трассы в ctx каждая вставка стоит одну проверку `ctx.Value`. ([SPEC 139](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/139-CONNECTION_TEST/SPEC.md), [отчёт](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/139-CONNECTION_TEST/IMPLEMENTATION_REPORT.md))
+- 🐛 **Стадия `tls` у VLESS, Trojan, VMess, WS, gRPC, DoT и DoH не писалась:** `tls.NewDialer` звал `aTLS.ClientHandshake` напрямую, минуя `tls.ClientHandshake`. Путь handshake в `defaultDialer.dialContext` получил свою пару `// lx: SPEC 139`. Поведение без трассы не меняется.
+- 🐛 **Гонка данных на `selectedOutboundTCP/UDP` группы urltest (хотфикс, реестр HOTFIXES).** `performSelectionUpdate` пишет поля под `updateAccess`, а `Select`/`Now`/`References` читают их без замка (апстрим); с lx.22 первый `update()` менеджера ссылок идёт в горутине (SPEC 136), и `References` ловит гонку на старте — стенд SPEC 139 под `-race` был красным на критерии 9. Поля теперь читаются через `selectedLx()` и пишутся через `setSelected*Lx()` под отдельным `selectedAccess sync.RWMutex`, читатели не ждут пробу failover под `updateAccess`. Условие снятия — апстрим защитит чтения замком или атомиком.
+- 🧰 **lx-ci:** новый шаг `go test -race` для `common/lxtrace`, `common/dialer`, `daemon`, `experimental/libbox`, `dns`, `dns/transport`, `protocol/group`, `protocol/chain`, `transport/v2rayxhttp` и стенда `lx-test/conntest` — до этого `daemon/` и `experimental/libbox/` в lx-ci только `go vet`'ились. `common/tls` в шаг не включён: его собственный набор идёт минуты под `-race`, строки SPEC 139 там покрыты e2e-тестами `daemon`.
+- 🧰 **Сверка зависимостей с `upstream/stable` (раннбук §2a).** Go `go1.26.8` против `1.26.10` у stable — отставание входит в отложенный синк; `go`/`toolchain` в `go.mod` и `CRONET_GO_VERSION` совпадают; NDK `r28c` против `r28` — осознанно (`lx:` в `lx-release.yml`); `upstream.version=1.14.3` против `v1.14.4` — база до мержа; `require` отличается нашими бампами `grpc` v1.83.1 / `go-jose` v4.1.4 / `genproto` (lx.22) и непринятыми бампами stable из тех же 66 коммитов. Форк-сабмодули с lx.23 не двигались.
+
+#### v1.14.3-lx.23
+
+Стабильный релиз после `v1.14.3-lx.22`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули, `go.mod` и Go 1.26.8 с lx.22 не менялись; dry run релизной сборки не требуется). Три темы: `round_robin` обходит мёртвый слот пула (внешний вклад), восстановленный пре-пасс быстрого выключения, сторож закрытия с дампом горутин.
+
+- 🐛 **Пре-пасс быстрого выключения (SPEC 030) был мёртв с `v1.14.0-lx.37` — восстановлен явным обходом endpoint'ов.** `box.Close` → `Router.QuiesceForShutdown` рассылал `DevicePause()` в расчёте, что каждый WG/AWG-endpoint в колбэке паузы сделает `device.Down()` и отпустит сокет до прохода закрытия. Апстримный `6364d9a5f` «Fix WireGuard endpoint stopping on device sleep» (2026-09-08) убрал реакцию транспортного endpoint'а на `EventDevicePaused` намеренно — WG живёт через сон устройства, SPEC 020 на это рассчитывает; у нас он с lx.37. С тех пор пре-пасс не закрывал ни одного сокета, каждый `device.Close()` ждал `stopping.Wait()` на своём `ReadFrom`, по одному. Регресс-тест лежал в `test/` (модуль не собирается) и не бегал; `endpoint_pause_dispatch_lx_test.go` проверял только диспетчеризацию через хук. Теперь `QuiesceForShutdown` обходит `EndpointManager.Endpoints()` и зовёт `adapter.ShutdownQuiescer.QuiesceForShutdown()` у каждого WG/AWG-endpoint'а: `closing` ставится сразу (все wake-пути отказываются), `device.Down()` идёт асинхронно под `pauseOpAccess` со штампом `pauseSeq` (контракт SPEC 071), устройство не закрывается — teardown остаётся за `Close`. Реакция на паузу — апстримная, без изменений. Регресс подтверждён красным тестом на живом устройстве (`TestQuiesceForShutdownClosesSocket`); стенд перенесён в `lx-test/startclose`; в lx-ci добавлен шаг `go test` для `transport/wireguard`, `protocol/wireguard`, `route` и стендов — апстримный `test.yml` на `lx` не срабатывает, и до сих пор эти пакеты лишь `go vet`'ились. CONSTRAINT про `6364d9a5f` — в FEATURE 005. Найдено при перечитывании путей закрытия по issue #50. ([SPEC 030](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/030-FAST_BOX_SHUTDOWN/SPEC.md))
+- 🔍 **Зависший stop сам пишет дамп горутин в лог (SPEC 030, issue #50).** Единственный репорт зависшей остановки на Android (~6 ч простоя) пришёл без дампа, а снять его клиент не успевает — система убивает сервис. Теперь, если закрытие endpoint'ов (SPEC 030) или весь `Box.Close` не вернулись за 20 с, ядро один раз пишет на уровне `Warn` полный `runtime.Stack` всех горутин кусками ≤ 3 КиБ по границам строк (чтобы logcat не обрезал), перед ним — теги endpoint'ов, ещё не вернувших `Close` (`not returned yet: [...]`), после — `completed after …`, если закрытие всё же завершилось. Закрытие сторож не прерывает и не ускоряет: это сбор доказательства для #50, не фикс. Быстрый stop в логе не меняется. Репортёру: прислать все записи `goroutine dump [i/M]` и строку `not returned yet` из лога ядра за минуту зависания. ([SPEC 030 §8](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/030-FAST_BOX_SHUTDOWN/SPEC.md))
+- 🐛 **`urltest` `round_robin`: мёртвый узел пула получал свою долю новых соединений весь простой, если живой замены нет (SPEC 138).** Полевой отчёт с роутера: пул 4 из 4 на двух серверах — простой одного сервера отправлял в него половину новых соединений, пул 3 из 4 — треть. Выбор теперь обходит слот, у узла которого нет history (последняя проба провалилась): с закреплением — ключи мёртвых слотов поровну расходятся по живым (по остатку хеша `hash / pool`) и возвращаются, как только узел ответит, ключи живых слотов не двигаются; без закрепления — ротация по живым слотам поровну; живых нет (холодный старт, тотальный простой) — как раньше. Пул, раскладка слотов, References и кэш достижимости не меняются; ошибка дайла пул по-прежнему не трогает. Обход начинается с провала пробы — до `interval` плюс таймаут пробы. Сигнал — общая history узла: несостоявшийся ручной тест задержки с коротким таймаутом или отказ дайла `least_test`-группы с тем же узлом тоже выводит его из ротации до ближайшего дотеста пула. На роутере (бэкпорт на v1.14.2-lx.11, пул 3 из 4) — 0 отказов с ~20 с простоя сервера против ~1/3 у стокового ядра весь простой. Одна строка в lx-блоке `urltest.go`, остальное в `urltest_balance_lx.go`. Внешний вклад: issue #53 и PR #54 от @tmmgn. ([SPEC 138](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/138-URLTEST_RR_SKIP_DEAD_SLOT/SPEC.md))
+- 🧰 **Сверка зависимостей с `upstream/stable` (раннбук §2a).** Go `go1.26.8` == stable; `go`/`toolchain` в `go.mod`, `CRONET_GO_VERSION`, `upstream.version` — совпадают; NDK `r28c` против `r28` — осознанно (`lx:`-комментарий в `lx-release.yml`); `require` отличается от stable только нашим бампом `grpc` v1.83.1 / `go-jose` v4.1.4 / `genproto/googleapis/rpc` из lx.22 (Dependabot). Форк-сабмодули с lx.22 не двигались. Тулчейн и зависимости не менялись — dry run релизной сборки не нужен.
+
+#### v1.14.3-lx.22
+
+Стабильный релиз после `v1.14.3-lx.21`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули и зависимости с lx.21 не менялись, Go 1.26.8). Три темы: хуки жизненного цикла ядра в `lxd`, два хотфикса по полевым дампам — старт ядра ждал чужой mux-handshake (issue #49) и утечка закрытых Box'ов через masque `auto` (issue #52).
+
+- 🐛 **masque `vhttp: auto`: закрытый Box оставался в памяти после каждого apply — GC-спираль на роутере (SPEC 137, issue #52).** Роутер владельца после 6,2 дня работы `lxd`: CPU 94 % на обоих ядрах при нулевом трафике, `heap_inuse` 227 МБ у `GOMEMLIMIT=200MiB`, 1,96 млн GC; снятие узлов из конфига и Stop/Start ядра не помогали. В куче ≈ 40 TUN'ов (GRO-таблицы sing-tun 72 МБ) при одном живом read-loop и 61 горутина `masque.(*Outbound).connect.func2.1` без единой `connectH3`: ветка «h3 отказал до таймера → h2 поднялся» звала `drainH3()` на уже потреблённый `h3Done`, дренаж ждал пустой канал вечно, его замыкание держало `Outbound` → `o.ctx` → весь закрытый Box (TUN, WG-устройства, NAT). Теперь дренаж только для ноги, которая ещё не отвечала (`!h3Returned`); тест `TestAutoFastH3FailureThenH2LeavesNoGoroutine` красный до правки, зелёный после. Код с lx.27 (SPEC 074). После рестарта процесса на том же конфиге: куча 108 МБ, CPU 6 %. `GOMEMLIMIT` инсталлятора не меняется. ([SPEC 137](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/137-MASQUE_DRAINH3_LEAK/SPEC.md))
+- 🐛 **`Box.Start` стоял 10–16 с на стадии `Started`: `ReferenceManager.Start` ждал мьютекс sing-mux, занятый URL-тестом (SPEC 136, issue #49).** Апстримный `ReferenceManager.Start` синхронно вызывает `update()` → `SetKeepIdleConnections(false)` неиспользуемому mux-outbound'у → `Client.CloseIdleConnections` → `c.access.Lock()`; замок держит URL-тест с `PostStart`, потому что `Client.offer` не отпускает `access` на весь сетевой dial. Первый `update()` теперь уходит в горутину перед `loop()`, `update` остаётся однопоточным (`// lx: SPEC 136` в `route/reference.go`); юнит red/green + `-race`. ([SPEC 136](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/136-REFERENCE_MANAGER_START_MUX_LOCK/SPEC.md))
+- ✨ **lxd: хуки жизненного цикла ядра — `<state_dir>/hooks/{pre_start,post_start,post_reload,post_stop}` (SPEC 135, FEATURE 014).** Ключ `hooks` в `daemon.json` (`enabled`, `timeout_seconds`, `unsafe_skip_owner_check`); демон создаёт каталог и заготовки на каждом старте, нетронутая заготовка = «не настроено». Скрипт получает факты о ядре в окружении (`LXD_EVENT`, `LXD_REASON`, `LXD_CLIENT`, `LXD_CONFIG_SHA`, `LXD_TUN_ADDRESS`/`LXD_TUN_INTERFACE`/`LXD_TUN_MTU`/`LXD_TUN_AUTO_ROUTE` и `_PREV`, `LXD_ERROR`); `pre_start` fail-closed, `post_*` идемпотентные; `post_stop(fatal)` после провального старта, `post_reload(rollback)` после отката; `hooks/core_snapshot.json` пишет демон → `post_stop(recover)` при загрузке после аварийного выхода. Синхронно, вывод в `<каталог лога>/hooks/<event>.log`, таймаут → `SIGKILL` группе, `flock` против гонки старого и нового демона под procd, root-owned гейт перед каждым запуском; `hooks` в `GET /admin/status`. Один `// lx:` аксессор `InterfaceName()` на tun-inbound. Инсталлятор OpenWrt ставит `term_timeout 30`. Главный сценарий — системный DNS на tun и обратно, политика у админа (issue #12). Unix; на Windows ключ игнорируется с WARN. ([SPEC 135](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/135-LXD_HOOKS/SPEC.md))
+
+#### v1.14.3-lx.21
+
+Стабильный релиз после `v1.14.3-lx.20`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули и зависимости с lx.20 не менялись, Go 1.26.8). Три темы: TrustTunnel (outbound и inbound), роутерные сборки `linux-386`/`linux-riscv64` и UPX-копии для маленького overlay с поддержкой в `lxd update` и установщике OpenWrt.
+
+- ✨ **trusttunnel: outbound и inbound протокола AdGuard TrustTunnel — в бинарях (SPEC 133/134, FEATURE 018, #46).** HTTP/2 поверх TLS или HTTP/3 поверх QUIC, прокси-`CONNECT` с Basic-авторизацией; TCP — `CONNECT host:port`, UDP — кадры `CONNECT _udp2`, `_check`. Два слоя: ядро протокола `transport/trusttunnel/` (клиент и сервер, H3 под `with_quic`, без импортов sing-box — годно к выносу) и адаптеры `protocol/trusttunnel/`; опции `option/trusttunnel.go`, регистрация `include/trusttunnel{,_stub}.go`, помеченные блоки `// lx:begin trusttunnel` в `include/registry.go` и `constant/proxy.go` (`TypeTrustTunnel`, подпись «TrustTunnel»), глобальный `lx.trusttunnel.idle_timeout`. Тег `with_trusttunnel` — в конце `LX_TAGS` (desktop + роутеры); в AAR (`sharedTags`) его нет. Сессия: одна на узел, без PING и keepalive, idle-teardown 5 мин без пакетов, stale-бюджет 3 с + одна пересборка, health check только по событиям. Преамбула H2 — SETTINGS `1:65536;2:0;4:6291456;6:262144` и `WINDOW_UPDATE 15663105` как у Chrome (окна через `http.HTTP2Config` + `http2.ConfigureTransports`); порядок параметров и `MAX_FRAME_SIZE 16384` остаются как в x/net, закреплено `TestHTTP2Preface`. Совместимость с официальными endpoint 1.1.0 и клиентом 1.1.11 снята на стенде `lx-test/trusttunnel/`; не сделано: ICMP, правила `client_random`, проверка на живом VPS. ([SPEC 133](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/133-TRUSTTUNNEL_OUTBOUND/SPEC.ru.md), [SPEC 134](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/134-TRUSTTUNNEL_INBOUND/SPEC.ru.md), [FEATURE 018](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/FEATURES/018-TRUSTTUNNEL/FEATURE.ru.md))
+
+- 🖥️ **Сборки `linux-386` и `linux-riscv64`.** Обе входят в `build_linux_musl` по апстримному рецепту `linux-*-musl` (`GO386=sse2`); cronet поставляет `linux_386_musl` и `linux_riscv64_musl`, так что NaïveProxy на этих роутерах остаётся. Зеркало тулчейна получило те же две ноги.
+- 🗜️ **UPX-копии `*.upx.tar.gz` для `linux-arm64` и `linux-mipsle-softfloat`** — для роутеров с маленьким overlay и без USB: ~17 МБ на флеше вместо 75–90 МБ ценой RAM и более долгого старта. Шаг необязательный внутри musl-ног: UPX 5.2.1 закреплён sha256, упакованный бинарь обязан отработать `version` под qemu-user до попадания в `dist/`, `continue-on-error` не даёт провалу UPX сорвать релиз. Копии режутся на каждом теге, включая rc: упаковка добавляет 40–66 с к ногам в ~4 мин параллельно с AAR (~10 мин), стенка времени не растёт.
+- 🔄 **`lxd update` оставляет сжатый бинарь сжатым и проверяет место под новый.** Бинарь с магией загрузчика UPX в первых 4 КиБ обновляется на `sing-box-<ver>-<platform>.upx.tar.gz`; если копии в релизе нет (шаг CI необязательный), берётся обычный архив, и об этом пишется. Проверка свободного места раньше шла только против работающего бинаря: упакованные 17 МБ проходили, архив скачивался, а запись 75–90 МБ падала на полном overlay; теперь проверка идёт и против размера из tar-заголовка до первого байта. `/admin/info` отдаёт `packed`, чтобы клиент («Скачать ядро» в лаунчере) не тянул на маленький overlay обычный архив в 4–5 раз больше (Leadaxe/singbox-launcher#146). ([SPEC 129](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/129-LXD_UPDATE/SPEC.md))
+- 🔧 **Самопроверка `lxd` при старте — только macOS и Windows (SPEC 132, #40).** На Linux проверка не могла ничего отвергнуть (она ключуется на метках launchd), а её WARN называл launchd и несуществующий там `--service=copy`; на прошивках с world-writable `/` ни один путь её не проходил. Linux и остальные платформы проверку пропускают.
+- 📦 **Установщик OpenWrt 1.3.** `uname -m` `i686` → `linux-386`, `riscv64` → `linux-riscv64`; порог предупреждения о месте поднят под бинарь 75–90 МБ (было 50 МБ под ~41 МБ) и учитывает место уже установленного бинаря; `SHA256SUMS` забирается до архива; при менее чем 100 МБ свободных и наличии `.upx`-копии для архитектуры установщик предлагает её (по умолчанию да).
+- 🐛 **`ProxyDisplayName` для `chain` отдаёт «Chain», а не «Unknown».** Через него идут `type` в Clash API и `Libbox.ProxyDisplayType`; для `TypeChain` не было `case`. Двухстрочный `lx`-блок в `constant/proxy.go` записан в SPEC 073.
+- 📝 Документация: urltest — failover оставляет деградировавший узел (SPEC 126); страница донатов с криптоадресами, ссылка из README.
+
+#### v1.14.3-lx.20
+
+Стабильный релиз после `v1.14.3-lx.19`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули и зависимости с lx.19 не менялись, Go 1.26.8). Одно изменение — прогресс скачивания в `lxd update`, запрос из окна Service лаунчера.
+
+- ✨ **`lxd update` пишет прогресс скачивания.** После `downloading <asset>` тело ответа молча уходило в распаковку, и в окне Service лаунчера строка висела без движения всю закачку (на роутере — десятки секунд). Теперь тело обёрнуто в считающий reader: не чаще раза в секунду (`progressInterval`) печатается `update: downloading <asset>: 3.2 / 14.1 MiB (23%)`, итог — из `Content-Length` (у GitHub-ассетов есть; нет — только байты). Раз в секунду, а не на каждый процент: лог — файл, который демон отдаёт хвостом и лаунчер опрашивает раз в секунду, `\r` в нём не работает; на 15 МиБ выходит десятки строк. `fetch` в `updateEnv` возвращает ещё размер, часы — `now` (тесты подставляют свои). Тест `TestDownloadProgress`. ([SPEC 129](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/129-LXD_UPDATE/SPEC.md))
+
+#### v1.14.3-lx.19
+
+Стабильный релиз после `v1.14.3-lx.18`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули и зависимости с lx.18 не менялись, Go 1.26.8). Один хотфикс по живому прогону `lxd update` lx.17 → lx.18 на RouteRich.
+
+- 🐛 **`lxd update` из лаунчера откатывался: команда из `commands` наследовала fd TUN и держала интерфейс через рестарт службы (SPEC 128 §2.3).** Живой прогон lx.17 → lx.18 на RouteRich 2026-10-13: оба исправления SPEC 129 §2.6 отработали и всё равно `… is up but the core did not start: … TUNSETIFF: device or resource busy, rolled back`. Держал `lxd-tun0` не старый демон, а сам `update`: порождённый демоном detached-процесс получает копию таблицы дескрипторов, sing-tun открывает `/dev/net/tun` без `CLOEXEC`, и ядро держит интерфейс, пока открыта последняя копия — то есть пока `update` ждёт в шаге 8b, дольше 10 с ретрая демона. Теперь перед порождением любой команды (и перед `check` в apply) демон ставит `FD_CLOEXEC` всем своим дескрипторам выше stderr (`/proc/self/fd`; без `/proc` — перебор до soft-лимита, не выше 65536): в самом демоне ничего не закрывается, флаг срабатывает только на `exec` в потомке. Правка в lxd, не в форке sing-tun — до fd добирается только `commands`. Тесты `TestMarkInheritableCloseOnExec`, `TestCommandDoesNotInheritDescriptors`. **Переход с lx.17/lx.18 на эту версию кнопкой невозможен** — порождает ещё старый демон: один раз `stop` ядра → `update` → `start` из лаунчера (ядро остановлено, копировать нечего; после рестарта run-state `stopped`, `start` поднимает новое ядро) либо `sing-box lxd update` по SSH. ([SPEC 128](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/128-LXD_COMMANDS/SPEC.md), [SPEC 129](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/129-LXD_UPDATE/SPEC.md))
+
+#### v1.14.3-lx.18
+
+Стабильный релиз после `v1.14.3-lx.17`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули и зависимости с lx.17 не менялись, Go 1.26.8). Одно изменение схемы конфига masque.
+
+- 🧹 **masque: снят устаревший ключ `network` (SPEC 131, обещано SPEC 062).** С lx.26 версия HTTP задаётся `vhttp`, а `network` жил алиасом с предупреждением (на любом другом outbound `network` — список tcp/udp, то есть обратный смысл). Поле удалено из `option.MASQUEOutboundOptions` и из `resolveLegacyOptions`; конфиг с `network` у masque теперь не разбирается — `unknown field "network"`, лечение — переименовать в `vhttp` (значения те же). LxBox и лаунчер пишут `vhttp` с lx.27, лаунчер мигрирует сохранённые URI. Плоские TLS-алиасы (`sni`, `skip_cert_verify`, `fragment*`) не тронуты — по-прежнему с предупреждением `masque-legacy-fields`. ([SPEC 131](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/131-MASQUE_DROP_LEGACY_NETWORK/SPEC.md), [SPEC 062](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/062-MASQUE_CONFIG_SCHEMA_MIGRATION/SPEC.md))
+
+#### v1.14.3-lx.17
+
+Стабильный релиз после `v1.14.3-lx.16`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c`, дрейф 0 (сабмодули и зависимости с lx.16 не менялись). Один хотфикс по живому прогону `lxd update` на RouteRich.
+
+- 🐛 **`lxd update` / рестарт под procd: ядро не поднималось после подмены бинаря (SPEC 129 §2.6).** Живой прогон lx.15-test128 → lx.16 на RouteRich: `/etc/init.d/sing-box-lxd restart` стартует новый процесс раньше, чем старый отпустил `lxd-tun0`, новое ядро получало `TUNSETIFF: device or resource busy` и демон уходил в `staying up` без VPN; update смотрел только на `running` у procd и честно вернул `done`, VPN лежал ~80 с до ручного restart. Два исправления: (1) загрузка демона повторяет старт каждые 500 мс до 10 с, пока ошибка — `EBUSY` (чинит и обычный `restart`); (2) шаг здоровья update после `running` у init ждёт `started` у `GET /admin/status` до 20 с — `fatal` или `idle` всё окно = провал здоровья с откатом (выход 2, текст `… is up but the core did not start: <last_error>`), проба без ответа — не вердикт (`core status unknown`, выход 0), пробы нет — `core status not checked: <почему>`. Для этого `GET /admin/status` стал ещё и операторским маршрутом (loopback + секрет без сертификата; пин для остальных не изменился). ([SPEC 129](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/129-LXD_UPDATE/SPEC.md))
+
+#### v1.14.3-lx.16
+
+Стабильный релиз после `v1.14.3-lx.15`, без rc-линии. База — sing-box `v1.14.3`, `upstream/stable` `d630fa94c` (влит один коммит — сборка Wayland-трея Linux-клиента в `build.yml`, на ядро не влияет), дрейф 0. Срез 12.10.2026.
+
+- 🐛 **Windows 7: ядро с `lx.14` не стартовало — `watch registry key …\Tcpip\Parameters\Interfaces: The parameter is incorrect` (issue #38).** Апстримный sing-tun `bca4bf0` (пришёл с синком v1.14.3) следит за DNS-ключами реестра через `RegNotifyChangeKeyValue` с `REG_NOTIFY_THREAD_AGNOSTIC` — флагом Windows 8+; Win7 отвечает `ERROR_INVALID_PARAMETER`, ошибка фатальна для `NetworkUpdateMonitor.Start`. Форк `submodules/sing-tun` (`monitor_windows.go`, `// lx: SPEC 130`): на `ERROR_INVALID_PARAMETER` регистрация повторяется без флага, решение запоминается; без флага уведомление живёт, пока жив поток-регистратор, поэтому все регистрации идут в горутине цикла под `runtime.LockOSThread()`. На Win8+ флаг принимается с первой попытки. Проверка на Win7 — за репортёром. ([SPEC 130](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/130-WIN7_REGISTRY_NOTIFY_THREAD_AGNOSTIC/SPEC.md))
+- ✨ **`sing-box lxd update` — самообновление ядра на Linux; кнопка Update в лаунчере.** Обновить ядро на роутере значило SSH: угадать ассет, скачать, сверить, остановить, подменить, запустить. Теперь бинарь делает это сам, зная то, чего скрипт не знал: свой путь (`os.Executable`), версию, релизный ассет (`platform` из 127 — `linux-armv7`, `linux-mipsle-softfloat`) и init хоста. `SHA256SUMS` последнего stable (`--prerelease` — новейший через API) даёт версию, имя и сумму одним запросом; та же версия — `already up to date`, установленная новее — отказ (даунгрейда нет); место ≥ размер × 1.1; архив льётся потоком в `<бинарь>.new` на той же ФС (sha256 → gunzip → tar, только запись `sing-box`, ничего в `/tmp`), сумма сверяется после записи; `new version` и `new check -c last_good.json`; `link(.old)` + атомарный `rename` — без `ETXTBSY`; рестарт через `detectInit` (`procd`/`systemd`/`openrc`, `--service` для другого имени); 15 с ожидания + 3 с стабильности, иначе откат (выход 2). Провал самой команды restart или нераспознанный init — бинарь остаётся, выход 0 с просьбой перезапустить. `--dry-run`, `--no-restart`; прокси — `HTTPS_PROXY`/`ALL_PROXY`; репозиторий зашит (якорь доверия). Код по сети не качается. `sing-box version` печатает `Platform:` / `Init:` / `Update:` (одна `// lx:`-строка-хук в `cmd_version.go`). Инсталлятор OpenWrt пишет `"commands": {"update": "$BIN lxd update"}`. Shell-скрипт (локальный, с raw-ветки, ассетом релиза) отвергнут. ([SPEC 129](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/129-LXD_UPDATE/SPEC.md))
+- ✨ **`daemon.json` `commands`: именованные root-команды, которые лаунчер запускает по имени — обслуживание машины без SSH.** Демон под root не исполняет код клиента (граница SPEC 100), поэтому обновить ядро или перезапустить службу из лаунчера было нельзя. Теперь оператор перечисляет команды на хосте — `"commands": {"update": "/usr/bin/sing-box lxd update"}` (имя `[a-z0-9][a-z0-9_-]{0,31}`, плохое имя или пустая команда — демон не стартует), а клиент выбирает из списка: `GET /admin/commands` (текст и последний исход), `POST /admin/commands/{name}` (`202`/`404`/`409`; тело — `400 "commands take no input"`: клиент не передаёт ничего), `GET /admin/commands/{name}` с хвостом лога 64 КиБ. Модель `sudoers`: барьер тот же, что у остальных admin-маршрутов (решение владельца — однородно, без исключений). Команда исполняется detached (`setsid`, `/bin/sh -c`): рестарт службы убивает демон, а не её; код выхода пишет обёртка, исход (`<каталог лога>/commands/<name>.{json,log,exit}`, на роутере tmpfs) читается из файлов — `done`/`running`/`lost` видны и после рестарта демона. Окружение — факты от демона: `LXD_PLATFORM`, `LXD_VERSION`, `LXD_INIT_SYSTEM`, `LXD_STATE_DIR`, `LXD_BIN`, `LXD_CLIENT`, дефолтный `PATH` под procd. Unix; на Windows ключ игнорируется с предупреждением. Аудит в лог с именем клиента. ([SPEC 128](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/128-LXD_COMMANDS/SPEC.md))
+- ✨ **`GET /admin/info` отдаёт платформенную карточку: `goos`, `goarch`, `platform`, `init_system`, `service`.** Лаунчер брал платформу машины из записи, введённой руками (дефолт `linux/amd64`; запись роутера владельца так и осталась `amd64` при реальном `aarch64` — «Download core» скачал бы чужой бинарь), а init-систему просил выбрать в окне Service. Теперь `goos`/`goarch` — `runtime` самого бинаря; `platform` — суффикс релизного ассета для его платформы (`linux-armv7`, `linux-mipsle-softfloat`, `windows-386-legacy-windows-7`) по `GOARM`/`GOMIPS` из build info — `GOARCH` один ассет для arm и mips не называет, а соглашение об именах живёт здесь, рядом с `lx-release.yml`; `init_system` — что за init на **хосте** (`procd` / `systemd` / `openrc` / `launchd` / `scm`, `""` — не распознан); `service` — запущен ли **этот процесс** под ним службой. Два поля вместо одного по решению владельца: демон, запущенный руками на systemd-хосте, отдаёт `systemd`/`false` — лаунчер видит, что службу можно установить, а единственная эвристика (`ppid 1` на linux) не трогает поле, по которому строятся рецепты. Детектор linux один для рецепта `--service` и для паспорта: `/proc/1/comm`, затем `/etc/openwrt_release`, `/run/systemd/system`, `/run/openrc` (новое: openrc). Считается раз при старте; поля есть всегда; `/admin/host` и `daemon.json` не тронуты. Тесты `TestDetectLinuxInit`, `TestDetectInitSystem`, `TestReleasePlatform`. ([SPEC 127](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/127-LXD_INFO_PLATFORM/SPEC.md))
+
+#### v1.14.3-lx.15
+
+Стабильный релиз после `v1.14.3-lx.14`, без rc-линии. База — sing-box `v1.14.3` (`upstream/stable` `7054cac51`), как у lx.14, дрейф 0. Срез 11.10.2026.
+
+- 🧰 **Сверка зависимостей с `upstream/stable` (раннбук §2a).** Go `go1.26.8` == stable (вышел `go1.26.9`, stable на нём ещё не стоит — остаёмся); `go`/`toolchain` в `go.mod`, `CRONET_GO_VERSION`, `upstream.version`, JDK 17 — совпадают; NDK `r28c` против `r28` — осознанно (`lx:`-комментарий в `lx-release.yml`); `require` отличается от stable только нашим бампом `grpc` v1.83.1 / `go-jose` v4.1.4 / `genproto/googleapis/rpc` (пункт ниже); мажоры actions у нас не старше апстримных. Форк-сабмодули: wireguard-go и sing-tun содержат пины `go.mod`, utls — на `v1.8.7` плюс восемь коммитов, gvisor — снапшот `20260727.0-sing-box-mod.1`. Полная релизная сборка без публикации (dry run) — перед тегом.
+- ⚡ **uTLS/REALITY-соединение больше не держит состояние рукопожатия до закрытия: −18…−25 КБ памяти на каждое живое соединение.** После рукопожатия utls оставлял в соединении ClientHello, приватные ключи key share (один ML-KEM-768 — 7,8 КиБ) и объекты расширений, хотя на TLS 1.3 больше их не читает. Теперь после успешного TLS 1.3-рукопожатия ядро обнуляет `HandshakeState` и `Extensions`, а новый метод `UConn.ReleaseHandshakeState` в форке utls (восьмой коммит, новый файл) — `clientHelloSpec` и ECH-контекст. ALPN транспорта подменяется в ClientHello один раз в первом `HandshakeContext` (флаг под мьютексом), а не на каждом вызове, как в апстримной обёртке, — повторный вызов не пересобирает ClientHello из освобождённых полей; провод не меняется. На TLS 1.2 состояние остаётся: браузерные пресеты включают ренегоциацию. Замер на 200 соединениях: Chrome 42,1 → 16,6 КБ, Firefox 36,1 → 18,4 КБ. Заметно на роутерах с сотнями–тысячами соединений. ([SPEC 122](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/122-UTLS_RELEASE_HANDSHAKE_STATE/SPEC.md))
+- 🐛 **`fingerprint: "random"` и `"randomized"` могли до рестарта убить узлы REALITY к Xray ≥ v26.9.8.** Оба выбираются раз на процесс. `randomized` (`HelloRandomized`) решал гибридную группу `X25519MLKEM768` (0,71), гибридный шар (0,5) и ALPN (0,7) независимыми монетами: без шара новый Xray молча отвечает `reality verification failed`, без ALPN не поднимаются gRPC/XHTTP поверх h2 — с ними живо ~25 % процессов. Пул `random` включал `edge` и `ios` без гибрида — мёртв в 2 процессах из 5. Теперь `randomized` строится как `HelloRandomizedALPN` (как у Xray) с весами «гибрид в группах и в шарах всегда»; ClientHello несёт шары `X25519MLKEM768`, `X25519`, `P-256`, остальное (шифры, подписи, порядок и набор расширений, ALPS, padding) по-прежнему случайно, seed на процесс прежний. Пул `random` — `chrome`, `firefox`, `safari`. Одна `// lx:`-строка в конце `init` (`lxRandomFingerprints`), форк utls не тронут; стражи на 500 семенах и пул падают на старом поведении; `key_share: classical` для обоих по-прежнему вырезает гибрид. ([SPEC 123](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/123-UTLS_RANDOMIZED_CONSISTENT/SPEC.md))
+- 🔒 **Зависимости: `google.golang.org/grpc` v1.79.1 → v1.83.1, `go-jose/v4` v4.1.3 → v4.1.4** — по алертам Dependabot на ветке `lx`. gRPC: GHSA-p77j-4mvh-x3m3 (critical, обход авторизации через `:path` без ведущего слэша), GHSA-vp52-pcj8-j9qc (OOM через фрагментацию DATA-фреймов HTTP/2), GHSA-2v4p-qf9q-27wj, GHSA-hrxh-6v49-42gf, GHSA-qc2q-p7wx-3px3; серверная сторона gRPC у нас живая — `lxd` (`daemon`) и `transport/v2raygrpc`. go-jose (транзитивно через `sing-cloudflared → go-oidc`): GHSA-78h2-9frx-2jm8, паника в JWE decryption. Апстрим на момент бампа сидит на тех же старых пинах — на синке принимать его версию, если она ≥. Алерты по `test/go.mod` (апстримный модуль, у нас не собирается — стенды в `lx-test/`) закрыты как «код не используется».
+- ✨ **`urltest` `mode: failover` уходит с деградировавшего узла, а не только с мёртвого.** Раньше узел, отвечающий на пробу за секунды, удерживался до полного отказа. Теперь удерживаемый узел, ответивший больше чем в 2 раза медленнее лучшего соседа той же сети (по последней известной задержке соседа), сразу пробуется второй раз; если снова больше 2× — полный прогон, и группа переезжает на самого быстрого, только если он больше чем в 1,5 раза быстрее, иначе остаётся (просела сеть, а не узел — свежие задержки соседей гасят триггер на следующем тике). Строгий триггер и мягкий переезд не дают флапа. Ключа конфига нет; baseline-окно и `max_rtt` рассмотрены и отвергнуты (норма ползёт; абсолютный порог одинаково срабатывает на перегрузку и на смену Wi-Fi → LTE). Обычный тик — по-прежнему одна проба. ([SPEC 126](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/126-URLTEST_FAILOVER_DEGRADATION/SPEC.md))
+- 🐛 **`urltest` пробовал узлы раз в 2×`interval`, а не в `interval` (`least_test` — все узлы, `failover` — удерживаемый).** Нефорсированный прогон пропускает узел с history моложе `interval`, а время в history ставится после ответа пробы — на следующем тике узел оказывался «моложе» на время пробы, и проба шла через тик: с дефолтом 3 мин — раз в 6 мин; переезд в `least_test` и обнаружение отказа в `failover` запаздывали вдвое. Теперь порог свежести тикового прогона — время с конца прошлого тикового прогона (кап `interval`, до первого прогона — `interval`): history прошлого тика свежей не бывает при любом размере группы, а свежая от ручного теста или тикера вложенной группы по-прежнему не дублируется. Тик, пришедший раньше чем через `interval/2` после конца прошлого тикового прогона, пропускается: прогон длиннее `interval` (сотни узлов с мёртвыми) больше не сменяется следующим встык из-за буферизованного тика — так было и в апстриме. Форсированные прогоны и `round_robin` не меняются. `least_test` теперь будит узлы вдвое чаще прежнего — ровно с той частотой, что задаёт `interval`. Тесты `urltest_tick_lx_test.go` падают до правки. ([SPEC 125](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/125-URLTEST_TICK_SKIP/SPEC.md))
+- 🐛 **`lxd --service=install` и `--service=copy` падали на чистой macOS: нет `/Library/PrivilegedHelperTools`.** Каталог не входит в установку системы — его создаёт SMJobBless при первом root-помощнике, и на маке, где никто помощника не ставил (MacBook Pro 2016, macOS 12.7.6, lx.14), ядро отказывало с `exec dir … does not exist; it is part of macOS`. Так же падали кнопка Install и classic TUN лаунчера и `install-macos.sh`. Теперь install и copy создают последний компонент дефолта `root:wheel 0755` (`os.Mkdir`, явный chown 0:0, chmod 0755, повторная проверка цепочки) — то же, что `sudo mkdir -m 0755`; `/Library` должен существовать и проходить инвариант 100, существующий каталог проверяется как раньше и не «чинится», `--dry-run` печатает `would create`, status и uninstall каталог не создают; `--exec-dir` без изменений. Тест `TestServiceDefaultExecDirCreated`. ([SPEC 124](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/124-LXD_DEFAULT_EXEC_DIR_CREATE/SPEC.md))
+
+#### v1.14.3-lx.14
+
+Стабильный релиз после `v1.14.2-lx.13`, без rc-линии. База — sing-box `v1.14.3` (`upstream/stable` `7054cac51`), как у lx.13, дрейф 0. Два полевых репорта: issue #36 (XHTTP, query в `path`) и issue #37 (размер пакета над IP-туннелем). Срез 09.10.2026.
+
+- 🐛 **XHTTP: `path` с query уходил на провод закодированным в путь — релеи на Cloudflare Workers отдавали 502 на сайты за Cloudflare (issue #36).** `NewClient` не делил `path` по `?`, `URLSetPath` кодировал его, и `"/?proxyip=149.56.109.62"` становился `:path = /%3Fproxyip=149.56.109.62/` (плюс завершающий слэш из 043). Релей edgetunnel читает `proxyip` из query (или из сегмента `/proxyip=…`), не видел его и оставался с дефолтом env — для CF-хостов это 502 через 20–60 с, не-CF ходили напрямую и работали; Shadowrocket и sing-box-extended шлют query как есть. Xray (`GetNormalizedPath`/`GetNormalizedQuery`) считает всё после первого `?` query запроса. Теперь `NewClient` режет по первому `?`, хвост хранится в `Client.query`, `baseURL()` ставит `u.RawQuery`; `setQuery` (сессия/seq/паддинг в query) уже добавлял параметры к существующим, отдельных сборок URL нет (все режимы, h1/h2/h3 — через `newRequest` → `baseURL`). Тесты `url_query_test.go`: stream-one `/?proxyip=…` → `RequestURI == "/?proxyip=…"`, packet-up `/base?x=1` → `/base/<sid>/<seq>?x=1`, сессия+seq в query рядом с пользовательским, паддинг в query, путь без `?` без изменений. Подтверждено автором репорта на релее (обход `path: "/proxyip=IP"` на lx.12 даёт `cdn-cgi/trace ip=149.56.109.62`); заодно показано, что голый VLESS-заголовок отдельным DATA-фреймом (без `sniff`) этот релей переживает — выравнивание с ожиданием первого payload у Xray не требуется. Парсеры ссылок лаунчера и LxBox срезают хвост `?…` у xhttp `path` на своей стороне (у лаунчера — правило реестра контракта, у LxBox — `xhttpFromMap` плюс то же правило реестра); правки подготовлены в обоих репо, выпускать только с ядром от этого тега. Upstream WS тоже шлёт `%3F`, но у WS-ветки Worker'а есть повтор «нет данных → переподключиться», поэтому там не проявлялось. ([SPEC 119](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/119-XHTTP_PATH_QUERY/SPEC.md))
+
+- 🐛 **hysteria2 через `detour` на masque (WARP) молчал на IPv6-сервер, работал на IPv4 (issue #37).** quic-go внутри hysteria2 шлёт пакеты с UDP-payload 1280 байт: по IPv4 это IP-пакет 1308 байт, по IPv6 — 1328; оба не влезают в `mtu` 1280 туннеля, gvisor режет их на фрагменты, и WARP IPv4-фрагменты пропускает, а IPv6-фрагменты теряет. Замер на чистом канале 09.10.2026 (GL, WARP h3): при `mtu` 1280 по IPv6 проходит ≤ 1232 байт payload, при 1340 — ≤ 1280; порог там, где IPv6-пакет перестаёт помещаться в MTU туннеля. Прежде накладные под звеном вычитал только `chain` и только у туннелей; обычный `detour` не делал ничего, QUIC-прокси не выравнивались нигде. ([SPEC 120](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/120-PATH_MTU_ALIGN/SPEC.md) §1)
+- ✨ **`lx.mtu_align` — одно выравнивание MTU и размера пакета по пути для `chain` и `detour`.** Узел над IP-туннелем (через `detour`, группу под `detour`, транзитивный `detour`, звено `chain`) получает `mtu` (wireguard, masque) или `initial_packet_size` + `disable_path_mtu_discovery: true` (hysteria2, tuic, hysteria) под ёмкость узла снизу; ёмкость считается рекурсивно по типу (туннель — его эффективный `mtu`, tailscale — `system_interface_mtu`/1280, группа — min по членам на старте, узел с `detour` — транзитивно, прокси без уровня IP — без предела). Режимы `off` / `fill` / `clamp` (дефолт — контракт chain из 073: только понижать; явное значение, которое не влезает, в `clamp` понижается, в `fill` даёт предупреждение) и `except` — теги без правок; ключ принимает строку или объект `{"mode","except"}`. Для WARP по умолчанию hy2 получает 1232 (IPv6-сервер) / 1252 (IPv4), PMTUD off — quic-go умеет только искать вверх до 1452, по IPv4 пробы «проходят» фрагментацией. Накладные masque — 79/99 по семейству вместо оценки ≈ 90. Пре-пасс в `box_lx.go` правит типизированные опции до создания узлов — апстримные конструкторы hysteria2/tuic/hysteria читают их как раньше; `chain` перешёл на тот же пакет `common/lxmtu`. Каждое изменённое поле — Info-строка `mtu_align: <tag> <field> → <effective> (<причина>)`, предупреждения — Warn. Описание — [lx-config.ru.md §13](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/lx-config.ru.md#lxmtu_align--выравнивание-mtu-и-размера-пакета-по-пути).
+- 🔧 **Внешний QUIC masque стартует с `InitialPacketSize` = `mtu + 51` (кламп 1200…1452; 1331 при 1280) вместо константы 1242.** quic-go считает бюджет датаграммы консервативно (`InitialPacketSize − 37` = 1205), а внутренний пакет 1280 с байтом context-id требует 1281; бюджет рос только по PMTUD (старт после подтверждения хендшейка, первая проба через 5 RTT) — окно ≈ 6 RTT после подъёма туннеля, в котором каждый внутренний пакет 1205…1280 байт отбивался `DatagramTooLarge` и молча пропадал. Берётся уже выровненный `mtu`, так что masque под WG получает согласованное значение; закрывает вопрос №8 из 110.
+- 🔧 **ICMP Packet Too Big от masque называет фактический бюджет датаграммы** (минус context-id), а не константу 1280 — дефект из реестра 107; ниже 1280 не опускается (минимум IPv6).
+- 🐛 **`vhttp: auto`: один быстрый отказ h3 больше не паркует WARP на h2 до рестарта** ([SPEC 121](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/121-MASQUE_AUTO_MEMORY_TTL/SPEC.md)). На стенде ~25 % подъёмов h3-туннеля к WARP падают сразу с `PROTOCOL_VIOLATION (remote)` и проходят повтором; память режима из 074 после такого сбоя запоминала h2 навсегда (до отказа h2). Теперь победа h2 помнится на окно по лестнице — 1 с, 10 с, 30 с, 5 мин, 10 мин, ступень за каждую следующую победу h2; победа h3 возвращает на первую ступень; подъём по памяти окно не продлевает. Один случайный отказ стоит один туннель на h2; постоянно закрытый h3 сходится к пробе раз в 10 мин.
+- Апстримных файлов ноль: `common/lxmtu` (новый пакет без build-tag), `option/lx.go`, `box_lx.go`, `protocol/chain`, `protocol/masque`, `transport/masque/connectip`. Доки: lx-config §0/§4/§10/§13, protocols-transports §3.2, FEATURE 015 и 009.
+
+#### v1.14.2-lx.13
+
+Стабильный релиз, промоут `v1.14.2-lx.13-rc.1` плюс синк апстрима до `v1.14.3`: дельта от rc.1 — документация (результаты проверки на устройстве, статусы профилей) и мерж `upstream/stable`. База — sing-box `v1.14.3` (`upstream/stable` `7054cac51`), **дрейф 0**. Срез по подтверждению владельца 09.10.2026 после прогона rc.1 на LTE (CPH2411/Tele2) и на проводе; первый срез тега с базой `v1.14.2` удалён до публикации (Actions стояли на паузе) и перевыпущен с синком.
+
+- 🐛 **Decoy `ip=quic` генерируется на каждый хендшейк, а не один раз на срок жизни endpoint'а.** Прежде `i1` запекался в CPS-блоб при создании endpoint'а, и перед каждым handshake initiation (старт, rekey каждые 120 с, пробуждение, реконнект) уходила байт-в-байт та же датаграмма с тем же DCID — хеш-сигнатура для DPI и постоянный идентификатор устройства. Теперь движок зовёт генератор перед каждым хендшейком (lx-хук `SetDecoyPacketsFunc` в форке wireguard-go `8a53421`) и шлёт свежий Initial с новыми DCID/SCID, random, key_share, раскладкой фреймов и шифртекстом. `dns`/`stun`/`sip` остаются статичным CPS с `<r>`-энтропией. ([SPEC 009](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) §3.1)
+- 🐛 **`ib=chrome`/`firefox` слали TCP-ClientHello внутри QUIC Initial (с 18.06.2026, все релизы до этого).** uTLS-пресеты описывают TCP-ClientHello, а `SetTransportParameters` для пресетного ClientHello — заглушка: в decoy не было `quic_transport_parameters` (57), зато были TLS 1.2-шифры, GREASE-шифр и TCP-only расширения. Настоящий QUIC-сервер такой ClientHello отвергает. Исправлено профилями ниже.
+- 🔧 **Профили `ib` перестроены в QUIC-ClientHello браузеров по захватам** (Chrome 133 — LxBox §618; Chrome 147 и Firefox 149 — `transport/wireguard/testdata/`, BSD-3 из wiresock-boringtun; тест паритета расшифровывает захваты и сверяет расширения и transport parameters). Статусы по прогону на устройстве 09.10.2026 (LTE, контроль — чистый WG не работает):
+  - `chrome` — **device-verified** (LTE 1272 мс до хендшейка; провод 08.10 — 6/6 при контроле 0/3). `HelloChrome_155` без PQ key_share (~470 байт): три шифра TLS 1.3, 11 расширений Chrome в QUIC, transport parameters Chrome с `initial_rtt` и перемешанным порядком, GREASE-параметр 0–15 байт. Раскладка фреймов — копия `QuicChaosProtector` (quiche): 2–10 разрезов CRYPTO, 2–10 PING, PADDING размазан, Fisher–Yates; SCID пуст, pn_len 1, pn=1; один Initial 1250 байт. Снято правило «фрейм с offset 0 не первый» и фиксированные 6 фрагментов / 2 PING (LxBox §617: порядок фреймов проход не определяет).
+  - `firefox` — **device-verified** (LTE 1227 мс). `HelloFirefox_148` без PQ (~665 байт) по захвату Firefox 149: три шифра в порядке NSS, 15 расширений в порядке захвата, группы без FFDHE, 13 transport parameters Firefox; заголовок neqo — SCID 3 байта, pn_len 2, случайный pn, пакет по размеру фреймов и нули после него до 1252; один CRYPTO, без PING.
+  - `""`/`curl` — generic ClientHello ~294 байта, один CRYPTO плюс PADDING, pn=0; **device-verified** (LTE 1274 мс). Итог: к WARP проходят все однопакетные формы под MTU, содержимое ClientHello на проход не влияет.
+  - GREASE-версия в `version_information` считается у нас (хелпер utls давал форму `?a?a?a?a` в 1 случае из 256).
+- 🧪 **`ib=chrome-full` — Chrome 155 с ML-KEM в одном оверсайз QUIC Initial; экспериментальный, в клиентах (LxBox/лаунчер/UI) не реализуется.** Гибридный key_share `X25519MLKEM768` сохранён (ClientHello ~1.75 КБ), целиком в одном Initial ~1.9–2.1 КБ больше MTU (IP-фрагментация). Многопакетная инициация на пути к WARP давится (LxBox §618), поэтому один оверсайз-пакет. **На LTE не работает** (фрагменты не доходят) — только для стендов и путей, доносящих IP-фрагменты; против WireSock `amneziawg-proxy` на quinn — не проверялось. ([SPEC 009](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) §4)
+- 🔧 **`ip=sip`: только INVITE, `i2` пуст.** Убран второй пакет `SIP/2.0 100 Trying` — ответ сервера в клиентском слоте. Явный пользовательский `i2` рядом с `ip=sip` больше не конфликт.
+- 🔧 **`ip=dns`: EDNS без опций.** Убрана неизвестная EDNS-опция `0xFDE9` с 40 случайными байтами (наследие серверного S1-хвоста WireSock); запрос — заголовок, вопрос HTTPS и OPT с RDLENGTH 0, ~43 байта. На LTE 09.10.2026 `ip=dns` и `ip=sip` к WARP не поднимаются — к WARP проходит только QUIC-decoy; `dns`/`sip` — для серверов, отвечающих на такой decoy (WireSock proxy).
+- 📝 Из кода и доков убрано объяснение «line-rate DPI парсит первый CRYPTO-фрейм как offset 0 и fail-open'ится» (опровергнуто §617); записано, что держит проход — валидный Initial с целым ClientHello в одном пакете под MTU. В EXAMPLES §3 — правило выбора `id`: домен decoy должен роутиться туда же, куда WG-endpoint (домен-роутинг по первому UDP-пакету на пути уводит весь 5-tuple).
+- 🔄 **Синк апстрима до `v1.14.3`** (мерж `88c9b42e1`). После мержа SPEC 117 апстрим переписал `stable` force-push'ем: из 16 коммитов за merge-base новых три — «Reset network on DNS server changes» (darwin `systemconfig` + монитор libbox), «Exclude USB/IP from legacy macOS build», bump version; остальные 13 — уже влитые коммиты с новыми хешами, отличие одно: из «Use screen state to end device pause on iOS» апстрим убрал `RecordLockState` (у нас не используется — снят следом). Дерево = `lx` + `diff 3e21554de..upstream/stable`, lx-дельта побайтно прежняя. Форк-сабмодуль `sing-tun` → `4ebb772` (мерж апстримного `bca4bf029237` в lx-линию, патч SPEC 040 не задет); `upstream.version` = 1.14.3. Go 1.26.8, `go.mod`, cronet = stable. Проверка синка — сборка под `LX_TAGS` (darwin/windows/linux, компиляция android/ios), `lx-check`, тесты `experimental/libbox` и `sing-tun`; на устройстве синк не прогонялся.
+
+#### v1.14.2-lx.13-rc.1
+
+Пререлиз линии `v1.14.2-lx.13`. База — sing-box `v1.14.2` (`upstream/stable` `3e21554de`, как у lx.12); дрейф от апстрима не брался — релиз про decoy `ip=quic`. Форк-сабмодуль `wireguard-go` получил lx-хук `SetDecoyPacketsFunc`.
+
+- 🐛 **Decoy `ip=quic` был статичным на весь срок жизни endpoint'а** (с появления 009): `i1` запекался в CPS-блоб при создании endpoint'а, и перед каждым handshake initiation — старт, rekey каждые 120 с, пробуждение, реконнект — уходила байт-в-байт та же датаграмма с тем же DCID (хеш-сигнатура для DPI, повтор Initial уже открытого соединения, постоянный идентификатор устройства). Теперь для `ip=quic` статичного `i1` нет: движок зовёт генератор перед каждым хендшейком (`SetDecoyPacketsFunc`, lx-хук в форке wireguard-go) и шлёт свежий Initial с новыми DCID/SCID, random, key_share, раскладкой и шифртекстом. `dns`/`stun`/`sip` остаются статичным CPS с `<r>`-энтропией. ([SPEC 009](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) §3.1)
+- 🐛 **`ib=chrome`/`firefox` слали TCP-ClientHello внутри QUIC Initial (с 18.06.2026, все релизы).** uTLS-пресеты описывают TCP-ClientHello браузера, а `SetTransportParameters` uTLS для пресетного ClientHello — заглушка: в decoy не было расширения `quic_transport_parameters` (57), зато были TLS 1.2-шифры, GREASE-шифр и TCP-only расширения. Настоящий QUIC-сервер такой ClientHello отвергает (`rustls` в `amneziawg-proxy` WireSock отвечал бы `CONNECTION_CLOSE` вместо сертификата). На WARP не проявлялось (decoy там дропается молча); generic ClientHello (без `ib`) дефекта не имел. Исправлено профилями ниже. ([SPEC 009](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) §4)
+- 🔧 **Профили `ib` перестроены в QUIC-ClientHello браузеров по захватам** (Chrome 133 — LxBox §618; Chrome 147 и Firefox 149 — `transport/wireguard/testdata/`, BSD-3 из wiresock-boringtun; тест паритета расшифровывает захваты нашим крипто и сверяет наборы расширений и transport parameters):
+  - `chrome` — **device-verified на LTE 09.10.2026** (CPH2411/Tele2: контроль чистый WG не работает, `chrome` работает) и на проводе 08.10 (6/6 при контроле 0/3). `HelloChrome_155` без PQ key_share (ClientHello ~470 байт, Chrome с `PostQuantumKeyAgreementEnabled=false`): три шифра TLS 1.3, группы без GREASE, 11 расширений Chrome в QUIC (без `trust_anchors`, без GREASE-расширений и TCP-only `session_ticket`/`extended_master_secret`/`renegotiation_info`/`ec_point_formats`/`status_request`/SCT), `quic_transport_parameters` Chrome с `initial_rtt` (шлётся всегда) и перемешанным порядком, GREASE-параметр 0–15 байт. Раскладка фреймов — пошаговая копия `QuicChaosProtector` (quiche): 2–10 разрезов случайного CRYPTO в случайной точке, 2–10 PING, PADDING размазан, полный Fisher–Yates; SCID пуст, pn_len 1, pn=1; один Initial 1250 байт. Снято правило «фрейм с offset 0 никогда не первый» и фиксированные 6 фрагментов / 2 PING (LxBox §617: порядок фреймов проход не определяет). Полевой прогон с Мака 08.10 23:52: 6/6 на wartune.mail.ru и apteka.ru при контроле (чистый WG 0/3).
+  - `firefox` — **device-verified на LTE 09.10.2026** (CPH2411/Tele2, при контроле чистый WG не работает). `HelloFirefox_148` без PQ (~665 байт) по захвату Firefox 149: три шифра в порядке NSS, 15 расширений **в порядке захвата** (у Firefox в QUIC есть `extended_master_secret`, `renegotiation_info`, `record_size_limit`; нет `ec_point_formats`, SCT, `session_ticket`), группы без FFDHE, 13 transport parameters Firefox; заголовок neqo — SCID 3 байта (= `initial_source_connection_id`), pn_len 2, случайный pn, QUIC-пакет по размеру фреймов и нули после него до 1252; один CRYPTO, без PING.
+  - `""`/`curl` — generic ClientHello ~294 байта, один CRYPTO плюс PADDING, pn=0 (как раньше); **device-verified на LTE 09.10.2026**. Итог проверки на телефоне: проходят все однопакетные формы под MTU (`chrome`, `firefox`, `curl`), не проходит фрагментированный `chrome-full`.
+  - GREASE-версия в `version_information` считается у нас (хелпер utls давал форму `?a?a?a?a` в 1 случае из 256).
+- 🧪 **`ib=chrome-full` — Chrome 155 с ML-KEM в одном QUIC Initial (экспериментальный, в клиентах не реализуется).** Новое значение `ib` для `ip=quic`, только для стендов: тот же chrome-профиль, но гибридный key_share `X25519MLKEM768` сохранён первым (ClientHello ~1.75 КБ), целиком в одном Initial ~1.9–2.1 КБ больше MTU (IP-фрагментация на два пакета). Chrome шлёт такой ClientHello тремя Initial, но многопакетная инициация на пути к WARP давится (LxBox §618: все многопакетные формы, включая побайтовую копию живого Chrome, FAIL; одиночный Initial больше MTU проходил частично), поэтому один оверсайз-пакет. Проход зависит от IP-фрагментов на пути: **на LTE (CPH2411/Tele2, 09.10.2026) не работает** — профиль только для путей, доносящих фрагменты. ([SPEC 009](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/009-WIRESOCK_MASQUERADE_PROFILES/SPEC.md) §3.1, §4)
+- 🔧 **`ip=sip`: только INVITE, `i2` пуст.** Прежде вторым пакетом клиент слал `SIP/2.0 100 Trying` — ответ сервера в клиентском слоте (UAC такого не шлёт; серверная сторона WireSock отвечает на INVITE своим `100 Trying`). Явный пользовательский `i2` рядом с `ip=sip` больше не конфликт, проходит как есть.
+- 🔧 **`ip=dns`: EDNS без опций.** Убрана неизвестная EDNS-опция `0xFDE9` с 40 случайными байтами (наследие серверного S1-хвоста WireSock, которого не шлёт ни один резолвер); запрос — заголовок, вопрос HTTPS и OPT с RDLENGTH 0, ~43 байта. Прогон на LTE 09.10.2026: `ip=dns` и `ip=sip` к WARP не поднимаются (как и в июне) — к WARP проходит только QUIC-decoy; `dns`/`sip` — для серверов, отвечающих на такой decoy.
+- 📝 Из кода и доков (SPEC 009, `amneziawg-explained`, `protocols-transports`, EXAMPLES, README) убрано объяснение «line-rate DPI парсит первый CRYPTO-фрейм как offset 0, видит мусор и fail-open'ится» — опровергнуто §617. Записано, что держит проход: валидный Initial с целым ClientHello впереди потока. В EXAMPLES §3 — правило выбора `id`: домен decoy должен роутиться туда же, куда WG-endpoint (домен-роутинг по первому пакету UDP на пути уводит весь поток).
+
+#### v1.14.2-lx.12
+
+Стабильный релиз, сводящий линию `v1.14.2-lx.12-rc.1`…`rc.3`. База — sing-box `v1.14.2` + 26 коммитов (`upstream/stable` `3e21554de`), **дрейф 0**. Срез по подтверждению владельца после живой проверки rc.3; дельта от rc.3 — только документация (`lx-config` §3 как три режима `urltest`).
+
+- ✨ **`urltest` `mode: failover`; ⚠️ `passive_check` удалён.** Третий режим группы: выбирается самый быстрый узел, и группа держится за него до отказа, даже если другой стал быстрее; каждый `interval` пробуется только он (одна проба вместо N). Не ответил на пробу — полный прогон и переезд на самый быстрый живой; дайл через него упал с «путь мёртв» (штрафы SPEC 054) — переезд без `Interrupt`. Ручной тест группы — всегда `force`: меряет всех и перевыбирает самый быстрый. `tolerance` не действует (предупреждение на старте), `balancer` — ошибка старта. Флаг `passive_check` из `least_test` удалён без периода совместимости: **конфиг с этим ключом не стартует** (неизвестное поле). ([SPEC 116](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/116-URLTEST_FAILOVER_MODE/SPEC.md))
+- ✨ **Статус пиров WG/AWG — `GetWireGuardStatus(tag)`.** Унарный RPC: `endpointState`, `idleSinceSeconds` и `peers[]` (base64-ключ пира, текущий адрес — на сервере выученный из хендшейка клиента, время последнего хендшейка (`0` — не было), rx/tx). Вердикт «на связи» ядро не выносит, порог выводит приложение; секреты не отдаются, спящий узел не будится. Ошибки: `NotFound` / `InvalidArgument` / `FailedPrecondition`. `GetOutbounds` остаётся списком узлов (`GroupItem.peers` из rc.1 удалено, номер 7 зарезервирован; `endpointState`/`idleSinceSeconds` в `GroupItem` остались). libbox — `CommandClient.GetWireGuardStatus(tag).Peers()`; CLI — `sing-box api peers [тег]`. Руководство потребителя — [CONSUMERS.md](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/114-WG_PEER_STATUS/CONSUMERS.md). ([SPEC 114](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/114-WG_PEER_STATUS/SPEC.md))
+- ✨ **Путь к пиру Tailscale и `GetTailscaleStatus(endpointTag)`.** У `TailscalePeer` — `path` (direct / peer relay / DERP / none — вердикт ядра по выбору magicsock), `endpoint`, `peerRelay`, `derpRegionCode`, `lastHandshake`; у `TailscaleEndpointStatus` — `health` (предупреждения бэкенда). Унарный `GetTailscaleStatus` отдаёт свежий снимок того же вида, что поток `SubscribeTailscaleStatus`; поток остаётся событийным, без тика. libbox — `CommandClient.GetTailscaleStatus(tag)`, `TailscalePeer.Path` строкой, `Health()`; CLI — `sing-box api tailscale peers`. Руководство потребителя — [CONSUMERS.md](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/115-TAILSCALE_PEER_PATH_STATUS/CONSUMERS.md). ([SPEC 115](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/115-TAILSCALE_PEER_PATH_STATUS/SPEC.md))
+- 🔧 **Синк `upstream/stable`: жизненный цикл компонентов на `adapter.Scope`.** Апстрим заменил `Start(stage)` + `Close()` на `Start(stage, scope)` с очисткой через `scope.Add`; у менеджеров нет `Close`/`Remove`, `LegacyStart` удалён. Наши швы перенесены: параллельное закрытие WG-endpoint'ов (SPEC 030) — свой scope на endpoint; `Close` WG-endpoint'а (сон, ленивая сборка, ручное выключение — SPEC 020/070/097/106) и остановка idle-тика регистрируются в scope; `chain` и `masque` переведены на новый интерфейс (со старыми `Start()`/`Close()` менеджеры их бы молча не запускали и не закрывали). Остальное из апстрима: `Fix usage and cache files overwritten when loading fails`, `Move auto-redirect and bridge index allocation out of constructors`, `tailscale: Fix SSH auth banners never sent`, `tun: Fix inconsistent DNS mode behavior without auto_route`, `Add roothide package to iOS jailbreak release`. ([SPEC 117](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/117-UPSTREAM_SYNC_SCOPED_LIFECYCLE/SPEC.md))
+- 📌 **Форк-сабмодуль `sing-tun` `29219b8`**: мерж sagernet `0e9e4a586ece` («Disable DNS mode by default without auto route») поверх lx-линии, дельта форка (self-heal `acceptLoop`, SPEC 040) без изменений. Модули: `sing-quic` → `75c3ac4fa12b`, `sing-cloudflared` → `c1255ae368f2`. Go 1.26.8, `go.mod`, cronet, JDK = stable; NDK r28c осознанно.
+- 📝 SPEC 113 (Tailscale `TS_DEBUG_ALWAYS_USE_DERP` + Rebind) — не планируется, только документация.
+- ℹ️ Известно, не чинится: при остановке ядра с `services: [{type: api}]` в лог пишется `close service/api[0]: use of closed network connection` — дефект апстрима (двойное закрытие listener'а в `service/api`), воспроизводится на чистом `upstream/stable`, на работу не влияет.
+
+#### v1.14.2-lx.12-rc.3
+
+Пререлиз линии `v1.14.2-lx.12`. База — sing-box `v1.14.2` + 26 коммитов (`upstream/stable` `3e21554de`), **дрейф 0** — отложенный в rc.1 и rc.2 синк закрыт.
+
+- 🔧 **Синк `upstream/stable`: жизненный цикл компонентов на `adapter.Scope`.** Апстрим (`Refactor lifecycle to scoped cleanup`, `Remove unimplemented hot reload from managers`) заменил `Start(stage)` + `Close()` на `Start(stage, scope)` с очисткой через `scope.Add`; у менеджеров больше нет `Close`/`Remove`, `LegacyStart` удалён. Наши швы перенесены: параллельное закрытие WG-endpoint'ов (SPEC 030) — через собственный scope на каждый endpoint; наш `Close` WG-endpoint'а (сон, ленивая сборка, ручное выключение — SPEC 020/070/097/106) регистрируется в scope; остановка idle-тика — тоже. `chain` и `masque` переведены на новый интерфейс: со старыми `Start()`/`Close()` апстримные менеджеры их бы молча не запускали и не закрывали; звенья цепочки стартуют и закрываются через свой scope. Остальные коммиты: `Fix usage and cache files overwritten when loading fails`, `Move auto-redirect and bridge index allocation out of constructors`, `tailscale: Fix SSH auth banners never sent`, `tun: Fix inconsistent DNS mode behavior without auto_route`, `Add roothide package to iOS jailbreak release`. ([SPEC 117](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/117-UPSTREAM_SYNC_SCOPED_LIFECYCLE/SPEC.md))
+- 📌 **Форк-сабмодуль `sing-tun` `29219b8`**: мерж sagernet `0e9e4a586ece` («Disable DNS mode by default without auto route») поверх lx-линии, дельта форка (self-heal `acceptLoop`, SPEC 040) не изменилась. Модули: `sing-quic` → `75c3ac4fa12b`, `sing-cloudflared` → `c1255ae368f2`. Go 1.26.8, cronet, JDK = stable; NDK r28c осознанно.
+- ℹ️ Известно, не чинится: при остановке ядра с `services: [{type: api}]` в лог пишется `close service/api[0]: use of closed network connection` — дефект апстрима (двойное закрытие listener'а в `service/api`), воспроизводится на чистом `upstream/stable`, на работу не влияет.
+- Проверено локально: сборка darwin/linux/windows/android-libbox, тесты с полным набором тегов, с `with_lx_idle_suspend` и без тегов, `-race`, стенды `lx-test`, `lx-check`, стенд жизненного цикла WG (ленивая сборка → сон → разборка → пробуждение, три цикла старт/стоп за 0,03–0,05 с). Проверки на устройстве до тега не было.
+
+#### v1.14.2-lx.12-rc.2
+
+Пререлиз линии `v1.14.2-lx.12`. База — sing-box `v1.14.2`.
+
+- ⚠️ **Статус пиров WG/AWG переехал из `GetOutbounds` в `GetWireGuardStatus(tag)`.** Решение владельца: у каждого типа endpoint'а свой унарный запрос статуса, `GetOutbounds` остаётся списком узлов. Поле `GroupItem.peers` из rc.1 удалено (номер 7 зарезервирован); `endpointState`/`idleSinceSeconds` в `GroupItem` остались. Ответ `WireGuardEndpointStatus` несёт `endpointState`, `idleSinceSeconds` и `peers[]` (`PeerStatus` без изменений), так что пустой список объясняется тем же ответом. Ошибки: `NotFound` / `InvalidArgument` / `FailedPrecondition`. libbox — `CommandClient.GetWireGuardStatus(tag).Peers()` вместо `OutboundGroupItem.Peers()`; CLI `sing-box api peers [тег]` ходит в новый RPC. Потребителю rc.1 (лаунчер) нужен переход. ([SPEC 114](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/114-WG_PEER_STATUS/SPEC.md), [HISTORY](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/114-WG_PEER_STATUS/HISTORY.md))
+- ✨ **Путь к пиру Tailscale и `GetTailscaleStatus(endpointTag)`.** У `TailscalePeer` — `path` (direct / peer relay / DERP / none — вердикт ядра по выбору magicsock), `endpoint`, `peerRelay`, `derpRegionCode`, `lastHandshake`; у `TailscaleEndpointStatus` — `health` (предупреждения бэкенда). Унарный `GetTailscaleStatus` отдаёт тот же снимок, что поток `SubscribeTailscaleStatus`, но свежий — для вкладки диагностики узла; поток остаётся событийным, без тика. libbox — `CommandClient.GetTailscaleStatus(tag)`, `TailscalePeer.Path` строкой, `Health()`; CLI `sing-box api tailscale peers`. Руководство потребителя — [CONSUMERS.md](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/115-TAILSCALE_PEER_PATH_STATUS/CONSUMERS.md). ([SPEC 115](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/115-TAILSCALE_PEER_PATH_STATUS/SPEC.md))
+- ✨ **`urltest` `mode: failover`; ⚠️ `passive_check` удалён.** Третий режим группы: выбирается самый быстрый узел, и группа держится за него до отказа, даже если другой стал быстрее; каждый `interval` пробуется только он (одна проба вместо N, остальные узлы спят). Не ответил на пробу или дайл через него упал с «путь мёртв» (штрафы SPEC 054) — переезд на самый быстрый живой. Ручной тест меряет всех и перевыбирает самый быстрый. `tolerance` в этом режиме не действует (предупреждение), `balancer` — ошибка старта. Флаг `passive_check`, неявно делавший то же из `least_test`, удалён без периода совместимости: **конфиг с этим ключом не стартует** (неизвестное поле). ([SPEC 116](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/116-URLTEST_FAILOVER_MODE/SPEC.md))
+- ⚠️ **Дрейф от `upstream/stable` по-прежнему отложен:** 26 коммитов после мержа lx.11 (к четырём из rc.1 добавились `tun: Fix inconsistent DNS mode behavior without auto_route`, `tailscale: Fix SSH auth banners never sent`, бампы `sing-tun` → `0e9e4a586ece` (форк-сабмодуль — брать только через перепрививку, §1 раннбука), `sing-quic`, `sing-cloudflared`). Мерж `Refactor lifecycle to scoped cleanup` (115 файлов) и бамп сабмодуля — отдельная задача после rc. Тулчейн, `go.mod` `go`/`toolchain`, cronet, JDK = stable; NDK r28c осознанно.
+- Проверки на устройстве до тега не было; живой tailnet-прогон — через лаунчер.
+
+#### v1.14.2-lx.12-rc.1
+
+Пререлиз линии `v1.14.2-lx.12`.
+
+- ✨ **Статус пиров WG/AWG в `GetOutbounds`.** У WG/AWG-узла `GroupItem.peers`: base64-ключ пира, текущий адрес (на сервере — выученный из хендшейка клиента), время последнего хендшейка (`0` — не было), rx/tx. Вердикт «на связи» ядро не выносит, порог выводит приложение; секреты не отдаются, спящий узел не будится. libbox — `OutboundGroupItem.Peers()`, CLI — `sing-box api peers [тег]`. Руководство потребителя — [CONSUMERS.md](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/114-WG_PEER_STATUS/CONSUMERS.md). ([SPEC 114](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/114-WG_PEER_STATUS/SPEC.md))
+- 📝 SPEC 113 (Tailscale `TS_DEBUG_ALWAYS_USE_DERP` + Rebind, не планируется) — только документация.
+- ⚠️ **Дрейф от `upstream/stable` сознательно отложен:** 4 коммита после мержа lx.11 — `Refactor lifecycle to scoped cleanup` (115 файлов, задевает `box.go`, менеджеры и `protocol/wireguard/endpoint.go`), `Remove unimplemented hot reload from managers`, `Fix usage and cache files overwritten when loading fails`, `Move auto-redirect and bridge index allocation out of constructors`, а с ними бамп `sing-quic` и `sing-cloudflared`. Рефакторинг жизненного цикла нужно разбирать против нашего сна и ленивой сборки WG (SPEC 020/097/106) отдельной задачей синка, чтобы не смешивать его регрессии с новой фичей. Решение владельца 2026-10-07. Go 1.26.8 и cronet совпадают со stable.
+- База — sing-box `v1.14.2`. Проверки на устройстве до тега не было.
+
+#### v1.14.2-lx.11
+
+Синк с `upstream/stable` на 4 коммита от 2026-09-29, отложенных в lx.10. Пользовательские ноты
+(EN+RU): [`docs-lx/releases/v1.14.2-lx.11.md`](releases/v1.14.2-lx.11.md). База — sing-box
+`v1.14.2` + 20 коммитов, нового тега у апстрима нет; дрейф 0 (merge-base = `3ff24dbe5`). Go 1.26.8,
+cronet, NDK/JDK, `upstream.version` не менялись; `require` равен `stable`. Из-за смены версий
+модулей перед тегом прогнан dry run `lx-release.yml` (зелёный).
+
+- 📌 **Мерж `886bc48ec`**: `de52a8126` «Fix zero UDP checksum», `b93c30f2a` «Fix protocol input
+  validation», `3ff24dbe5` «Fix connected UDP reads on BSD» (новый `common/dialer/udp_conn.go`),
+  `834f4551d` документация. Конфликт — `go.sum`. В 17 автослитых файлах нашей дельты нет, они
+  равны апстримным.
+- 📌 **Форк-сабмодули сдвинуты до мержа ядра**: `wireguard-go` `64065e6` — мерж sagernet `6731c73`
+  («conn: Fix connected socket receive on darwin», `n == 0` → `ErrRebindRequired`) поверх lx-линии,
+  гейт `hasReserved` в `msgx_darwin.go` сохранён; `sing-tun` `6f56eca` — мерж sagernet
+  `0bdadeb4c934` (`8ab0e83` zero UDP checksum, `0bdadeb` input validation), lx-дельта в
+  `stack_system.go` не изменилась. `replace` на четыре форка на месте (`go list -m`).
+- Проверки на устройстве до тега не было.
+
+#### v1.14.2-lx.10
+
+Хотфикс Tailscale (SPEC 112, issue #33). Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.10.md`](releases/v1.14.2-lx.10.md). База — как в lx.9 (sing-box
+`v1.14.2` + 16 коммитов); Go 1.26.8, cronet, NDK/JDK, `upstream.version` не менялись.
+
+- 🐛 **Tailscale: трафик по прямому пути** (сабмодуль `wireguard-go` `9076fc9`, SPEC 112). Графт AWG
+  обнулил `MessageEncapsulatingTransportSize`; устройство Tailscale собрано из того же форка
+  (глобальный `replace`), а magicsock на прямом UDP-пути отвергает `offset != 8`. Константа
+  возвращена к апстримным 8, запас добавлен в буферы рукопожатия, ответа, cookie, junk и `i1`–`i5`;
+  путь данных уже учитывал его. Байты на проводе у WireGuard/AWG не изменились. Тесты:
+  `device/lx_send_headroom_test.go` (WG, AWG 2.0, AWG 3.x), `protocol/tailscale/send_headroom_lx_test.go`.
+  Проверки на устройстве до тега не было (решение владельца: проверка на пользователях).
+- ⏸️ **Дрейф `upstream/stable` отложен**: 4 коммита от 2026-09-29 (`de52a8126` «Fix zero UDP
+  checksum», `b93c30f2a` «Fix protocol input validation», `3ff24dbe5` «Fix connected UDP reads on
+  BSD», документация) с бампами `wireguard-go` v0.0.8-pre и `sing-tun` v0.9.7-pre. Бампы требуют
+  разбора форк-сабмодулей до мержа ядра (runbook §1); хотфикс выходит без них, мерж — отдельной
+  задачей.
+
+#### v1.14.2-lx.9
+
+Хотфикс Tailscale (SPEC 111) и синк с `upstream/stable` на один коммит `f43d07faf` «Update
+dependencies». Пользовательские ноты (EN+RU): [`docs-lx/releases/v1.14.2-lx.9.md`](releases/v1.14.2-lx.9.md).
+База — sing-box `v1.14.2` + 16 коммитов, нового тега у апстрима нет; дрейф 0. Go 1.26.8, cronet,
+NDK/JDK, `upstream.version` не менялись; форк-сабмодули на прежних пинах. Из-за смены версий
+модулей перед тегом прогнан dry run `lx-release.yml`.
+
+- 🐛 **Tailscale: канал к координатору — Noise поверх HTTPS (443) по умолчанию** (`eb2ad217c`,
+  SPEC 111, реестр HOTFIXES). Клиент tailscale сначала дайлит `controlplane.tailscale.com:80` и
+  делает `Upgrade` на Noise; за DPI, замораживающим поток после смены протокола, сторож долгого
+  опроса (120 с) отменял запрос, а не соединение, и новые запросы уходили в тот же мёртвый сокет —
+  переход на 443 наступал только после закрытия сокета ОС (~15 мин после каждого старта).
+  Воспроизведено на роутере: `Send-Q 5186` на `:80`, `retr 0x0A`. Новый файл
+  `protocol/tailscale/control_https_lx.go` ставит `TS_FORCE_NOISE_443=true`, если переменная не задана
+  явно; апстримные файлы не тронуты. Полевой проверки на роутере до тега не было.
+- 📌 **Мерж `b785b0957`**: `sing` v0.9.6, `sing-cloudflared` v0.1.3, `sing-mux` v0.3.9, `sing-quic`
+  v0.7.1, `sing-tun` v0.9.6 — те же коммиты, что были, теперь под тегами. Новый код только в
+  `sing-openvpn` v0.1.0 и `sing-openconnect` v0.1.0: «Add client suspend and resume», ядро эти
+  методы пока не вызывает. Конфликт — `go.sum`; `replace` на форк-сабмодули не сдвинулся
+  (`go list -m`).
+
+#### v1.14.2-lx.8
+
+Синк с `upstream/stable` поверх `v1.14.2-lx.7` (SPEC 109). Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.8.md`](releases/v1.14.2-lx.8.md). База — sing-box `v1.14.2` + 15
+коммитов (`a781ae655`), нового тега у апстрима нет; дрейф 0. Модули: `sing` 5f9aad7def20, `sing-mux`
+v0.3.9-0.20260927144857, `sing-quic` 8601a428f4db, `sing-snell` bc5a12ac736f — `require` равен stable.
+Go 1.26.8, cronet, NDK/JDK, `upstream.version` не менялись; форк-сабмодули на прежних пинах
+(`wireguard-go` v0.0.7, `sing-tun` ddaa4ca25e3b, `gvisor`, `utls` v1.8.7). Из-за смены версий
+модулей перед тегом прогнан dry run `lx-release.yml`.
+
+- 📌 **Мерж `741d5ffa1`**: управление простаивающими соединениями (`route.ReferenceManager`,
+  `adapter.IdleConnectionKeeper`, `adapter.Referrer`), power-отчёты, `Fix UDP fragmentation`,
+  `Fix tun GSO check`, `Fix system TUN read loop stopping on write errors`, глобальные серверы
+  systemd-resolved, пауза и пробуждение в libbox (`WakeNow`, `RecordScreenState`,
+  `RecordLockState`). Конфликты: `common/interrupt/group.go`, `dns/transport_adapter.go`,
+  `protocol/group/urltest.go`, `go.sum`. В 19 автослитых файлах с нашей дельтой набор наших строк
+  не изменился.
+- 🔧 **Хотфикс SPEC 084 снят**: апстрим вынес `Close` из-под мьютекса `interrupt.Group` тем же
+  способом (`0ed951aa0`). `group.go` и `conn.go` равны апстримным. `NewSingPacketConn` и
+  `SingPacketConn` — действующий хотфикс SPEC 064, не остаток 084 — вынесены в
+  `common/interrupt/sing_packet_conn_lx.go` без изменения поведения.
+- 🔧 **`urltest` `round_robin`: весь пул в `References()`** (`bd0b66934`) — апстримный учёт ссылок
+  называл используемым только выбранный узел, остальным узлам пула закрывались бы простаивающие
+  соединения после каждого использования.
+- ⚠️ **SPEC 028 на Linux и Android начал действовать с этого релиза**: `UDPFragmentDefault = true`
+  до `Fix UDP fragmentation` не ставил сокет-опцию, и ядро держало DF само. У `masque` по h3 флаг
+  оставлен, хотя у своих QUIC-протоколов апстрим его убрал. Прогон вложенных туннелей и WARP по h3
+  на устройстве не проводился.
+- 🧰 `TestLazyStateTransitions` читает часы сна на тик позже (`1286271a7`) — падал под нагрузкой.
+- ⚠️ XHTTP с `xmux` новых интерфейсов не реализует: его пул вне учёта ссылок и закрытия на паузе.
+
+#### v1.14.2-lx.7
+
+Хотфикс поверх `v1.14.2-lx.6`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.7.md`](releases/v1.14.2-lx.7.md). База — sing-box `v1.14.2`,
+тулчейн и зависимости с lx.6 не менялись (Go 1.26.8 = stable, сабмодули на месте). `upstream/stable`
+на 2026-09-28 впереди на те же 15 коммитов без нового тега; из-за них `require` расходится со stable
+в четырёх модулях (`sing`, `sing-mux`, `sing-quic`, `sing-snell`). Синк снова отложен: релиз
+несёт только исправления masque, а пробный мерж даёт конфликты в `common/interrupt/group.go`,
+`dns/transport_adapter.go`, `protocol/group/urltest.go` и `go.sum` и меняет поведение
+`Pause`/`Wake` в libbox — это отдельная задача с прогоном на устройстве. Из отложенного для нас
+значимы `Fix UDP fragmentation` (на Linux/Android `UDPFragmentDefault` до него не снимает DF,
+на это опирается SPEC 028) и `Fix interrupt group holding lock while closing connections`
+(совпадает с нашим SPEC 084).
+
+- 🐛 **masque: три ожидания без предела** (SPEC 108, находки исследования SPEC 107).
+  - `vhttp: auto`: ветка запомненного h2 в `connect` (`protocol/masque/outbound.go`) при отказе
+    возвращала ошибку и не трогала память — узел отказывал на каждом dial до рестарта. Теперь
+    отказ не по отмене вызывающим сбрасывает память (`forgetNetwork`) и отдаёт управление общему
+    пути `auto`; h2 в этой попытке повторно не пробуется, настенный таймер фолбэка выключен.
+  - h2: `h2RawConn.Close` (`transport/masque/client_h2.go`) брал `writeMu` до закрытия сокета и
+    вставал за записью без дедлайна. Теперь `SetWriteDeadline` на `h2CloseGrace` (1 с), `TryLock`,
+    `RST_STREAM` только при свободном мьютексе, затем закрытие сокета.
+  - h3: `ReadResponse` в `dialCONNECTIP` (`transport/masque/masque.go`) не принимал контекст.
+    Обёртка `readResponse` на время чтения вешает на контекст `CancelRead`/`CancelWrite` и снимает
+    привязку после ответа.
+  - Тесты: `protocol/masque/auto_h2_recover_lx_test.go` (5), `transport/masque/hang_lx_test.go` (4).
+    На живом WARP не прогонялось.
+- 🧰 **Файлы masque переименованы**: `option/masque.go` → `option/masque_lx.go`,
+  `test/masque_test.go` → `test/masque_lx_test.go`. Апстрим 1.15 кладёт по этим путям свой MASQUE
+  (endpoint'ы `masque-client`/`masque-server`); код не менялся.
+- 📌 **Исследование SPEC 107**: сравнение нашего masque-outbound с MASQUE апстрима 1.15 —
+  совместимость с WARP, реестр дефектов обеих реализаций, варианты перехода на 1.15.
+
+#### v1.14.2-lx.6
+
+Хотфикс поверх `v1.14.2-lx.5`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.6.md`](releases/v1.14.2-lx.6.md). База — sing-box `v1.14.2`,
+зависимости с lx.5 не менялись. `upstream/stable` на 2026-09-28 ушёл на 15 коммитов после `v1.14.2`
+без нового тега (управление idle-соединениями, power-отчёты, `Fix UDP fragmentation`, `Fix tun GSO
+check` и три коммита, отложенные в lx.5). Это полноценный синк, а не хотфикс: откладываем до
+следующего релиза.
+
+- 🔧 **XMUX: дефолт `max_connections 3` вместо `max_concurrency 1`** — `normalizeXmux`
+  (`transport/v2rayxhttp/xmux.go`) при отсутствующей или полностью пустой секции `xmux` ставил
+  `max_concurrency 1-1` (эталон sing-box-extended 2.6.4, SPEC 059), то есть TLS-соединение на каждый
+  поток. Xray-core сменил дефолт на `maxConnections 6`, затем на `3` (`18e2839`, XTLS/Xray-core#6376):
+  ТСПУ режет больше трёх соединений к серверу на мобильном интернете. Теперь дефолт —
+  `max_connections 3-3`, `h_max_request_times 600-900`, `h_max_reusable_secs 1800-3000`; правило
+  «всё или ничего» не менялось. Таблицы дефолтов в SPEC 059 §3, FEATURE 002-XHTTP и
+  `protocols-transports` обновлены. Заявлено в
+  [issue #32](https://github.com/Leadaxe/sing-box-lx/issues/32).
+
+#### v1.14.2-lx.5
+
+Хотфикс поверх `v1.14.2-lx.4`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.5.md`](releases/v1.14.2-lx.5.md). База — sing-box `v1.14.2`,
+зависимости с lx.4 не менялись. `upstream/stable` на 2026-09-26 ушёл на три коммита после `v1.14.2`
+(`Fix system TUN read loop stopping on write errors`, `Fix local DNS server ignoring systemd-resolved
+global DNS servers`, чистка документации) без нового тега — сознательно не взяты в хотфикс, заберём
+следующим релизом.
+
+- 🐛 **`sing-box schema` падал на lx-типах** — генератор JSON-схемы апстрима (1.14) требует, чтобы
+  каждый тип с собственным `UnmarshalJSON` описывал себя через `DescribeSchema`; наши `AWGRange`
+  (`persistent_keepalive_interval`, `h1..h4`, тайминги AWG 3.x), `XmuxRange` (xmux XHTTP) и
+  `rewrite` у `chain` этого не делали, и команда завершалась `FATAL unmapped custom JSON type
+  option.AWGRange`. Теперь все три типа описаны (число или `"N-M"`; строка/число/`[min,max]`;
+  объект «тип → merge-patch», для чего `rewrite` получил именованный тип `ChainRewrite` с тем же
+  underlying `map[string]any`), а `xhttp` добавлен в union транспортов `V2RayTransport`, где список
+  вариантов захардкожен апстримом. Страж-тест `TestSchemaGeneratesWithLXTypes` гоняет генератор
+  под тегами сборки. Заявлено в
+  [issue #30](https://github.com/Leadaxe/sing-box-lx/issues/30).
+
+#### v1.14.2-lx.4
+
+Поверх `v1.14.2-lx.3`. База — sing-box `v1.14.2`.
+
+- ✨ **Ручной переключатель WG/AWG-endpoint'а** — gRPC `SetEndpointEnabled(tag, enabled)` в блоке
+  `lx_command`. Выключение усыпляет узел механизмом SPEC 020 (установленные потоки рвутся) и отвергает
+  дайлы, UDP-listen и L3-форвард ошибкой `WireGuard endpoint is disabled`; включение будит спящий узел
+  сразу, разобранный или несобранный собирает следующий дайл через бюджет. Новое состояние `disabled`
+  в `GroupItem.endpointState` (`GetOutbounds`), ответ RPC несёт состояние после вызова. Коды:
+  `NotFound`, `InvalidArgument` (не WG/AWG), `FailedPrecondition` (ядро не запущено, узел закрывается),
+  `Unavailable` (пробуждение не удалось). Не сохраняется: reload включает все узлы. Ядро без тега,
+  работает и на десктопе. LxBox: `CommandClient.SetEndpointEnabled(tag, enabled)` → `EndpointToggleResult`
+  с полем `State`.
+  ([SPEC 106](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/106-WG_ENDPOINT_TOGGLE/SPEC.md))
+- 🧰 **OpenWrt-инсталлятор 1.2** — `GOMEMLIMIT` = MemTotal/3 (64..512 МиБ) и `GOGC=50` в init-скрипт procd
+  службы `lxd`; oom-killer ядра реагирует только у `memory_limit`, GC должен держать кучу заранее.
+- 📄 `SECURITY.md` — приватный канал для сообщений об уязвимостях.
+
+#### v1.14.2-lx.3
+
+Хотфикс поверх `v1.14.2-lx.2`. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.3.md`](releases/v1.14.2-lx.3.md). База — sing-box `v1.14.2`, дрейфа от
+`upstream/stable` нет, зависимости с lx.2 не менялись.
+
+- 🐛 **VLESS: Vision поверх VLESS-шифрования** — `flow: xtls-rprx-vision` вместе с `encryption` падал с
+  `vision: not a valid supported TLS connection: *encryption.CommonConn`. Новый файл
+  `protocol/vless/encryption/lx_vision.go` добавляет `*CommonConn` в закрытый реестр TLS-conn'ов Vision
+  из sing-vmess (`//go:linkname` на `vless.tlsRegistry`): Vision читает `input`/`rawInput` слоя, прямое
+  копирование идёт в conn под слоем, как `UnwrapRawConn` в Xray. Транспорт любой, XHTTP тоже. Страж-тест
+  ловит переименование реестра при бампе sing-vmess. Стенд: живые узлы `tcp`+REALITY и `xhttp`+REALITY —
+  204 и 20 МБ по HTTPS. ([#29](https://github.com/Leadaxe/sing-box-lx/issues/29),
+  [SPEC 105](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/105-VISION_OVER_VLESS_ENCRYPTION/SPEC.md))
+- 📝 `protocols-transports`: Vision поверх XHTTP работает только вместе с `encryption`.
+
+#### v1.14.2-lx.2-rc.3
+
+Пререлиз линии `v1.14.2-lx.2`; подробности — в секции `v1.14.2-lx.2` ниже.
+
+- 🐛 **lxd: служба Windows падала на первом `/admin/apply`** (rc.1/rc.2) — тело службы получало контекст без реестра сервисов ядра, apply паниковал, клиент видел EOF. Теперь служба запускает демон на контексте ядра, как консольный `lxd`; `lxd.Run` без реестра отказывает сразу (`lxd: context without service registry`); паника в admin REST — JSON 500 и стек в `lxd.log`, в gRPC — `codes.Internal` и стек в лог (две строки `// lx:` в `daemon/server.go`); на Windows stdlib `log` (ошибки net/http) тоже пишется в `lxd.log`. ([SPEC 103 §4.4](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md))
+- ✨ **XHTTP: версия HTTP по `tls.alpn`** и 🪟 **служба Windows (SCM)** — из rc.2/rc.1.
+- База — sing-box `v1.14.2`, дрейфа от `upstream/stable` нет.
+
+#### v1.14.2-lx.2-rc.2
+
+Пререлиз линии `v1.14.2-lx.2`; подробности — в секции `v1.14.2-lx.2` ниже.
+
+- ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray** — `["h3"]` → HTTP/3 по QUIC (узлы только с h3, [issue #25](https://github.com/Leadaxe/sing-box-lx/issues/25)), `["http/1.1"]` → HTTP/1.1, без TLS → HTTP/1.1 (было h2c), REALITY → HTTP/2, иначе HTTP/2. Отпечаток uTLS на HTTP/3 не применяется (предупреждение в логе), QUIC-рукопожатие — Chrome-подобное. Новых ключей нет. ([SPEC 104](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/104-XHTTP_HTTP_VERSION_PARITY/SPEC.md))
+- 🪟 **lxd: служба Windows (SCM)** — из rc.1 ([SPEC 103](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md)).
+- База — sing-box `v1.14.2`, дрейфа от `upstream/stable` нет.
+
+#### v1.14.2-lx.2
+
+Стабильный релиз линии `v1.14.2-lx.2` — сводит rc.1–rc.3, код = rc.3. Пользовательские ноты (EN+RU):
+[`docs-lx/releases/v1.14.2-lx.2.md`](releases/v1.14.2-lx.2.md). База — sing-box `v1.14.2`, дрейфа от
+`upstream/stable` нет.
+
+**Что вошло:**
+
+- 🪟 **lxd: служба Windows `sing-box-lxd`** — `--service=install|copy|status|uninstall`; служба SCM (`LocalSystem`,
+  автозапуск до входа пользователя, recovery) исполняет защищённую копию `<ProgramFiles>\sing-box-lxd\` (exe +
+  `libcronet.dll`), а не файл, из которого её поставили; данные — `<ProgramData>\sing-box-lxd\state\` и `…\logs\`
+  (`lxd.log`), каталог захватывается до записи секрета. Install со stop → замена копии → configure → start и откатом на
+  прежнюю копию при провале; status с кодами 0 `OK` / 2 `MISMATCH`·`UNSAFE` / 3 / 4 / 5 / 1; сайдкар
+  `sing-box-lxd.install.json` с `files[]` и `warnings[]` (совет сменить секрет, если каталог был доступен чужому SID).
+- 🐛 **Служба Windows на контексте ядра** (rc.3) — в rc.1/rc.2 первый `/admin/apply` под SCM паниковал, клиент видел EOF.
+- 📝 **Паники admin REST и gRPC — в лог демона** со стеком, ответ JSON 500 / `codes.Internal`; на Windows stdlib `log`
+  тоже в `lxd.log`.
+- 🎟 **`--invite-out` / `--invite-name`** у `--service=install` (macOS, Windows) и `client add --invite-out` — инвайт в
+  новый файл, существующий — отказ до изменений; имя по умолчанию `singbox-launcher`.
+- 🏷 **Имя клиента** — после обрезки пробелов пусто или 1–64 печатных символа (`400 client name: …`); enroll по именному
+  инвайту заменяет клиента с тем же именем.
+- ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray** — `["h3"]` → HTTP/3 по QUIC, `["http/1.1"]` и без TLS → HTTP/1.1
+  (было h2c), REALITY → HTTP/2, иначе HTTP/2; новых ключей нет.
+
+**Подробности:**
+
+- 🪟 **lxd: служба Windows (SCM) с защищённой копией ядра**
+  ([SPEC 103](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md);
+  решение владельца 2026-09-24, пара SPEC 141 лаунчера). На Windows `lxd` собирался, но `--service` был заглушкой,
+  а лаунчер запускал ядро с правами администратора из `%LOCALAPPDATA%\singbox-launcher\bin` — каталога, куда пишет
+  любой процесс пользователя: подмена `sing-box.exe` или `libcronet.dll` давала код с высокой целостностью (тот же
+  класс дефекта, что SPEC 100 закрыл на macOS). Теперь модель SPEC 100 перенесена на SCM: служба `sing-box-lxd`
+  исполняет защищённую копию, а не файл, из которого её поставили, и поднимает last-good до входа пользователя.
+  Код — только пакет `lxd/`, `cmd/sing-box/cmd_lxd_lx.go` и новые `cmd/sing-box/*_windows_lx.go`; апстримных
+  файлов ноль (с rc.3 — две строки `// lx:` в `daemon/server.go`, recover-интерсепторы gRPC).
+  - Служба SCM `sing-box-lxd`: `LocalSystem`, автозапуск, зависимость `Tcpip`; `BinaryPathName` собирается
+    `ComposeCommandLine` (путь копии в кавычках + `lxd --state-dir <abs>`); восстановление — три рестарта через 5 с,
+    сброс через 86400 с, рестарт и при остановке с ненулевым кодом; DACL службы
+    `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x2008d;;;AU)` — Authenticated Users только читают конфигурацию и состояние.
+    Демон под SCM идёт через `svc.Run`: `START_PENDING` → daemon.json → лог → самопроверка → `Chdir` в state-каталог →
+    сразу `RUNNING`; stop/shutdown отменяют `lxd.Run` (новая ветка `ctx.Done()`, общая для всех платформ) со сторожем
+    10 с.
+  - Контекст службы (rc.3): тело службы запускает `lxd.Run` на контексте от `globalCtx` с отменой по стопу SCM, как
+    консольный `lxd`; `lxd.Run` без реестра сервисов ядра отказывает сразу (`lxd: context without service registry`).
+    В rc.1/rc.2 контекстом был `context.Background()`: первый `/admin/apply` паниковал (`missing service registry in
+    context`), net/http рвал соединение (клиент — EOF), стек уходил в stderr, которого у службы нет. Паника в admin
+    REST — стек в лог демона и JSON 500, если ответ ещё не начат; в gRPC — recover-интерсепторы (`daemon/server_recover_lx.go`,
+    две строки `// lx:` в `daemon/server.go`), `codes.Internal` и стек в лог; на Windows stdlib `log` (ошибки
+    net/http) тоже пишется в `lxd.log`. ([SPEC 103 §4.4](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/103-LXD_WINDOWS_SERVICE/SPEC.md))
+  - Защищённая копия и набор: `<ProgramFiles>\sing-box-lxd\sing-box-lxd.exe` плюс `libcronet.dll`, если она лежит
+    рядом с источником (`wintun.dll` встроен в `sing-tun` и в набор не входит). Замена члена набора — временный файл
+    → DACL → сверка sha256 → `rename` старого в `.old` → временный на место; одинаковый набор не трогается
+    (`binary set unchanged (…), copy skipped`), остатки `.old`/temp прошлого прогона убираются, незнакомый файл в
+    каталоге копии — отказ с `Remove-Item`. Сайдкар `sing-box-lxd.install.json` — отдельная структура: `source`,
+    `version`, `installed_at`, `service`, `files[{name, sha256}]`, `warnings[{code, text}]`; сайдкар macOS не изменился
+    ни по ключам, ни по значениям (golden-тест).
+  - Инвариант «защищённый путь»: каждое звено от корня тома открывается без следования ссылкам, владелец и DACL
+    читаются с дескриптора; у предков — владелец SYSTEM/Administrators/TrustedInstaller и у чужих SID нет
+    `DELETE`/`WRITE_DAC`/`WRITE_OWNER`/`GENERIC_WRITE`/`GENERIC_ALL`/`FILE_DELETE_CHILD`, у каталога копии и файлов
+    набора — никакой чужой записи; reparse point, NULL DACL, неизвестный тип разрешающей ACE — нарушение; том —
+    фиксированный NTFS. Предикат портируемый, табличный тест идёт на Linux.
+  - Захват `<ProgramData>\sing-box-lxd` до записи секрета: `SeTakeOwnershipPrivilege`/`SeRestorePrivilege`, обход
+    сверху вниз через дескрипторы без следования ссылкам; корень — владелец Administrators и защищённый DACL, узел
+    ниже вне нормы — явный защищённый DACL, файлы демона с владельцем SYSTEM и унаследованными ACE — норма; строки
+    `took ownership of …`, `replaced DACL on …` или `data dir … is protected`; reparse point и жёсткие ссылки — отказ.
+    Секрет и серверная пара не перегенерируются; если чужой SID владел деревом или читал `state\`, install печатает
+    `WARN: … rotate the admin secret …` и кладёт его в `warnings` сайдкара (у install под `runas` консоли нет).
+  - `--service=install` (elevated): каталог данных → daemon.json (+ `log_file` = `<ProgramData>\sing-box-lxd\logs\lxd.log`,
+    если ключа нет) → stop с ожиданием `STOPPED` до 30 с → замена образа → сайдкар → `CreateService`/`UpdateConfig`,
+    recovery, DACL службы → start с ожиданием `RUNNING` → отчёт status (не `OK` — выход 1) → сводка с
+    `Restart-Service sing-box-lxd`. Провал замены или конфигурации после остановки возвращает прежний образ и
+    поднимает службу на нём (`install failed, previous service image restarted`). `--service=copy` — то же без SCM;
+    `--service=uninstall [--keep-copy] [--purge] [--dry-run]` удаляет набор только при совпадении sha каждого файла с
+    сайдкаром, дефолтный каталог копии — если опустел, `--purge` — весь `<ProgramData>\sing-box-lxd`;
+    `--service=install-user` на Windows — отказ.
+  - `--service=status` без прав (SCM открывается с `SC_MANAGER_CONNECT`, служба — только на запрос): блоки
+    `[service]`/`[copy]`/`[data dir]` и вердикт с кодами 0 `OK` / 2 `MISMATCH`·`UNSAFE` / 3 `NOT INSTALLED` /
+    4 `COPY ONLY` / 5 `NOT RUNNING` / 1 ошибка. Отличие от macOS: argv[0] службы не каноническая копия — `UNSAFE`;
+    также `UNSAFE` — путь с пробелом без кавычек и DACL службы, дающий чужому SID смену конфигурации или владельца.
+  - `--invite-out <файл>` / `--invite-name <имя>` у `--service=install` (macOS и Windows; на Linux, где install
+    печатает рецепт, — отказ) и `client add --invite-out <файл>` на всех платформах: инвайт пишется в новый файл
+    (Unix `O_CREAT|O_EXCL|O_NOFOLLOW` 0600, Windows `CREATE_NEW` и сверка `GetFinalPathNameByHandle`), существующий
+    файл — отказ до любых изменений; имя по умолчанию при `--invite-out` — `singbox-launcher`; провал минта с
+    `--invite-out` — выход 1 при установленной службе, файл удаляется. Без флагов поведение macOS прежнее.
+  - Имя клиента (`--name`, `--invite-name`, поле `name` в `/admin/client-code`) нормируется на минте: после обрезки
+    пробелов — пусто или 1–64 печатных символа, иначе отказ CLI и `400 client name: …`.
+  - Enroll по именному инвайту заменяет клиента с тем же именем (старый сертификат отзывается); безымянный инвайт
+    добавляет, как раньше. Так повторное сопряжение лаунчера не копит записи `singbox-launcher`.
+  - Самопроверка при старте: на Windows `lxd` под SCM на незащищённом бинаре не стартует (`refusing to run as a
+    Windows service from …`), повышенный `lxd`/`run` вне SCM и `--allow-unsafe-exec` — WARN, без повышения — не
+    проверяется. Пройденная проверка в контексте службы пишет одну строку INFO — на Windows
+    (`self-check ok: protected …, windows service sing-box-lxd`) и на macOS
+    (`self-check ok: root-owned …, launchd service com.leadaxe.sing-box-lxd`).
+  - Лог на Windows: `logs\lxd.log`, один дескриптор на всю жизнь процесса (`SetStdHandle` на stdout/stderr, подмена
+    `os.Stdout`/`os.Stderr` и стандартного логгера), ротация копированием в `lxd.log.1` с усечением — `rename` живого
+    файла без `FILE_SHARE_DELETE` невозможен; строки между копированием и усечением теряются.
+  - Поиск DLL: `SetDefaultDllDirectories(APPLICATION_DIR | SYSTEM32)` в `init` любой сборки `with_lxd` на Windows (с
+    проверкой процедуры — Windows 7 без KB2533623); если в наборе нет `libcronet.dll`, служба и повышенный `run`
+    закрепляют её загрузку за каталогом exe, и naive-outbound получает ошибку вместо поиска по `PATH` под SYSTEM.
+  - CI: `GOOS=windows go vet ./lxd/ ./cmd/sing-box/` в lint и джоба `test-windows` на `windows-latest` (`go vet` и
+    `go test` пакетов `lxd` и `cmd/sing-box` с полным набором тегов).
+  - Поведение macOS, Linux и Android не меняется, кроме перечисленного: флаги `--invite-out`/`--invite-name`, норма
+    имени клиента, замена клиента именным enroll, строка INFO самопроверки на macOS. Win7-386 собирается без
+    `with_lxd` — службы там нет. Живой прогон на Windows 10 через лаунчер (rc.1→rc.3): дефект контекста службы
+    найден и закрыт в rc.3, цикл install/status/uninstall и сопряжение лаунчера через `--invite-out` подтверждены
+    владельцем 2026-09-25 (SPEC 103 — D).
+
+- ✨ **XHTTP: версия HTTP по `tls.alpn`, как у Xray — HTTP/1.1, HTTP/2, HTTP/3**
+  ([SPEC 104](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/104-XHTTP_HTTP_VERSION_PARITY/SPEC.md),
+  [issue #25](https://github.com/Leadaxe/sing-box-lx/issues/25)). Клиент был HTTP/2-only, и сервер Xray с
+  `tlsSettings.alpn: ["h3"]` (слушает только QUIC) не поднимался. Теперь правило `decideHTTPVersion` Xray:
+  `tls.alpn: ["h3"]` → HTTP/3 по QUIC/UDP через тот же `detour`; `["http/1.1"]` и конфиг без TLS → HTTP/1.1
+  (без TLS раньше был h2c; сервер Xray принимает обе формы); REALITY → всегда HTTP/2, `tls.alpn` без `h2`
+  заменяется на `["h2"]` с предупреждением; иначе HTTP/2 как раньше. Новых ключей нет.
+  - HTTP/3: `quic.Config` как у Xray (`MaxIdleTimeout` 300 с, `KeepAlivePeriod` из `xmux.h_keep_alive_period`,
+    `0` → 10 с, `MaxIncomingStreams: -1`, PMTUD выключен вне linux/windows/darwin, `ChromeParrot`); контроль
+    перегрузки — Cubic (у Xray BBR). `utls.fingerprint` на HTTP/3 не применяется (предупреждение, как у Xray);
+    uTLS-конфиг переводится в `crypto/tls` lx-файлом `common/tls/utls_client_std_lx.go`; `disable_sni` выключает
+    профиль Chrome для узла; ECH — узел грузится, dial отвечает ошибкой. Без `with_quic` конфиг с `["h3"]`
+    отвергается при загрузке.
+  - HTTP/1.1: download-GET и потоковые запросы — каждый по своему соединению с `Connection: close`,
+    upload-POST'ы `packet-up` — keep-alive.
+  - Типы ошибок quic-go/http3 не выходят за conn (аналог SPEC 082): текст сохранён, `Timeout()`/`Temporary()`
+    сняты, ошибки уровня соединения по-прежнему `net.ErrClosed`.
+  - Живой стенд `lx-test/xhttp_h3/run.sh` (Xray 26.9.9 @ `60e2a0c`, h3-only inbound на loopback, конфиг
+    репортёра #25): `packet-up`, `stream-up`, `stream-one` — OK. Апстримных файлов ноль.
+
+#### v1.14.2-lx.1
+
+- ⬆️ **База апстрима: sing-box v1.14.2** ([SPEC 102](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/102-UPSTREAM_SYNC_1_14_2/SPEC.md);
+  решение владельца 2026-09-24 после lx.13, дрейф 0). Семь апстримных коммитов: сброс сети только по фактической смене
+  интерфейса по умолчанию (`networkResetPending`, диспатч под `interfaceUpdateAccess`), а не на каждом старте, и без purge
+  TCP-NAT (`sing-tun` ddaa4ca25e3b); `service/resolved` — D-Bus-методы резолва не виснут/не падают, `mDNS.ReverseAddr`,
+  `deleteCallback` в `RevertLink`; hysteria2 realm STUN через default domain resolver и port hopping без ухода на другой
+  резолвнутый адрес (`sing-quic` 6a3a24d65b99); hijack-dns отчитывается об успешном хендшейке до обработки;
+  `common/dialer` переписан апстримом (нашей дельты нет); `adapter.DNSQueryOptionsFrom` удалён (не использовался).
+  Ритуал: сабмодуль `sing-tun` слит первым (конфликт `monitor_shared.go` — форма апстрима; дельта форка = только SPEC 040
+  self-heal), затем ядро — четыре конфликта (`go.mod`/`go.sum` с сохранением четырёх `replace`, `service/resolved` ×2 —
+  форма апстрима: наша сторона была testing-формой тех же фиксов из SPEC 095). Швы SPEC 047/073 в `route/network.go`
+  и SPEC 046 в `route/dns.go` целы; `box.go` уже нёс порядок `ConnectionManager` → `NetworkManager`. `upstream.version`
+  → 1.14.2, линия релизов начинается с `v1.14.2-lx.1`. Тулчейн и CI-скрипты апстрим не менял, dry run не требовался.
+  Прогон смены сети на устройстве — при перепине LxBox.
+
+#### v1.14.1-lx.13
+
+- 🧩 **Корневой блок `lx` конфига**
+  ([SPEC 098](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/098-LX_ROOT_CONFIG_BLOCK/SPEC.md);
+  решение владельца 2026-09-24). Глобальные ручки форка собраны в одном блоке по подсистемам:
+  `lx.wg` — `idle_suspend`, `idle_suspend_reachable`, `idle_teardown` (переехали из `route`, семантика SPEC 020 та же)
+  и новые `lazy_build`, `build_max`, `build_overflow` (разбираются и валидируются, действуют с SPEC 097);
+  `lx.masque.idle_timeout` — глобальное окно простоя для masque-узлов без своего ключа (ключ узла сильнее, явный
+  `"0"` в узле держит туннель поднятым). `idle_timeout` узла masque стал указателем, чтобы `"0"` отличался от
+  отсутствия. Старые `route.lx_idle_suspend` / `_reachable` / `_teardown` — алиасы на один релиз: предупреждение на
+  каждый ключ, разные значения в двух местах — ошибка старта `route.lx_idle_suspend conflicts with
+  lx.wg.idle_suspend`. Алиасы снимаются в релизе после перехода LxBox и лаунчера на `lx`. Ошибки валидации называют
+  полный путь ключа; сборка без `with_lx_idle_suspend` отвергает любой ключ `lx.wg` текстом `lx.wg.* is set but this
+  build lacks idle-suspend support…`. Running-config (SPEC 037) отдаёт блок в канонической форме. Подблок `lx.naive`
+  зарезервирован за SPEC 096 и пока отвергается как неизвестный ключ. `make -f Makefile.lx lx-check` проверяет все
+  `lx-test/config/*.json`, добавлен `lx_block.json`.
+- 💤 **WG/AWG-устройство собирается при первом дайле; потолок собранных устройств**
+  ([SPEC 097](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/097-LAZY_WG_DEVICE_BUILD/SPEC.md);
+  профиль LxBox 519: 11 endpoint'ов держали 192 МБ стартовых буферов). Ключи `lx.wg` из SPEC 098 начали действовать
+  (только сборки с `with_lx_idle_suspend`). `lazy_build: true` — endpoint стартует разобранным (уровень 3 SPEC 020),
+  detour резолвится на старте, устройство собирается первым дайлом; узлы с `listen_port` не затрагиваются.
+  `build_max: N` — не больше N собранных устройств: сборка (N+1)-го сначала разбирает жертву — сверх потолка →
+  меньше ручных ссылок (выбор селектора, `final`, цель правила) → меньше авто-ссылок (urltest, detour, цепочка,
+  DNS-detour) → давнее последнее обращение; узел с дайлом в процессе, TCP-потоком или трафиком ≥ 4096 Б с прошлой
+  выборки не разбирается. Жертвы нет — `build_overflow: "wait"` ждёт до дедлайна дайла (не дольше 15 с),
+  `"build"` собирает сверх потолка с предупреждением. `build_max` без `lazy_build` действует с первой пересборки.
+  Лог: `lx idle: lazy <tag> (device not built)`, `lx idle: teardown <tag> by=budget`, `lx idle: build over budget
+  N+1/N`, `build budget exhausted (N built, none idle)`. `GetOutbounds` отдаёт у WG/AWG-узлов `endpointState`
+  (`never_built` / `building` / `up` / `asleep` / `torn_down` / `down`) и `idleSinceSeconds`; libbox
+  `OutboundGroupItem` — `EndpointState`, `IdleSinceSeconds`. Замер на эмуляторе — за владельцем.
+- 🔇 **WireGuard/AWG: успешная переотправка хендшейка без UDP GSO больше не ERROR**
+  ([SPEC 101](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/101-WG_HANDSHAKE_GSO_RETRY_LOG_NOISE/SPEC.md);
+  заявка LxBox #95, Proton AWG). Bind форка wireguard-go после отказа ядра от GSO выключает offload, переотправляет
+  батч без него и возвращает `ErrUDPGSODisabled{RetryErr}`, где `RetryErr` — ошибка повтора (nil при успехе).
+  Data-путь её разворачивал, а `SendHandshakeInitiation`/`SendHandshakeResponse` печатали обёртку целиком как
+  `ERROR … failed to send handshake initiation: disabled UDP GSO on …`, хотя пакет ушёл. Теперь один хелпер
+  `unwrapGSODisabled` на три пути: Verbose при успешной переотправке, ERROR только с реальной ошибкой повтора.
+  Сабмодуль `submodules/wireguard-go` d0568ce; провод не тронут.
+- ℹ️ **Дрейф от `upstream/stable` на срезе: v1.14.2** (7 фикс-коммитов: network reset, resolved, hysteria2 realm STUN и port hopping, отчёт хендшейка hijack-dns, `common/dialer`). Синк отложен в отдельную задачу: пробный мерж конфликтует в `go.mod`/`go.sum` и `service/resolved`. База lx.13 = v1.14.1+34 (SPEC 095).
+
+#### v1.14.1-lx.12
+
+- 🔤 **lxd: файл root-owned копии называется `sing-box-lxd`, а не ярлыком**
+  ([SPEC 100](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/100-LXD_ROOT_OWNED_BINARY/SPEC.md);
+  решение владельца 2026-09-24). Копия — `/Library/PrivilegedHelperTools/sing-box-lxd`, сайдкар —
+  `/Library/PrivilegedHelperTools/sing-box-lxd.install.json`; поля, `--exec-dir`, инвариант, install/copy/status/
+  uninstall/`--keep-copy` и проверка «каталог на месте копии» — как в lx.11. Причина: macOS усекает `comm` до 16
+  символов; `sing-box-lxd` влезает целиком и содержит `sing-box` — `pgrep`/`pkill`/`ps -c` находят демон без `-f`
+  (ярлык обрезался до `com.leadaxe.sing`). Ярлык службы, plist и `XPC_SERVICE_NAME` не меняются.
+  Файл lx.11 `com.leadaxe.sing-box-lxd` и его сайдкар ядро не читает и не трогает; plist, исполняющий такой файл,
+  status даёт `MISMATCH` (2) — «not an installed copy», до переустановки. Миграции нет (установок lx.11 нет).
+
+#### v1.14.1-lx.11
+
+- 🔒 **lxd: системная служба исполняет root-owned копию, а не бинарь из бандла — закрыто повышение
+  привилегий** ([SPEC 100](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/100-LXD_ROOT_OWNED_BINARY/SPEC.md)).
+  `--service=install` писал в `ProgramArguments[0]` plist'а LaunchDaemon путь `os.Executable()` — на практике
+  бинарь в бандле лаунчера с владельцем-пользователем (и под `/Applications`, который `root:admin 0775`); launchd
+  исполнял его от root на каждом старте — любой процесс пользователя, заменивший файл, получал root. Теперь
+  install копирует себя в `/Library/PrivilegedHelperTools/com.leadaxe.sing-box-lxd` (`root:wheel 0755`; плоский файл с
+  именем ярлыка по соглашению Apple, решение владельца 2026-09-24; каталог проверяется от `/`: каждый компонент — не
+  симлинк, uid 0, без записи group/other; дефолтный каталог обязан существовать, `--exec-dir` создаётся `root:wheel
+  0755`; каталог на месте копии — остаток папочной раскладки rc — отказ `target is a directory (legacy layout); remove
+  it: sudo rm -rf <путь>`, сам не удаляется): временный файл с уникальным именем, fsync, chown, chmod, сверка sha256 с источником,
+  `rename` (перезапись на месте запрещена — macOS убивает процесс со сменившимися подписанными страницами; xattr
+  не копируются, переподписи нет); одинаковый бинарь не копируется (`binary unchanged (sha256 …), copy skipped`).
+  Рядом — сайдкар `com.leadaxe.sing-box-lxd.install.json` (`source`, `sha256`, `version`, `installed_at`, `plist_path`, `label`; `0644`). В plist
+  меняется только `ProgramArguments[0]`, `daemon.json`/клиенты не трогаются; support-каталог явно `root:wheel`
+  (наследовал `admin`). Новое: `--exec-dir` (свой каталог копии под тем же инвариантом); `--service=copy` — копия и
+  сайдкар без plist и launchd (для classic TUN лаунчера, SPEC 137 лаунчера; повтор — no-op `already up to date`,
+  последующий install привязывает копию без повторного копирования); `--service=status` без root — plist,
+  программа, владелец/режим, инвариант, хеши, сайдкар, `launchctl print`, вердикт с кодом выхода 0 `OK` /
+  2 `MISMATCH`·`UNSAFE` / 3 `NOT INSTALLED` / 4 `COPY ONLY` / 5 `NOT RUNNING` (на диске исправно, job launchd не
+  запущен — после живой проверки 2026-09-24, где статус говорил OK при незагруженной службе) / 1 ошибка; install
+  после `bootout` ждёт исчезновения старого job'а (до 10 с, с сообщением) и повторяет `bootstrap` на «already in
+  progress»/EIO — на живой проверке bootstrap сразу после bootout падал, и служба оставалась незагруженной ~3 с
+  выгрузки живого ядра; uninstall удаляет копию только при
+  совпадении sha с её сайдкаром (с plist или без), произвольный `ProgramArguments[0]` — никогда;
+  `uninstall --keep-copy` снимает службу, а копию оставляет с отвязанным сайдкаром (→ `COPY ONLY`). Самопроверка при
+  старте `lxd` и `run` под root: служба (`ppid 1` и `XPC_SERVICE_NAME` = ярлык) на не root-owned бинаре не
+  стартует, с путём, uid и режимом в `lxd.log`; прочие запуски от root и `--allow-unsafe-exec` — WARN.
+  `/admin/info` отдаёт `executable` и `executable_sha256` (хеш в фоне при старте). CI: `GOOS=darwin go vet` для
+  `./lxd/ ./cmd/sing-box/` в lint — darwin-половина демона раньше на push не компилировалась. Тесты: табличные
+  предиката/цепочки/самопроверки/копирования/сайдкара (на Linux без root), табличный тест переходов
+  none → copy only → installed → none и аномалий (darwin, через подменяемое окружение); `go test -race ./lxd/
+  ./cmd/sing-box/` зелёный на macOS. ⚠️ Системная служба, поставленная старым ядром, после обновления бинаря до
+  lx.11 на ближайшем рестарте не стартует до `sudo sing-box lxd --service=install` (daemon.json и клиенты
+  сохраняются). Старый лаунчер (до бампа пина) сравнивает пути и покажет «another core» — косметика. Ручная
+  проверка под sudo — за владельцем.
+
+#### v1.14.1-lx.10
+
+- 🔄 **Синк с `upstream/stable`: v1.14.1 + 34 коммита, re-graft форков `wireguard-go` v0.0.7 и `sing-tun`
+  3e03774a** ([SPEC 095](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/095-UPSTREAM_SYNC_1_14_1_PLUS_34/SPEC.md)).
+  Из апстрима: фикс начального WireGuard-хендшейка для доменных peer'ов (резолвер на устройстве,
+  требует wireguard-go v0.0.7), `baderror.WrapH2` в `sing` v0.9.6 (типы h2-ошибок больше не утекают —
+  наши обёртки SPEC 082 в `v2rayhttp`/`v2raygrpclite` сняты, в `v2rayxhttp` остаются), dial-контексты
+  при живых соединениях, таймауты DNS при дедупликации, half-close через обёртки, ротация временных
+  IPv6-адресов, спин read-loop на постоянных ошибках, крэш на битом cache-file, OOM-репорт при чистом
+  завершении, `sing-mux` v0.3.8. Sing-tun: укрепление циклов чтения TUN (SPEC 040 остаётся — acceptLoop
+  апстрим не трогал). Наши швы: SPEC 084 сохранён (апстрим всё ещё закрывает под замком), SPEC 018/035/022
+  наложены на новую дедупликацию DNS аддитивно, флаг `started` SPEC 047 снят (причина ушла), nil-гейт
+  остался. Конфликтов 6, все разобраны руками; автослитые файлы проверены по счётчику lx-маркеров.
+  Живой прогон на эмуляторе (раннбук §1.4, 2026-09-24, три цикла, 8 узлов): регрессий нет; апстримный фикс
+  хендшейка доменных пиров подтверждён (retry 0, переключение 1,1 с против 5,4–5,7 с на lx.9), счётчики
+  SPEC 094 нулевые; libbox API +1 аддитивный метод `hasTunInbound`.
+- 🧯 **Диагностика naive-узла роняла приложение** ([SPEC 099](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/099-GETURL_NAIVE_NIL_REMOTEADDR_PANIC/SPEC.md)).
+  При живом туннеле Диагностика идёт через `GetURLViaOutbound`; обработчик звал `RemoteAddr().String()` на
+  conn'е naive-узла (cronet-go `BidirectionalConn`), у которого адреса нет — nil-интерфейс, паника, конец
+  процесса. Теперь nil-адрес даёт пустое поле `remoteAddr`, статус и тело доезжают. Страж
+  `TestGetURLViaOutbound_NilRemoteAddrIsNotPanic_LX` (red-check пройден). Заявка 4PDA (Huawei P50 Pro, lx.9).
+
+#### v1.14.1-lx.9
+
+- 🧯 **XHTTP: наш же `Close()` больше не считается сбоем — ни для брейкера xmux, ни для лога**
+  ([SPEC 094](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/094-XHTTP_LOCAL_CLOSE_NOT_FAILURE/SPEC.md),
+  [LxBox#148](https://github.com/Leadaxe/LxBox/issues/148)). Симптом: XHTTP-узлы под urltest в
+  selector'е с `interrupt_exist_connections: true` циклически вытеснялись (`xmux: evicted connection
+  (cause=failing)`), а каждое нормально завершённое соединение писало
+  `connection download closed: http2: response body closed` на ERROR — при том, что WS на том же
+  сервере в логе чист. Два дефекта, оба в `transport/v2rayxhttp`: (1) `xmuxClient.roundTrip` отмечал
+  сбой на любую ошибку, включая `context.Canceled` от conn-scoped `cancel()` нашего `Close()`
+  (SPEC 077); три отмены подряд при смене выбора группы — и здоровое пуловое соединение уходило в
+  `failing` с backoff'ом на новое (SPEC 076). Теперь `errors.Is(err, context.Canceled)` нейтрален:
+  контекст отменяем только мы или вызывающий; `DeadlineExceeded`, `ECONNRESET`, `StreamError`,
+  не-200 — по-прежнему сбои. (2) Наш `Body.Close()` будил заблокированный `Read` sentinel'ом x/net,
+  которого `E.IsClosedOrCanceled` из sing не знает; под гейтом `localClosed` (SPEC 076) `Read` теперь
+  отдаёт `net.ErrClosed`, а если тело закрыл истёкший read-deadline — `os.ErrDeadlineExceeded`;
+  `io.EOF` не подменяется. Правка на границе conn по образцу SPEC 082, `route/conn.go` не тронут,
+  закрывает и `dl=h1`/`dl=h3`. Стражи `TestRoundTripLocalCancelIsNeutral`,
+  `TestReadAfterLocalCloseIsErrClosed` (red-check на обеих правках), пакет под `-race`, стенды
+  `lx-test`. `option/`, провод, дефолты — без изменений. Между lx.4 и lx.8 xhttp не менялся, так что
+  обновление до lx.8 жалобу не закрывало. Живой A/B 2026-09-24 на двух узлах `vless+xhttp+reality`
+  под urltest в selector'е (auto, stream-up, флап из четырёх outbound; переключения на живом download):
+  lx.8 — 13/13/15 строк ERROR `response body closed`, HEAD — 0/0/0 при тех же соединениях и всех curl
+  200; `cause=failing` — 0 у обоих (на быстрых узлах дефект брейкера вживую не проявляется, его держит
+  юнит). ⚠️ Подтверждение репортёра впереди.
+
 #### v1.14.1-lx.8
 
 - 🔗 **gRPC `service_name` с ведущим `/` = custom path в конвенции Xray**
@@ -44,7 +940,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   lite-сервер по-прежнему сравнивает декодированный путь (мягче Xray). Проверка: `:path` клиента
   снят голым h2c-листенером и сверен с тем, что вычисляет Xray; сверка с исходниками Xray и grpc-go
   (`:path` сырой, разрез по последнему `/`). ⚠️ Против живого Xray **не прогонялось** — ждём
-  подтверждения репортёра. Дока: [lx-protocols-transports §4.1](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/lx-protocols-transports.ru.md).
+  подтверждения репортёра. Дока: [protocols-transports §4.1](https://github.com/Leadaxe/sing-box-lx/blob/lx/docs-lx/protocols-transports.ru.md).
 
 #### v1.14.1-lx.7
 
@@ -89,7 +985,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   Было: в апстримном `switch` по `options.UDPRelayMode` нет ветки `default`, поэтому `"qiuc"`, `"Native"`,
   `"udp"` и любое другое значение молча означали `native` — пользователь, написавший `quic` с опечаткой,
   получал не тот режим UDP-релея и никакого сигнала об этом. Соседняя опция `congestion_control` при
-  опечатке даёт честную ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`), то есть
+  опечатке даёт ошибку `unknown congestion control algorithm: <value>` (из `sing-quic`), то есть
   поведение расходилось внутри одного outbound'а; документация апстрима знает ровно два значения —
   `native` и `quic`. Стало: `unknown udp_relay_mode: <value> (expected native or quic)` при загрузке
   конфига. Правка в `protocol/tuic/outbound.go`, маркер `// lx: SPEC 091`. Границы не меняются: пустая
@@ -106,7 +1002,7 @@ required for stable tags); this changelog section is the fallback used for pre-r
   ([SPEC 091](https://github.com/Leadaxe/sing-box-lx/blob/lx/SPECS/TASKS/091-CONFIG_VALIDATION_TUIC_MASQUE/SPEC.md) §2).
   Было: `resolveVHTTP` вызывался **раньше** проверки `uri`, поэтому забывший `uri` видел разное в
   зависимости от `vhttp`: при `h2` — `masque: vhttp h2 is not implemented for the standard profile`
-  (честно, но не про то — уводило чинить `vhttp`, после чего человек упирался во вторую ошибку), при
+  (верно по сути, но не про то — уводило чинить `vhttp`, после чего человек упирался во вторую ошибку), при
   `h3`/`auto`/не задано — `masque: uri is required for the standard profile`, которая не говорила, **что**
   туда писать. Стало: проверка `uri` поднята сразу за `resolveLegacyOptions` (legacy-поля могут его
   заполнять — поэтому не выше), и её текст самодостаточен:
@@ -433,7 +1329,7 @@ Go-тулчейна. Наших изменений поведения нет —
 
 - ⬆️ **База апстрима: `upstream/stable` b7eb49bb8 (`v1.14.0` + 33, «Fix cronet-go»,
   2026-09-12)** — мерж de3ac74ff, merge-base a25ad8ce5 (предыдущий мерж 03e309113), 17 коммитов
-  честной истории, 35 файлов. Прямой `git merge` дал 2 конфликта: `transport/wireguard/endpoint.go`
+  полной истории, 35 файлов. Прямой `git merge` дал 2 конфликта: `transport/wireguard/endpoint.go`
   (case-метки `onPauseUpdated`) и `go.sum`. Автослияния `protocol/group/selector.go`,
   `route/route.go`, `daemon/instance.go` сверены построчно — только lx-швы; snap-проверка
   файлов без lx-авторства чистая; маркеры SPEC 053/083 в `common/tls/reality_client.go` на месте.
@@ -527,7 +1423,7 @@ Go-тулчейна. Наших изменений поведения нет —
   308 — апстрим переписывает историю, testing-контент лежал у нас с другими хешами),
   реальный объём 207 файлов. Прямой `git merge` дал 125 конфликтов; 74 файла без наших
   коммитов взяты у апстрима как есть, 51 lx-файл прошёл per-file 3-way с чистой апстримной
-  базой — честных конфликтов осталось 13, все на lx-швах. Три молчаливых автослияния
+  базой — настоящих конфликтов осталось 13, все на lx-швах. Три молчаливых автослияния
   (задвоенный `DNSResponseAddresses` в `adapter/inbound.go`, `protocol/tun/inbound.go`,
   `log/factory.go`) сняты сверкой zero-lx файлов с апстримом. `*.pb.go` регенерированы
   `protogen` из разрешённого `.proto` (наш rpc/message-блок + апстримное `certDomains = 15`).
@@ -649,7 +1545,7 @@ Go-тулчейна. Наших изменений поведения нет —
   хендшейк с первой попытки, TLS, 1 МБ загрузка, rekey по диапазону. Отличие от
   референса: первый батч после старта переносится под актуальный `s4`, а не уезжает
   в старой раскладке. Новый CI-пример `lx-test/config/awg3_full.json`. Доки:
-  `lx-protocols-transports{,.ru}.md` §2.10, `lx-config{,.ru}.md`.
+  `protocols-transports{,.ru}.md` §2.10, `lx-config{,.ru}.md`.
   Внутри `option`: `MagicHeader` стал алиасом общего `AWGRange`; тип
   `WireGuardPeer.PersistentKeepaliveInterval` — `AWGRange` (JSON-совместимо).
   Сабмодуль `wireguard-go` → `ba01446` (ветка `lx-awg2-v005`). Прогон перед тегом:
@@ -856,7 +1752,7 @@ NAND-overlay — износ флеша. Теперь путь настраива
   резолвится в абсолютный при старте — служба живёт с cwd `/`).
 - **Admin-плоскость перестала пере-выводить путь из state-dir**: фактический
   путь проносится в контроллер, `GET /admin/info` (`log_path`) и tail-эндпоинт
-  `GET /admin/logs` отдают его; dev-запуск без файла отвечает честным 404
+  `GET /admin/logs` отдают его; dev-запуск без файла отвечает 404
   «лог в терминале», а не фантомным derived-путём.
 - **Дефолт `log_max_size_mb` 20 → 1**: страховочный потолок размера; вместе с
   бэкапом максимум ~2 МБ на диске. Ротация по возрасту (24 ч) не тронута.
@@ -1327,7 +2223,7 @@ AAR не затронут: `gomobile` собирает `experimental/libbox`, к
 **Проценты и скорости — дельты, и это видно.** `/proc/stat` и `/proc/net/dev`
 отдают монотонные счётчики, поэтому демон хранит предыдущий замер и рядом с
 производным числом отдаёт `interval_seconds`: 12.4% за пять секунд и за час
-значат разное. Первый запрос после старта честно отдаёт `usage_percent: null`
+значат разное. Первый запрос после старта отдаёт `usage_percent: null`
 и `interval_seconds: 0` — считать не от чего, а ноль читался бы как
 «простаивает». Сырые счётчики отдаются **вместе** с производными: счётчик
 переживает разрывы, скорость на них врёт.
@@ -1341,7 +2237,7 @@ Mach API, поэтому там `null`. Клиент проверяет `null`, 
 ⚠️ **Отдельная находка про macOS.** `NET_RT_IFLIST2` отдаёт структуру с именем
 `if_data64`, но байтовые счётчики в ней фактически **32-битные** и
 переполняются каждые 4 ГБ — проверено на живой машине, значения сходятся с
-`netstat -ib` по модулю 2³² (пакеты и ошибки при этом честные 64-битные).
+`netstat -ib` по модулю 2³² (пакеты и ошибки при этом полные 64-битные).
 Демон доращивает их до 64 бит по дельтам, иначе график обрывался бы в ноль
 каждые несколько часов. На Linux этого не нужно — `/proc/net/dev` 64-битный.
 
@@ -1445,7 +2341,7 @@ SPEC 065); вне Linux они молча возвращают «нечего с
 
 **Отдельного debug-порта нет по построению.** Ручки нужны именно удалённо —
 лаунчер снимает профиль с сервера, который странно себя ведёт, — поэтому они
-идут за клиентским сертификатом. Это честный размен: тот же сертификат уже
+идут за клиентским сертификатом. Это осознанный размен: тот же сертификат уже
 разрешает `POST /admin/apply`, то есть исполнение произвольного конфига в
 контексте демона.
 
@@ -1453,7 +2349,7 @@ SPEC 065); вне Linux они молча возвращают «нечего с
 это пик за жизнь процесса, он не убывает, и на графике утечка неотличима от
 разового всплеска. Теперь `rss_current_bytes` (на linux — `/proc/self/statm`,
 без cgo) и `rss_peak_bytes` раздельно, с единицей в имени поля. На darwin
-честный `task_info` требует cgo, поэтому там `-1`.
+точный `task_info` требует cgo, поэтому там `-1`.
 
 **`/admin/stats` без ядра отдаёт `null` во всех полях и код 200**, а не 503:
 ручка описывает демон и обязана отвечать в `idle` и `fatal` — ровно в тех
@@ -2129,7 +3025,7 @@ gVisor: шесть ретрансмитов, 1+2+4+8+16+32+64 — **127 секу
 найденных адверсариальной проверкой диффа. Именно 15, а не 5: столько же длится
 проба здоровья, и пользовательский бюджет ниже пробного открыл бы вилку, в
 которой медленный-но-живой узел проходит пробы, а все боевые дайлы через него
-падают. Замеренный потолок честного холодного дайла — 4.8 с при нулевом RTT
+падают. Замеренный потолок настоящего холодного дайла — 4.8 с при нулевом RTT
 (пересборка устройства уровня 3 плюс рукопожатие), в поле с потерянным первым
 пакетом инициации 8–10 с; пятисекундный кап резал бы свои же пробуждения.
 Дедлайн привязан к фазе установки через `defer cancel()` и физически не может
@@ -2656,7 +3552,7 @@ races under `-race`, adversarial uphold 6/6); the field run of the nudge
 waits for the LxBox `USER_PRESENT` receiver.
 
 Upstream note: `upstream/testing` was force-pushed again after our 2026-08-01
-merge; the honest subject-level comparison shows zero genuinely new commits,
+merge; the subject-level comparison shows zero genuinely new commits,
 so this rc carries no upstream delta.
 
 #### v1.14.0-lx.18

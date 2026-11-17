@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -491,6 +492,35 @@ func TestAdminOperatorRoutes(t *testing.T) {
 // Bearer on top (clients never learn the daemon-owned secret). And the
 // inverse: the Bearer secret alone must NOT open the pinned plane, or a
 // leaked operator secret would void the whole mTLS model remotely.
+// TestAdminStatusOperatorRoute: /admin/status is readable from the host
+// without a client cert (loopback + secret) — `lxd update` asks it whether
+// the core came up (SPEC 129 §2.6). A remote peer without a cert still gets
+// the pin's 401, and a wrong secret on loopback is refused.
+func TestAdminStatusOperatorRoute(t *testing.T) {
+	control := newTestController(t, &fakeReloader{}, nil)
+	control.clients = newTestRegistry(t)
+	handler := control.adminHandler("s3cret")
+
+	statusGet := func(remoteAddr, bearer string) (int, map[string]any) {
+		request := httptest.NewRequest(http.MethodGet, "/admin/status", nil)
+		request.RemoteAddr = remoteAddr
+		if bearer != "" {
+			request.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		return serveAdmin(t, handler, request)
+	}
+	if status, payload := statusGet("127.0.0.1:40000", "s3cret"); status != http.StatusOK || payload["status"] != "idle" {
+		t.Fatalf("loopback + secret must read the status, got %d %v", status, payload)
+	}
+	if status, _ := statusGet("127.0.0.1:40000", "wrong"); status != http.StatusUnauthorized {
+		t.Fatal("expected 401 for a wrong secret on loopback, got", status)
+	}
+	if status, payload := statusGet("192.0.2.10:443", "s3cret"); status != http.StatusUnauthorized ||
+		!strings.Contains(payload["error"].(string), "client certificate not trusted") {
+		t.Fatalf("a remote certless peer must hit the pin, got %d %v", status, payload)
+	}
+}
+
 func TestAdminTrustedCertNeedsNoBearer(t *testing.T) {
 	control := newTestController(t, &fakeReloader{}, nil)
 	registry := newTestRegistry(t)
@@ -535,6 +565,11 @@ func TestAdminInfoEndpoint(t *testing.T) {
 	control.serverFingerprint = "abc123"
 	control.advertiseAddr = "127.0.0.1:29091"
 	control.startedAt = time.Now().Add(-3 * time.Second)
+	control.executable = &executableIdentity{
+		path:   "/Library/PrivilegedHelperTools/sing-box-lxd",
+		sha256: "0f1e",
+	}
+	control.platform = platformInfo{goos: "linux", goarch: "arm64", platform: "linux-arm64", initSystem: initNameProcd, service: true}
 	handler := control.adminHandler("")
 
 	request := httptest.NewRequest(http.MethodGet, "/admin/info", nil)
@@ -559,5 +594,101 @@ func TestAdminInfoEndpoint(t *testing.T) {
 	}
 	if pid, _ := payload["pid"].(float64); int(pid) != os.Getpid() {
 		t.Fatalf("pid = %v, want %d", payload["pid"], os.Getpid())
+	}
+	if payload["executable"] != "/Library/PrivilegedHelperTools/sing-box-lxd" || payload["executable_sha256"] != "0f1e" {
+		t.Fatalf("executable/executable_sha256 = %v/%v", payload["executable"], payload["executable_sha256"])
+	}
+	if payload["goos"] != "linux" || payload["goarch"] != "arm64" || payload["platform"] != "linux-arm64" {
+		t.Fatalf("goos/goarch/platform = %v/%v/%v", payload["goos"], payload["goarch"], payload["platform"])
+	}
+	if payload["init_system"] != "procd" || payload["service"] != true {
+		t.Fatalf("init_system/service = %v/%v", payload["init_system"], payload["service"])
+	}
+}
+
+// TestAdminInfoExecutableHash: the hash is computed once, in the background,
+// from the file itself; until then (and without a binary) the fields are
+// present and empty rather than missing.
+func TestAdminInfoExecutableHash(t *testing.T) {
+	control := newTestController(t, &fakeReloader{}, nil)
+	status, payload := serveAdmin(t, control.adminHandler(""), httptest.NewRequest(http.MethodGet, "/admin/info", nil))
+	if status != http.StatusOK || payload["executable"] != "" || payload["executable_sha256"] != "" {
+		t.Fatalf("without an identity the fields must be empty strings, got %d %v/%v", status, payload["executable"], payload["executable_sha256"])
+	}
+	// SPEC 127: an unknown platform card is empty strings and false, never
+	// missing keys.
+	if initSystem, ok := payload["init_system"].(string); !ok || initSystem != "" {
+		t.Fatalf("init_system must be present and empty, got %#v", payload["init_system"])
+	}
+	if service, ok := payload["service"].(bool); !ok || service {
+		t.Fatalf("service must be present and false, got %#v", payload["service"])
+	}
+	if platform, ok := payload["platform"].(string); !ok || platform != "" {
+		t.Fatalf("platform must be present and empty, got %#v", payload["platform"])
+	}
+	if packed, ok := payload["packed"].(bool); !ok || packed {
+		t.Fatalf("packed must be present and false, got %#v", payload["packed"])
+	}
+
+	binary := filepath.Join(t.TempDir(), "sing-box")
+	content := []byte("the running core")
+	if err := os.WriteFile(binary, content, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	identity := newExecutableIdentity(binary)
+	if identity.isPacked() {
+		t.Fatal("a plain binary must not read as UPX-packed")
+	}
+	packedBinary := filepath.Join(t.TempDir(), "sing-box")
+	if err := os.WriteFile(packedBinary, []byte("\x7fELF....UPX!...."), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !newExecutableIdentity(packedBinary).isPacked() {
+		t.Fatal("a binary with the UPX magic must read as packed")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		path, sum := identity.snapshot()
+		if sum != "" {
+			if path != binary || sum != shaOf(content) {
+				t.Fatalf("identity %s %s, want %s %s", path, sum, binary, shaOf(content))
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the executable hash never arrived")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestAdminClientCodeNameNorm: /admin/client-code takes names of 1-64
+// printable characters, trimmed; empty is no name; anything else is a 400
+// "client name: …" (SPEC 103 §2.13).
+func TestAdminClientCodeNameNorm(t *testing.T) {
+	control := newTestController(t, &fakeReloader{}, nil)
+	control.clients = newTestRegistry(t)
+	handler := control.adminHandler("s3cret")
+	mint := func(name string) (int, map[string]any) {
+		body, _ := json.Marshal(map[string]string{"name": name})
+		request := httptest.NewRequest(http.MethodPost, "/admin/client-code", bytes.NewReader(body))
+		request.RemoteAddr = "127.0.0.1:12345"
+		request.Header.Set("Authorization", "Bearer s3cret")
+		return serveAdmin(t, handler, request)
+	}
+	for _, name := range []string{"", strings.Repeat("n", 64), "  singbox-launcher-u  "} {
+		if status, payload := mint(name); status != http.StatusOK {
+			t.Fatalf("name %q: %d %v", name, status, payload)
+		}
+	}
+	if control.clients.activeCodeName != "singbox-launcher-u" {
+		t.Fatalf("the name must be stored trimmed, got %q", control.clients.activeCodeName)
+	}
+	for _, name := range []string{strings.Repeat("n", 65), "tab\there"} {
+		status, payload := mint(name)
+		message, _ := payload["error"].(string)
+		if status != http.StatusBadRequest || !strings.HasPrefix(message, "client name: ") {
+			t.Fatalf("name %q: want 400 client name, got %d %v", name, status, payload)
+		}
 	}
 }

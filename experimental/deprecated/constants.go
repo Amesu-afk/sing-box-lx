@@ -94,7 +94,7 @@ var OptionLegacyDomainStrategyOptions = Note{
 	DeprecatedVersion: "1.12.0",
 	ScheduledVersion:  "1.14.0",
 	EnvName:           "LEGACY_DOMAIN_STRATEGY_OPTIONS",
-	MigrationLink:     "https://sing-box.sagernet.org/migration/#migrate-domain-strategy-options",
+	MigrationLink:     "https://sing-box.sagernet.org/migration/#migrate-outbound-domain-strategy-option-to-domain-resolver",
 }
 
 var OptionInlineACME = Note{
@@ -138,7 +138,7 @@ var OptionLegacyDNSRuleStrategy = Note{
 	DeprecatedVersion: "1.14.0",
 	ScheduledVersion:  "1.16.0",
 	EnvName:           "LEGACY_DNS_RULE_STRATEGY",
-	MigrationLink:     "https://sing-box.sagernet.org/migration/#migrate-dns-rule-action-strategy-to-rule-items",
+	MigrationLink:     "https://sing-box.sagernet.org/migration/#migrate-address-filter-fields-to-response-matching",
 }
 
 var OptionIndependentDNSCache = Note{
@@ -156,7 +156,7 @@ var OptionStoreRDRC = Note{
 	DeprecatedVersion: "1.14.0",
 	ScheduledVersion:  "1.16.0",
 	EnvName:           "STORE_RDRC",
-	MigrationLink:     "https://sing-box.sagernet.org/migration/#migrate-store-rdrc",
+	MigrationLink:     "https://sing-box.sagernet.org/migration/#migrate-store_rdrc",
 }
 
 var OptionImplicitDefaultHTTPClient = Note{
@@ -181,7 +181,7 @@ var OptionImplicitDefaultHTTPClient = Note{
 // The removal date lives in SPEC 062 instead.
 var OptionMASQUELegacyFields = Note{
 	Name:              "masque-legacy-fields",
-	Description:       "legacy masque options (network, sni, skip_cert_verify, fragment*), replaced by `vhttp` and the standard `tls` block (planned for removal in v1.14.0-lx.30)",
+	Description:       "legacy flat masque TLS options (sni, skip_cert_verify, fragment*), replaced by the standard `tls` block",
 	DeprecatedVersion: "1.14.0-lx.26",
 	EnvName:           "MASQUE_LEGACY_FIELDS",
 }

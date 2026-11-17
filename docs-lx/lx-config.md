@@ -2,6 +2,12 @@
 
 > 🌐 Русская версия: **[lx-config.ru.md](lx-config.ru.md)**.
 
+> 🧭 **Where to look.** The fork's documentation has three levels, by the reader's question:
+> [lx-config](lx-config.md) — what the fork has and how to enable it;
+> [protocols-transports](protocols-transports.md) — every field, type, default, error text;
+> [xray-protocols-explained](xray-protocols-explained.md) and [amneziawg-explained](amneziawg-explained.md) —
+> how it works, why, how the fork does it and how it differs from vanilla.
+
 `sing-box-lx` is upstream [sing-box](https://github.com/SagerNet/sing-box) plus a small set of **client-side** features, each gated behind a build tag:
 
 | Feature | Build tag | Where it lives in config | Included in |
@@ -9,8 +15,10 @@
 | **XHTTP** transport (Xray-compatible) | `with_xhttp` | `transport.type: "xhttp"` on a VLESS / VMess / Trojan outbound | desktop + mobile |
 | **AmneziaWG 2.0/3.x** (AWG2, AWG3) | `with_awg` | extra fields on a `wireguard` **endpoint** | desktop + mobile |
 | **MASQUE** outbound (CONNECT-IP / WARP) | `with_quic`+`with_gvisor` | `outbounds[].type: "masque"` | desktop + mobile |
-| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `route.lx_idle_suspend` (+ `lx_idle_suspend_reachable`, `lx_idle_teardown`) | **mobile only** (AAR) |
-| **DNS server group** (SPEC 033/035) | — (always built) | `dns.servers[].type: "group"` | desktop + mobile |
+| **TrustTunnel** outbound and inbound (SPEC 133/134) | `with_trusttunnel` (+ `with_quic` for HTTP/3) | `outbounds[].type` / `inbounds[].type: "trusttunnel"`; fields — [protocols-transports.md §6](protocols-transports.md#6-trusttunnel-outbound-and-inbound), the global `lx.trusttunnel.idle_timeout` — [§13](#lxtrusttunnel--trusttunnel-outbounds) | desktop + mobile |
+| **Idle-suspend** (SPEC 020) | `with_lx_idle_suspend` | `lx.wg.idle_suspend` (+ `idle_suspend_reachable`, `idle_teardown`) | **mobile only** (AAR) |
+| **Root `lx` block** (SPEC 098) | — (always parsed) | `lx.wg`, `lx.masque`, `lx.trusttunnel`, `lx.mtu_align`, `lx.sniff_guard` — the fork's global knobs, [§13](#13-the-lx-root-block-spec-098) | desktop + mobile |
+| **DNS server group** (SPEC 033/035/143) | — (always built) | `dns.servers[].type: "group"` | desktop + mobile |
 | **VLESS `encryption`** (SPEC 032) | — (always built) | `encryption` on a `vless` outbound | desktop + mobile |
 | **`lxd` daemon** (SPEC 055–057, 063–068) | `with_lxd` | not a config key — the `sing-box lxd` subcommand + `<state-dir>/daemon.json`; see [lxd-daemon.md](lxd-daemon.md) | desktop / server (**not** Win7, **not** AAR) |
 | **`chain` outbound** (SPEC 073) | `with_lx_chain` | `outbounds[].type: "chain"` — a multi-hop path of groups and nodes | desktop + mobile |
@@ -24,18 +32,19 @@ unreachable WireGuard/AmneziaWG endpoints to free their recv-worker buffers (the
 GC-heat / RAM holder, ~8 MB each where `BatchSize=128` — Android/Linux; measured
 on-device: 8 endpoints suspended → 134 MB freed). A desktop build has small
 `BatchSize`, so the feature would save almost nothing there; to avoid a silent
-mismatch, a desktop/CLI binary that is handed a config with `route.lx_idle_suspend`
-**fails fast at start**: `route.lx_idle_suspend is set but this build lacks
+mismatch, a desktop/CLI binary that is handed a config with `lx.wg.idle_suspend`
+(or any other `lx.wg` key) **fails fast at start**: `lx.wg.* is set but this build lacks
 idle-suspend support; rebuild with -tags with_lx_idle_suspend (mobile-only feature)`.
 See the [ENERGY feature](../SPECS/FEATURES/008-ENERGY/FEATURE.md).
 
-Related keys (2026-07-15 revision): `route.lx_idle_suspend_reachable` — optional
+Related keys (2026-07-15 revision; in the `lx` block since SPEC 098 — the old `route.lx_idle_*`
+names are removed and fail to load as unknown keys): `lx.wg.idle_suspend_reachable` — optional
 second, longer idle window after which even *reachable* endpoints (pool members,
-the selected node, final) suspend; `route.lx_idle_teardown` — the third level:
+the selected node, final) suspend; `lx.wg.idle_teardown` — the third level:
 how long an endpoint may *sleep* before a full teardown (Close, the gVisor
 netstack goes too; wake = rebuild ~0.5–1 s; defaults to the reachable window);
-`urltest.passive_check` — skip health probes
-while a recent successful TCP dial proves the node alive. The full energy model,
+`urltest` `mode: failover` — hold the working node and probe only it (one
+wake per `interval` instead of N). The full energy model,
 timelines and the recommended mobile configuration live in
 **[lx-energy.md](lx-energy.md)**.
 
@@ -49,24 +58,28 @@ timelines and the recommended mobile configuration live in
 - [2. AmneziaWG 2.0/3.x (AWG2, AWG3)](#2-amneziawg-203x-awg2-awg3)
   - [Example — AmneziaWG 3.1 endpoint (Amnezia `amnezia-awg2` export)](#example--amneziawg-31-endpoint-amnezia-amnezia-awg2-export)
   - [Example — AmneziaWG 2.0 endpoint](#example--amneziawg-20-endpoint)
-- [3. round_robin load balancing (SPEC 019)](#3-round_robin-load-balancing-spec-019)
+- [3. urltest node selection modes (SPEC 019 / 116)](#3-urltest-node-selection-modes-spec-019--116)
   - [Fields (on a `urltest` outbound)](#fields-on-a-urltest-outbound)
   - [Slot-hash binding](#slot-hash-binding)
   - [Example — urltest with round_robin](#example--urltest-with-round_robin)
 - [4. MASQUE outbound — Cloudflare WARP (SPEC 021)](#4-masque-outbound--cloudflare-warp-spec-021)
   - [Example — WARP (defaults: `vhttp: auto`)](#example--warp-defaults-vhttp-auto)
-- [5. DNS server group (SPEC 033/035)](#5-dns-server-group-spec-033035)
+- [5. DNS server group (SPEC 033/035/143)](#5-dns-server-group-spec-033035143)
   - [Fields (a `dns.servers[]` entry)](#fields-a-dnsservers-entry)
+  - [Local names first: `hosts`](#local-names-first-hosts)
   - [Example — resilient public DNS as the default](#example--resilient-public-dns-as-the-default)
+  - [Example — one local name for a dual-stack WireGuard server](#example--one-local-name-for-a-dual-stack-wireguard-server)
 - [6. VLESS `encryption` — post-quantum layer (SPEC 032)](#6-vless-encryption--post-quantum-layer-spec-032)
   - [Field (on a `vless` outbound)](#field-on-a-vless-outbound)
   - [Example](#example)
 - [7. REALITY `key_share` — hybrid or classical ClientHello (SPEC 089)](#7-reality-key_share--hybrid-or-classical-clienthello-spec-089)
 - [8. Observability (CommandClient extensions)](#8-observability-commandclient-extensions)
-- [9. Automatic ClientHello fragmentation under `detour` (SPEC 060)](#9-automatic-clienthello-fragmentation-under-detour-spec-060)
+- [9. ClientHello under `detour` — no default (SPEC 060)](#9-clienthello-under-detour--no-default-spec-060)
 - [10. `chain` outbound — a virtual multi-hop path of groups and nodes (SPEC 073)](#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)
 - [11. Protocol sniffers for LAN traffic (SPEC 078 / 080)](#11-protocol-sniffers-for-lan-traffic-spec-078--080)
 - [12. Validate & build](#12-validate--build)
+- [13. The `lx` root block (SPEC 098)](#13-the-lx-root-block-spec-098)
+- [14. Tailscale: turning Taildrop off (SPEC 149)](#14-tailscale-turning-taildrop-off-spec-149)
 
 ---
 
@@ -74,15 +87,63 @@ timelines and the recommended mobile configuration live in
 
 One config carrying every field of the **outbound-side** features — XHTTP transport,
 AmneziaWG 2.0 endpoint, the `id`/`ip`/`ib` masquerade sugar, VLESS `encryption`, and the
-`urltest` `round_robin` balancer (MASQUE, the DNS group and the `route.lx_idle_*` keys have
-their own examples in [§4](#4-masque-outbound--cloudflare-warp-spec-021), [§5](#5-dns-server-group-spec-033035)
-and [lx-energy.md](lx-energy.md)). This is a **kitchen-sink reference**, not a recommended config: many fields are
+`urltest` `round_robin` balancer, plus the root `lx` block with every key (MASQUE and the DNS group have
+their own examples in [§4](#4-masque-outbound--cloudflare-warp-spec-021) and [§5](#5-dns-server-group-spec-033035143);
+the `lx` block is described in [§13](#13-the-lx-root-block-spec-098), its energy keys in [lx-energy.md](lx-energy.md)). This is a **kitchen-sink reference**, not a recommended config: many fields are
 mutually exclusive (e.g. the `id`/`ip`/`ib` sugar vs. a hand-written `i1`) or are server-only
 and ignored by the client — those are flagged inline. For a working setup, copy only the block
 you need and read its section below. Each comment shows the **default** and the **allowed values**.
 
 ```jsonc
 {
+  // ─────────────────────────────────────────────────────────────────────────
+  // Root `lx` block (§13) — the fork's global knobs, grouped by subsystem.
+  // lx.wg acts only with the with_lx_idle_suspend build tag (mobile AAR);
+  // a desktop binary refuses it at start.
+  // ─────────────────────────────────────────────────────────────────────────
+  "lx": {
+    "wg": {
+      "idle_suspend": "30s",                    // default: off. Endpoint outside the routing tree → Down after this idle
+      "idle_suspend_reachable": "5m",           // default: off. Same for endpoints in the tree; >= idle_suspend, requires it
+      "idle_teardown": "10m",                   // default: = idle_suspend_reachable. Sleep before full teardown; "0" = never
+      "lazy_build": true,                       // default: false. Build the device on first dial (SPEC 097)
+      "build_max": 4,                           // default: 0 (no cap). Max devices built at once (SPEC 097)
+      "build_overflow": "wait"                  // default: wait. wait | build (SPEC 097)
+    },
+    "masque": {
+      "idle_timeout": "5m"                      // default: off. Global idle window for masque nodes without their own key
+    },
+    "trusttunnel": {
+      "idle_timeout": "5m"                      // default: 5m. Global idle window for trusttunnel nodes without their own key; only a node's "0" turns it off (SPEC 133)
+    },
+    "mtu_align": "clamp",                       // default: clamp. off | fill | clamp, or an object {"mode", "except": [tags]} (§13)
+    "sniff_guard": {                            // default: no block = upstream behaviour. Guards the handshake against rerouting by SNI on a relay or router (§13, SPEC 060)
+      "nodes": {
+        "sni_mismatch": true,                   // default: true — only nodes whose SNI differs from server. false — no filter
+        "outbound_type": ["vless", "masque"]    // default: no filter. A list of types or false; true, [] and an unknown type are load errors
+      },
+      "detour_type": {                          // default: {"direct": "clean", "ssh": "clean", "socks": "clean", "*": "suspect"}
+        "direct": "clean",                      //   carrier type → never | clean | suspect; "*" — every other type; groups cannot be keys
+        "*": "suspect"
+      },
+      "override": false,                        // default: false. true — the block wins over a node's fragment / record_fragment
+      "tls": {
+        "method": "record_fragment",            // default: off. record_fragment | fragment | delay | off
+        "delay": "300ms",                       // default: 300ms. Pause of the delay method; > 0
+        "persist": true,                        // default: false. Relay labels in experimental.cache_file
+        "detour_type": { "ssh": "suspect" }     // default: the shared map. Override for TLS
+      },
+      "quic": {
+        "method": "decoy_first_byte",           // default: off. decoy_first_byte | delay | off
+        "delay": "300ms",                       // default: 300ms
+        "persist": true,                        // default: false
+        "detour_type": { "socks": "never" }     // default: the shared map. Override for QUIC
+      }
+    }
+    // "quic_sniff_decoy" removed: any value is a load error, replaced by sniff_guard.quic (§13)
+    // "awg_masquerade" removed in lx.33: any value is a load error, the AWG burst goes on every path (§13)
+  },
+
   "outbounds": [
     // ─────────────────────────────────────────────────────────────────────────
     // XHTTP transport (§1) — attaches to a VLESS / VMess / Trojan outbound.
@@ -238,9 +299,7 @@ you need and read its section below. Each comment shows the **default** and the 
       "outbounds": ["xhttp-out", "proxy-b", "proxy-c", "proxy-d", "proxy-e"],
       "url": "https://www.gstatic.com/generate_204",
       "interval": "15m",
-      "passive_check": false,                   // default: false. Recent successful TCP dial counts
-                                                //   as proof of life while fresh (< interval) — probes stay quiet
-      "mode": "round_robin",                    // default: least_test. least_test | round_robin
+      "mode": "round_robin",                    // default: least_test. least_test | round_robin | failover
       "balancer": {                             // only valid with mode: round_robin
         "pool": 3,                              // default: 3. 0/omitted → 3; effective = min(pool, #outbounds)
         "pool_tolerance": 0,                    // default: 0 (ms). 0 = keep-live-fill; >0 = top-N-by-delay hysteresis
@@ -254,7 +313,7 @@ you need and read its section below. Each comment shows the **default** and the 
 ```
 
 > **Field count:** 26 XHTTP + 30 AmneziaWG (incl. `id`/`ip`/`ib` and the 9 AWG 3.x keys) + 1 VLESS (`encryption`) +
-> 6 `urltest` (`mode`, `passive_check` + `balancer{pool,pool_tolerance,sticky_hash}`). Mutually-exclusive / ignored fields are
+> 5 `urltest` (`mode` + `balancer{pool,pool_tolerance,sticky_hash}`) + 21 `lx` (6 `lx.wg` + `lx.masque.idle_timeout` + `lx.trusttunnel.idle_timeout` + `lx.mtu_align` + 12 `lx.sniff_guard{nodes{sni_mismatch,outbound_type},detour_type,override,tls{method,delay,persist,detour_type},quic{method,delay,persist,detour_type}}`). Mutually-exclusive / ignored fields are
 > labelled inline above; the sections below give the per-field semantics, gotchas and live
 > verification status.
 
@@ -268,8 +327,8 @@ A minimal `transport` block is just `"type": "xhttp"` (mode `auto`); the [exampl
 
 > **📖 The full field reference — all 26 XHTTP keys, their defaults, the `xmux` pool
 > semantics, range value forms and a troubleshooting table — is in
-> [lx-protocols-transports.md §1](lx-protocols-transports.md#1-xhttp-transport)**
-> ([RU](lx-protocols-transports.ru.md#1-xhttp-транспорт)).
+> [protocols-transports.md §1](protocols-transports.md#1-xhttp-transport)**
+> ([RU](protocols-transports.ru.md#1-xhttp-транспорт)).
 
 ### Example — VLESS + XHTTP + Reality
 
@@ -302,9 +361,9 @@ A minimal `transport` block is just `"type": "xhttp"` (mode `auto`); the [exampl
 
 AWG is WireGuard + DPI-evasion obfuscation. It is configured as a normal sing-box **`wireguard` endpoint** with extra promoted fields. With `with_awg` these are pushed to the device; a config without any AWG field is a plain WireGuard endpoint (byte-identical to upstream behavior).
 
-AWG2 = AWG1 fields **plus** the CPS packets `I1`–`I5`. Both client and server must run AmneziaWG with **matching** parameters (the I-packets are configuration, not negotiated). For a friendlier way to set the first decoy, the WireSock-style `id`/`ip`/`ib` sugar generates `i1` for you — see the [full reference](lx-protocols-transports.md#25-masquerade-sugar-id--ip--ib).
+AWG2 = AWG1 fields **plus** the CPS packets `I1`–`I5`. Both client and server must run AmneziaWG with **matching** parameters (the I-packets are configuration, not negotiated). For a friendlier way to set the first decoy, the WireSock-style `id`/`ip`/`ib` sugar generates `i1` for you — see the [full reference](protocols-transports.md#25-masquerade-sugar-id--ip--ib).
 
-AWG3 (amneziawg-go v3.0/v3.1, Amnezia's `amnezia-awg2` container with `protocol_version` 3.x) adds header protection (`header_protection_key` — server-side, must match), content padding, random trailers, disabled cookies and ranged timing overrides, plus a ranged `persistent_keepalive_interval`. All are endpoint-root fields like the AWG2 ones — [reference §2.10](lx-protocols-transports.md#210-awg-3x-header-protection-padding-trailers-timings).
+AWG3 (amneziawg-go v3.0/v3.1, Amnezia's `amnezia-awg2` container with `protocol_version` 3.x) adds header protection (`header_protection_key` — server-side, must match), content padding, random trailers, disabled cookies and ranged timing overrides, plus a ranged `persistent_keepalive_interval`. All are endpoint-root fields like the AWG2 ones — [reference §2.10](protocols-transports.md#210-awg-3x-header-protection-padding-trailers-timings).
 
 The AWG fields sit at the endpoint **root** (none on a peer), mirroring an `awg-quick`
 `.conf` `[Interface]` section: junk (`jc`/`jmin`/`jmax`), handshake padding (`s1`–`s4`),
@@ -316,8 +375,8 @@ packet — the core defaults to `1280` when you set `s4` and omit `mtu`.
 > and default, the CPS tag format, the `id`/`ip`/`ib` masquerade sugar (four profiles,
 > which to pick, what reaches the wire), the MTU budget math, the `awg.conf` 1:1 mapping
 > and the verbatim validation errors — is in
-> [lx-protocols-transports.md §2](lx-protocols-transports.md#2-amneziawg-203x-awg2-awg3)**
-> ([RU](lx-protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)).
+> [protocols-transports.md §2](protocols-transports.md#2-amneziawg-203x-awg2-awg3)**
+> ([RU](protocols-transports.ru.md#2-amneziawg-203x-awg2-awg3)).
 
 ### Example — AmneziaWG 3.1 endpoint (Amnezia `amnezia-awg2` export)
 
@@ -383,31 +442,49 @@ The runtime is backed by `Leadaxe/wireguard-go` (sagernet/wireguard-go + Amnezia
 
 ---
 
-## 3. round_robin load balancing (SPEC 019)
+## 3. urltest node selection modes (SPEC 019 / 116)
 
-Upstream `urltest` always selects the single lowest-delay node. sing-box-lx adds a
-`round_robin` **mode** that rotates traffic over a fixed-size **pool** of nodes — built to
-scale to large node lists (only the pool is health-checked, not every node). Selection
-happens once per connection; a UDP/QUIC session stays on its node. With `mode` omitted (or
-`least_test`) the outbound behaves exactly like upstream and `balancer` must not be set.
+Upstream `urltest` always selects the single lowest-delay node. sing-box-lx adds two
+**modes** next to it:
 
-The `GetPool` CommandClient method (see [§8](#8-observability-commandclient-extensions)) is
-behind `with_lx_command`; the `mode`/`balancer` config fields themselves are always available.
+| `mode` | Selection | Switches | Probed each `interval` |
+|---|---|---|---|
+| `least_test` (default) | the fastest node | as soon as another one is faster by `tolerance` | every node |
+| `round_robin` | a pool of live nodes | rotation over the pool | pool members (lazily) |
+| `failover` | the fastest node at selection time | **only when the current one fails or degrades** (> 2× slower than the others, confirmed); the next one is again the fastest | **only the current node** |
 
-### Fields (on a `urltest` outbound)
+The common upstream fields (`url`, `interval`, `idle_timeout`, `interrupt_exist_connections`) are
+unchanged; `mode`/`balancer` need no build tag; the `GetPool` CommandClient method (see
+[§8](#8-observability-commandclient-extensions)) is behind `with_lx_command`.
+
+### 3.1 Common fields
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `mode` | string | `least_test` | `least_test` (upstream behaviour) \| `round_robin` (rotate over the pool). `least_connection` is rejected (round_robin is statistically even) |
-| `passive_check` | bool | `false` | a recent successful TCP dial counts as proof of life while fresh (< `interval`): `least_test` skips whole re-test cycles while the selected node is passively confirmed; `round_robin` (only with `pool_tolerance: 0`) treats confirmed slots as live without probing. Cost: staler delay numbers in the UI. See [lx-energy.md](lx-energy.md) |
-| `balancer` | object | — | round_robin parameters; **only valid with `mode: round_robin`** (error otherwise). The upstream `tolerance` field is ignored in round_robin — use `pool_tolerance` instead (a startup warning points this out while `pool_tolerance` is unset) |
+| `mode` | string | `least_test` | `least_test` (upstream behaviour) \| `round_robin` (rotate over the pool) \| `failover` (hold the working node until it fails, SPEC 116). `least_connection` is rejected (round_robin is statistically even) |
+| `balancer` | object | — | round_robin parameters; **only valid with `mode: round_robin`** (startup error otherwise). See [§3.3](#33-round_robin--pool-with-stickiness) |
+
+### 3.2 least_test — fastest node
+
+Upstream behaviour: every `interval` all nodes are probed, and the group switches as soon as
+another node is faster than the current one by more than `tolerance` ms (default `50`). With
+`mode` omitted the outbound behaves the same. The SPEC 054 penalty failover on "path is dead"
+dial errors applies here too ([SPEC 054](../SPECS/TASKS/054-URLTEST_PENALTY_FAILOVER/SPEC.md)).
+
+### 3.3 round_robin — pool with stickiness
+
+`round_robin` rotates traffic over a fixed-size **pool** of nodes — built to scale to large
+node lists (only the pool is health-checked, not every node). Selection happens once per
+connection; a UDP/QUIC session stays on its node. The upstream `tolerance` field is ignored in
+round_robin — use `pool_tolerance` instead (a startup warning points this out while
+`pool_tolerance` is unset).
 
 #### `balancer` fields
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `pool` | int | `3` | rotation pool size. `0`/omitted → `3`; negative is an error. Effective size is `min(pool, number of outbounds)`. Only the pool is URL-tested each `interval`, so a list of hundreds of nodes does **not** mean hundreds of tests |
-| `pool_tolerance` | int (ms) | `0` | `0` = keep the pool full of **live** nodes (delay not ranked), testing no more than needed — the cheap mode for large lists. `> 0` = test **all** nodes and keep the fastest `pool`; a member is replaced only when an outside node beats it by more than `pool_tolerance` ms (hysteresis). A dead pool node keeps its slot until a live replacement is found (the pool never empties); a dial error never changes the pool — only the periodic health-check does |
+| `pool_tolerance` | int (ms) | `0` | `0` = keep the pool full of **live** nodes (delay not ranked), testing no more than needed — the cheap mode for large lists. `> 0` = test **all** nodes and keep the fastest `pool`; a member is replaced only when an outside node beats it by more than `pool_tolerance` ms (hysteresis). A dead pool node keeps its slot until a live replacement is found (the pool never empties), but new connections skip it while the pool has a live node (SPEC 138: sticky keys of dead slots spread evenly over the live slots, the plain rotation runs over live slots); a dial error never changes the pool — only the periodic health-check does. Liveness is the node's shared URL test history: a manual delay test with a short timeout that does not complete (Clash API `/proxies/{name}/delay`, `URLTestOutbound`) or a failed dial of a `least_test` group sharing the node also takes it out of rotation until the next pool health-check (at most `interval` plus the probe time) |
 | `sticky_hash` | string[] | `["process","domain"]` | flow-stickiness key components (see below). Omitted/`[]` → the default. **To disable** stickiness use the sentinel **`["none"]`** — never a bare `[]`. Components: `process` \| `domain` \| `source_ip` \| `dest_ip` \| `dest_port` |
 
 > **badjson `[]` caveat.** Do not write `"sticky_hash": []` to turn stickiness off: the
@@ -416,7 +493,7 @@ behind `with_lx_command`; the `mode`/`balancer` config fields themselves are alw
 > i.e. stickiness **on**). Use the explicit **`["none"]`** sentinel; it is the only element
 > allowed when present (mixing `none` with a real component is an error).
 
-### Slot-hash binding
+#### Slot-hash binding
 
 `sticky_hash` binds a flow to a fixed **slot index** — `slot[hash(key) % pool]` (FNV-64a over
 the concatenated components) — not to a node position. Slots never move and a replacement node
@@ -428,7 +505,7 @@ only literal-IP destinations). For domain-based traffic keep `domain` in the key
 `source_ip`/`dest_ip`/`dest_port` can collapse to `""` for an unresolved destination, sticking
 every flow of one source to a single slot.
 
-### Example — urltest with round_robin
+#### Example — urltest with round_robin
 
 ```jsonc
 {
@@ -453,6 +530,65 @@ every flow of one source to a single slot.
 **📖 [Full reference →](../docs/configuration/outbound/urltest.md)** — every field, the per-component
 sticky semantics, the pool fill/maintain rules and tuning tips.
 
+### 3.4 failover — hold until it fails
+
+**Selection.** The group takes the fastest node at the moment of choice, without `tolerance`;
+the order of the `outbounds` list does not matter.
+
+**Hold.** While the node works the group stays on it, even if another one becomes faster. Each
+`interval` probes **only the held node** — one probe instead of N; the other nodes sleep.
+
+**Degradation (SPEC 126).** If the held node answers more than 2× slower than the fastest other
+node of the same network (by its last known delay), it is probed once more at once. Still more than
+2× slower → a full run, and the group moves to the fastest node only if it is more than 1.5×
+faster; otherwise it stays (the whole network got slower, not the node). No config key.
+
+**Failure.** Two kinds:
+
+- the held node fails a probe → a full run over every node → the fastest live one;
+- a dial through it fails with a "path is dead" error → SPEC 054 penalty and fallback dial → the
+  selection moves without `Interrupt`.
+
+After the move the new node becomes the held one. A degraded node (above) moves the same way.
+
+**Manual test.** A group test from the UI, CLI (`sing-box api group urltest <tag>`) or Clash API
+is always `force`: it probes every node and re-selects the fastest. This is the only way back to
+the best node while the held one is alive.
+
+**What does not apply.** `tolerance` is ignored (a startup warning says so); `balancer` is a
+startup error.
+
+Delays of non-held nodes in the UI are as of the last full run.
+
+#### Example — urltest with failover
+
+```jsonc
+{
+  "type": "urltest",
+  "tag": "auto",
+  "outbounds": ["proxy-a", "proxy-b", "proxy-c", "proxy-d", "proxy-e"],
+  "url": "https://www.gstatic.com/generate_204",
+  "interval": "15m",
+  "mode": "failover"
+  // no tolerance: there are no speed-based switches (a non-zero value logs a warning)
+  // no balancer: with failover it is a startup error
+}
+```
+
+When to pick it: mobile profiles and cases where staying on a stable node matters more than an
+always-current fastest one (see [lx-energy.md §6](lx-energy.md#6-urltest-probes-and-how-they-were-taught-to-stay-quiet)).
+
+### 3.5 Choosing a mode
+
+| What matters more | Mode |
+|---|---|
+| fewest switches and one probe per `interval` | `failover` |
+| spreading load over several nodes | `round_robin` |
+| always the fastest node, whatever the probe cost | `least_test` |
+
+On energy: `least_test` wakes every node each `interval`, `round_robin` only the pool (with `pool_tolerance: 0`), `failover`
+one node; details in [lx-energy.md §6](lx-energy.md#6-urltest-probes-and-how-they-were-taught-to-stay-quiet).
+
 ---
 
 ## 4. MASQUE outbound — Cloudflare WARP (SPEC 021)
@@ -466,13 +602,16 @@ through it like a WireGuard endpoint. Gated on `with_quic` + `with_gvisor` (both
 enroll) is done by the client, not the core.
 
 > ⚠️ **The HTTP version is `vhttp`, not `network`** (SPEC 062). Older configs used `network`
-> for `h3`/`h2` — the opposite of what `network` means on every other outbound. The old shape
-> still works and reports a deprecation; see the migration table below.
+> for `h3`/`h2` — the opposite of what `network` means on every other outbound. That key was
+> removed in `v1.14.3-lx.18`: a masque outbound carrying `network` no longer decodes
+> (`unknown field "network"`) — rename it to `vhttp`. The flat TLS fields still work with a
+> deprecation; see the migration table below.
 
 The required fields are `server`/`server_port`, the key pair (`private_key`/`public_key`,
 for the default `cloudflare` profile) and at least one of `ip`/`ipv6` (your local address
 *inside* the tunnel, not the exit IP). Everything else has a default: `profile: cloudflare`,
-`vhttp: auto`, `tls.server_name: www.cloudflare.com`, `mtu: 1280`, `idle_timeout` off,
+`vhttp: auto`, `tls.server_name: www.cloudflare.com`, `mtu: 1280`, `idle_timeout` off (or the global
+`lx.masque.idle_timeout`, [§13](#13-the-lx-root-block-spec-098); the node's own key wins, `"0"` included),
 `keep_alive_period: 30s`, `network_list: tcp+udp`. TLS goes in the standard outbound `tls`
 block.
 
@@ -484,8 +623,8 @@ block.
 > matrix (`cloudflare` vs `standard`), key-material format, `vhttp` h3-vs-h2 guidance,
 > idle-suspend/keepalive behaviour, start-time validation, the pre-SPEC-062 migration
 > table and common footguns — is in
-> [lx-protocols-transports.md §3](lx-protocols-transports.md#3-masque-outbound-connect-ip--warp)**
-> ([RU](lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)).
+> [protocols-transports.md §3](protocols-transports.md#3-masque-outbound-connect-ip--warp)**
+> ([RU](protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)).
 
 ### Example — WARP (defaults: `vhttp: auto`)
 
@@ -508,7 +647,10 @@ block.
 ```
 
 `"vhttp": "auto"` — **the default** — tries h3 first and falls back to h2 if the QUIC handshake
-does not complete within 3 s, remembering the winning mode for the rest of the process. The failure
+does not complete within 3 s. An h3 win is remembered; an h2 win only for a window that climbs a ladder
+(1 s → 10 s → 30 s → 5 min → 10 min, one rung per further h2 win; an h3 win drops it back), after
+which h3 is tried first again (SPEC 121); if the remembered mode stops coming up, the memory is dropped and the
+other one is tried in the same dial. The failure
 mode it exists for is the endpoint (or a TCP-only hop in front of it — an HTTP CONNECT `detour`, a
 VLESS/Trojan link in a chain) **silently ignoring QUIC** — there is no error to see, only a hang;
 measured in the field through a proxied hop where Cloudflare answered TCP:443 but never replied to
@@ -525,12 +667,24 @@ QUIC (SPEC 074). On the `standard` profile there is no h2 leg, so `auto` quietly
 
 For `h2` (CONNECT-IP over TCP:443), change one field: `"vhttp": "h2"`. The `h2` path runs its
 TLS through the shared `common/tls` layer, so it gets ClientHello fragmentation like any other
-TLS outbound — including the automatic one under `detour`
-([§9](#9-automatic-clienthello-fragmentation-under-detour-spec-060)). `h3` is untouched by that:
-QUIC does not carry TLS over TCP at all.
+TLS outbound: the node's `fragment` / `record_fragment` and the `tls` section of
+[`lx.sniff_guard`](#lxsniff_guard--guard-against-rerouting-by-sni). The `h3` leg is guarded by
+the `quic` section of the same block; in `auto` the two legs have separate path labels. Without
+the block the ClientHello is not split under `detour`
+([§9](#9-clienthello-under-detour--no-default-spec-060)).
 
 > A top-level `dns` block is required — the userspace stack works at L3 and does not resolve
 > domains itself; the outbound resolves them via the DNS router before dialing.
+
+> **Packet size and WARP (SPEC 120).** The outer QUIC connection to the server starts with
+> `InitialPacketSize` = `mtu + 51` (clamped 1200…1452; 1331 at `mtu` 1280), so an inner packet of
+> `mtu` bytes fits the datagram from the first packet on, not after the first PMTUD probe. WARP
+> passes inner IPv4 fragments and **drops IPv6 fragments**: a node above masque whose packet does
+> not fit `mtu` (a QUIC proxy with a 1280-byte payload = 1328 bytes over IPv6) is silent over IPv6
+> and works over IPv4. A node above masque — via `detour`, via a group, or as a `chain` link — gets
+> a packet size that fits `mtu` automatically ([§13, `lx.mtu_align`](#lxmtu_align--path-mtu--packet-size-alignment));
+> by hand — `initial_packet_size: 1232` on the QUIC node or `mtu: 1340` on masque (the latter needs
+> an outer path of ≈ 1440 bytes to WARP).
 
 > **h3 vs h2 — which to use.** `h3` (QUIC) is the default and fastest. But on networks that
 > filter inbound UDP:443, the QUIC handshake hangs and `h3` never comes up — switch that node to
@@ -541,13 +695,13 @@ QUIC does not carry TLS over TCP at all.
 > **Status.** Device-verified end-to-end on real Wi-Fi and LTE — `warp=on`, real traffic on both
 > `h3` and `h2`, idle-suspend + self-healing reconnect confirmed on-device.
 
-**📖 [Full reference →](lx-protocols-transports.md#3-masque-outbound-connect-ip--warp)**
-([RU](lx-protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)) — complete parameter
+**📖 [Full reference →](protocols-transports.md#3-masque-outbound-connect-ip--warp)**
+([RU](protocols-transports.ru.md#3-masque-outbound-connect-ip--warp)) — complete parameter
 table, profile matrix, key-material format, start-time validation and common footguns.
 
 ---
 
-## 5. DNS server group (SPEC 033/035)
+## 5. DNS server group (SPEC 033/035/143)
 
 Several DNS servers behind one tag with a selection strategy. Solves the
 "one dead DNS server kills resolution" problem: upstream's `dns.final` is a
@@ -568,6 +722,9 @@ live errors. A network change amnesties both tables.
 {
   "type": "group",                  // selector — must be "group"
   "tag": "public",
+  "hosts": ["local"],               // optional: tags of hosts-type servers only.
+                                    //   Consulted first, in this order; never
+                                    //   counted as servers (no health, no fan)
   "servers": ["google", "cloudflare", "quad9"], // REQUIRED, ≥1 tags.
                                     //   Order is NOT meaningful in any mode
   "mode": "stable",                 // stable (default) | fastest | parallel
@@ -614,6 +771,36 @@ wins, last rtt, current flag.
 > on a failure; `parallel` does it on every query. Do not mix internal and
 > public resolvers in one group.
 
+### Local names first: `hosts`
+
+SPEC 143. The optional `hosts` key lists `hosts`-type servers that the group
+consults **before** choosing a target, in key order:
+
+- **Hit** — the query is A or AAAA, the member knows the name, and it answers
+  NOERROR: that answer is returned as is, no network member is asked. This
+  includes an **empty** NOERROR when the entry has only the other address
+  family: an IPv4-only name asked for AAAA gets an empty answer and does not
+  leak to the network. So `strategy: ipv6_only` on such a name yields no
+  address — the same as the OS hosts file.
+- **Miss** — unknown name, another query type, or a non-NOERROR reply: the
+  query goes to `servers` by the group's mode, unchanged.
+- `hosts` members carry no health records, never join a fan or survival mode,
+  never become current and are absent from `GetDNSGroups`. A hit is reported
+  as the `hosts` member being the server that answered, with one `answered`
+  probe; a miss leaves no trace.
+- `servers` stays required and non-empty. A `hosts` (or `fakeip`) server
+  inside `servers` is still rejected at load, and the error points at the
+  `hosts` key. The key accepts only `hosts`-type tags, with no duplicates and
+  no overlap with `servers`.
+
+It works wherever the group tag is accepted: `domain_resolver` (per node or
+`route.default_domain_resolver`), `dns.final`, rules. The reason it exists:
+outbound and endpoint server addresses resolve through `domain_resolver`,
+which goes straight to the server and bypasses DNS rules, so neither a
+`predefined` rule action nor a `server: hosts` rule ever reaches them. A plain
+`hosts` server cannot be that resolver either, because it answers NXDOMAIN for
+every other name.
+
 ### Example — resilient public DNS as the default
 
 ```jsonc
@@ -630,6 +817,34 @@ wins, last rtt, current flag.
   }
 }
 ```
+
+### Example — one local name for a dual-stack WireGuard server
+
+A self-hosted WireGuard server (or WARP) reachable over IPv4 and IPv6 under one
+local name (issue #60):
+
+```jsonc
+{
+  "dns": {
+    "servers": [
+      { "type": "hosts", "tag": "local",
+        "predefined": { "wg.home": ["203.0.113.10", "2001:db8::10"] } },
+      { "type": "udp", "tag": "google",     "server": "8.8.8.8" },
+      { "type": "udp", "tag": "cloudflare", "server": "1.1.1.1" },
+      { "type": "group", "tag": "resolver",
+        "hosts": ["local"],
+        "servers": ["google", "cloudflare"],
+        "mode": "stable" }
+    ],
+    "final": "resolver"
+  },
+  "route": { "default_domain_resolver": { "server": "resolver", "strategy": "prefer_ipv6" } }
+}
+```
+
+`wg.home` as an endpoint's server address gets both addresses from `local`, and
+`strategy` picks the family; every other name goes to `google` / `cloudflare`
+under `stable`.
 
 > ⚠️ The v1 contract (`mode: failover|race`, `interval`, `down_time`,
 > shipped in `v1.14.0-lx.16-rc.1`) is GONE: such configs fail to load.
@@ -732,11 +947,16 @@ The added `CommandClient` methods:
 - **`GetGroups()`** — pull a snapshot of the outbound groups (same data the group stream
   pushes).
 - **`GetOutbounds()`** — pull the flat outbound/endpoint list (needed alongside `GetGroups`
-  because standalone outbounds are not in any group).
+  because standalone outbounds are not in any group). A WG/AWG endpoint's item also carries
+  `EndpointState` (`never_built` / `building` / `up` / `asleep` / `torn_down` / `down` /
+  `disabled`) and `IdleSinceSeconds` (since its last dial); both are empty/0 for other outbounds
+  (SPEC 097; see [lx-energy.md §11](lx-energy.md#11-lazy-build-and-the-build-budget-spec-097)).
+  `disabled` is set by `SetEndpointEnabled` (SPEC 106, below;
+  see [lx-energy.md §12](lx-energy.md#12-manual-onoff-switch-spec-106)).
 - **`GetPool(groupTag)`** — read a `urltest` group's current round_robin rotation pool, slot
-  by slot (SPEC 019; see [§3](#3-round_robin-load-balancing-spec-019)).
+  by slot (SPEC 019; see [§3](#3-urltest-node-selection-modes-spec-019--116)).
 - **`GetDNSGroups()`** — the live state of every DNS `group` server (SPEC 035; see
-  [§5](#5-dns-server-group-spec-033035)): per member `clean` / `liveErrors` /
+  [§5](#5-dns-server-group-spec-033035143)): per member `clean` / `liveErrors` /
   `lastErrorAgeMs` / `liveWins` / `current`.
 - **`GetRunningConfig()`** — the canonical JSON options the running box was actually built
   from, post-override (SPEC 037). Returned as an object with a `Content()` accessor — a bare
@@ -750,6 +970,9 @@ The added `CommandClient` methods:
   per position the resolved node and, for positions ≥ 1, the link instance (`starting|active|idle`,
   live connections, effective MTU and why, what `strip` removed, `rewrite` applied, last error),
   plus dial/error/link counters.
+- **`SetEndpointEnabled(tag, enabled)`** — switch a WG/AWG endpoint off or on at runtime
+  (SPEC 106; see [lx-energy.md §12](lx-energy.md#12-manual-onoff-switch-spec-106)). Returns an
+  `EndpointToggleResult` object whose `State` is the endpoint state after the call.
 
 SPEC 017 also enriches the existing connection stream: a tracked `Connection` now carries a
 separate **`detourList`** field — the transport-detour tail of the final outbound, exposed
@@ -763,37 +986,53 @@ make -f Makefile.lx lx-build   # includes with_lx_command (and with_xhttp/with_a
 
 ---
 
-## 9. Automatic ClientHello fragmentation under `detour` (SPEC 060)
+## 9. ClientHello under `detour` — no default (SPEC 060)
 
-**Not a config key — a changed default.** When a TLS-over-TCP outbound (VLESS, trojan, vmess,
-anytls, shadowtls, http, masque `h2`, …) dials **through `detour`**, `record_fragment` now
-defaults to **on**.
+> ⚠️ **Behaviour change without a load error.** In earlier releases a TLS-over-TCP outbound
+> (VLESS, trojan, vmess, anytls, shadowtls, http, masque `h2`, …) dialling **through `detour`**
+> split its ClientHello into TLS records by default (`record_fragment`). That default is gone.
+> Without the `lx.sniff_guard` block the core behaves as upstream: the ClientHello is split only
+> where the node sets `fragment` or `record_fragment`, under `detour` too. A config without the
+> block still loads, and TLS nodes behind relays that reroute connections by SNI stop
+> connecting.
 
-Why: the lower leg forwards our ClientHello under its own name, and the path MTU beyond that
-server can be lower than the ClientHello. The ICMP *Fragmentation Needed* never reaches us, so
-the packet simply vanishes and the connection dies as `tls handshake: EOF` after 12–17 s. It
-reproduces with a bare `curl`, so it is a property of the path, not of sing-box — but only
-fragmenting the first TLS record works around it. Measured through a broken leg: no
-fragmentation ❌ fail in 12 s; `fragment` ✅ 0.6 s; `record_fragment` ✅ **0.1 s**.
+Why the default existed: a relay can read the SNI out of the ClientHello and send the connection
+to that name instead of the node's destination — this is what Xray `sniffing` with `destOverride`
+and without `routeOnly` does. A node whose SNI is a disguise (WARP with a foreign name, REALITY)
+then gets a connection that goes elsewhere: the handshake hangs and dies as `tls handshake: EOF`
+after 12–17 s, or a foreign key arrives. Xray's TLS sniffer does not parse a ClientHello split
+into TLS records. Measured through a sniffing leg: no split ❌ fail in 12 s; `fragment` ✅ 0.6 s;
+`record_fragment` ✅ **0.1 s**.
 
-Rules:
+The [`lx.sniff_guard`](#lxsniff_guard--guard-against-rerouting-by-sni) block (§13) brings the
+protection back. The minimal block:
 
-- **An explicit config value always wins.** `"fragment": true` is not upgraded to record-split —
-  choosing packet-split stays your choice.
-- **Only the handshake is fragmented**, never the traffic after it. There is no ongoing cost.
-- **`h3`/QUIC is untouched** — no TLS over TCP there, and quic-go keeps its Initial below the
-  threshold anyway (masque `h3` through detour: 4/4 OK).
-- Nested chains are covered automatically: every link carries its own `detour`.
-- **REALITY nodes included — since SPEC 088.** Before it, the REALITY client built its uTLS
-  connection on the bare socket, so both an explicit `fragment` / `record_fragment` and this
-  default were accepted by the config and silently ignored there. The hybrid ClientHello after
-  [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) is 1.5–1.9 KB (two TCP segments),
-  so this matters more than it used to. Whether fragmentation helps on a network that drops that
-  first flight is a property of that network — see §7 for the other lever.
+```json
+"lx": { "sniff_guard": { "tls": { "method": "record_fragment" } } }
+```
 
-> ⚠️ **Known limit:** an explicit `"record_fragment": false` is indistinguishable from "unset",
-> so auto still turns it on under `detour`. To dial through a detour with a different mode, set
-> `"fragment": true`; there is currently no way to ask for no fragmentation at all there.
+With it, a path through any relay except `ssh` and `socks` starts with the split, the direct path
+without it. A path through `ssh` or `socks` starts without the split and turns it on once a node
+there failed without it and then passed with it. To start every relay with the split, as the old
+default did, add `"detour_type": {"ssh": "suspect", "socks": "suspect"}` — the map is laid over
+the defaults, so only the entries that change need listing. Nodes whose SNI matches `server` are
+not guarded by default (`nodes.sni_mismatch`); the old default split theirs too — for that add
+`"nodes": {"sni_mismatch": false}`. Unlike the old default,
+the block learns from connection outcomes and can drop the split on a path where it gets in the
+way.
+
+Node-level upstream keys:
+
+- **A node's `fragment` / `record_fragment` work as upstream**, with or without the block. The
+  block overrides them only with `"override": true`.
+- **`"record_fragment": false`** (SPEC 156) — the node asks for the ClientHello in one record.
+  Under the block without `override` such a node goes unsplit on every path.
+- **REALITY nodes — since SPEC 088.** Before it, the REALITY client built its uTLS connection on
+  the bare socket, and `fragment` / `record_fragment` were silently ignored there. The hybrid
+  ClientHello after [SPEC 083](../SPECS/TASKS/083-REALITY_MLKEM_KEYSHARE/SPEC.md) is 1.5–1.9 KB
+  (two TCP segments). Whether a split helps on a network that drops that first flight is a
+  property of that network — see §7 for the other lever.
+- Only the handshake is split; the traffic after it is untouched.
 
 ---
 
@@ -856,15 +1095,21 @@ endpoint.
 - **`direct` at position ≥ 1 is transparent** — "no hop here"; put `direct` into a selector
   to switch a position off at runtime. `block` rejects. All-`direct` positions ≥ 1 make the
   chain equal to position 0.
-- **MTU of tunnel links (WireGuard, MASQUE) is lowered automatically**: `mtu` in the node's
-  config means "as standalone"; the chain subtracts the exact encapsulation overhead of
-  IP tunnels *below* the link (WG inside an IP tunnel −60/−80 by the server address family,
-  MASQUE ≈ −90), taking the worst case over a group's members. Over stream proxies
-  (vless/trojan/ss over TCP, mux) and datagram proxies the MTU is left as configured.
+- **MTU and packet size of links are aligned automatically** — by the shared `lx.mtu_align`
+  mechanism ([§13](#lxmtu_align--path-mtu--packet-size-alignment)), the same one that works
+  under a plain `detour`: `mtu` in the node's config means "as standalone"; the chain
+  subtracts the exact encapsulation overhead of IP tunnels *below* the link (WG inside an IP
+  tunnel −60/−80 by the server address family, MASQUE −79/−99), taking the worst case over a
+  group's members. QUIC links (hysteria2, tuic, hysteria) at positions ≥ 1 get an
+  `initial_packet_size` that fits the hop below plus `disable_path_mtu_discovery: true`. Over
+  any proxy (vless/trojan/ss/hysteria2/…) nothing changes. The
+  mode (`clamp` by default, `fill`, `off`) and `except` apply to links the same way.
 - **`strip` catalog** (one-sided, the server never sees them): `tls.fragment` (packet-level
   ClientHello fragmentation + `fragment_fallback_delay`; **`record_fragment` is not
-  touched** — under `detour` it switches on automatically as a path fix, see §9),
-  `multiplex.padding`, `xhttp.padding` (minimal range, obfs mode off). `tls.utls` is
+  touched** — protection of the path against rerouting by SNI is set by `lx.sniff_guard`, see §9
+  and §13),
+  `multiplex.padding`, `xhttp.padding` (`x_padding_bytes` is pinned to the lower bound of the node's range, `100`
+  when unset; placement and obfs mode are kept). `tls.utls` is
   available via `"tls.utls": true` (start error on a node that uses `reality`). Server
   contracts — `flow`, `obfs`, `shadowtls`, `plugin`, `udp_over_tcp`, `ech`, transport
   paths — are never stripped.
@@ -901,9 +1146,522 @@ make -f Makefile.lx lx-build                     # builds ./sing-box with both f
 ./sing-box check -c lx-test/config/xhttp_reality.json
 ./sing-box check -c lx-test/config/awg2_basic.json
 ./sing-box check -c lx-test/config/awg3_full.json     # AmneziaWG 3.1 field set
+./sing-box check -c lx-test/config/lx_block.json      # the root lx block, every key
+make -f Makefile.lx lx-check                     # build + check every lx-test/config/*.json
 
 # Android (optional): libbox.aar with with_xhttp+with_awg baked in (needs NDK r28 + OpenJDK 17)
 make lib_install && make lib_android             # → libbox.aar (SDK23) + libbox-legacy.aar (SDK21)
 ```
 
 The CI (`.github/workflows/lx-ci.yml`) builds the feature matrix (`baseline` / `xhttp` / `awg` / `full`), a cross-platform matrix, **and the Android `libbox.aar`** (gomobile), running `check` on the matching sample configs. Pushing a `v*-lx.*` tag runs `lx-release.yml`, which publishes the desktop binaries **and** `libbox-<ver>.aar` / `libbox-legacy-<ver>.aar` as GitHub Release assets. A **Windows 7 (32-bit)** legacy binary (`sing-box-<ver>-windows-386-legacy-windows-7.zip`) is also published — built with a Win7-patched Go and **without `with_naive_outbound`** (`cronet-go` has no windows/386 build; every other feature is unchanged).
+
+## 13. The `lx` root block (SPEC 098)
+
+The fork's global knobs live in one root block, `lx`, grouped by subsystem. Whatever describes a
+single node stays in that node's object, as upstream does: AWG fields on the endpoint, `xhttp` in
+`transport`, a masque node's own `idle_timeout`. Every sub-block and key is optional; an empty `lx`
+is the same as none. A misspelt key is a load error, not a silent default.
+
+```jsonc
+"lx": {
+  "wg": {
+    "idle_suspend": "30s",
+    "idle_suspend_reachable": "5m",
+    "idle_teardown": "10m",
+    "lazy_build": true,
+    "build_max": 4,
+    "build_overflow": "wait"
+  },
+  "masque": {
+    "idle_timeout": "5m"
+  },
+  "trusttunnel": {
+    "idle_timeout": "5m"
+  },
+  "mtu_align": "clamp",
+  "sniff_guard": {
+    "tls": { "method": "record_fragment" },
+    "quic": { "method": "decoy_first_byte" }
+  }
+}
+```
+
+### `lx.wg` — WireGuard / AmneziaWG endpoints
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `idle_suspend` | duration | off | Idle threshold for an endpoint outside the active routing tree: past it the device goes Down (sockets closed, receive buffers freed), the next dial wakes it. Absent or `0` turns the mechanism off; the idle tick does not start |
+| `idle_suspend_reachable` | duration | off | Second, longer threshold for endpoints in the tree (urltest pool member, selected node, final); without it they never sleep. Must be ≥ `idle_suspend` and requires it |
+| `idle_teardown` | duration, explicit `"0"` allowed | inherits `idle_suspend_reachable` | How long an already-sleeping endpoint sleeps before its device and netstack are torn down, counted from falling asleep. `"0"` disables teardown. Requires `idle_suspend` |
+| `lazy_build` | bool | `false` | Endpoints start torn down; the device is built on the first dial. Requires `idle_suspend` |
+| `build_max` | integer ≥ 0 | `0` = no cap | At most N devices built at once |
+| `build_overflow` | `wait` \| `build` | `wait` | When all `build_max` devices carry live connections: wait within the dial deadline, or build above the cap with a warning |
+
+The three idle keys keep their SPEC 020 semantics — timelines and the recommended mobile
+configuration are in [lx-energy.md](lx-energy.md). `lazy_build`, `build_max` and
+`build_overflow` are SPEC 097 — the victim order and the states are in
+[lx-energy.md §11](lx-energy.md#11-lazy-build-and-the-build-budget-spec-097):
+
+- `lazy_build` does not apply to an endpoint with `listen_port` (nothing dials it).
+- `build_max` without `lazy_build` is legal: devices are built at start as before, and the cap
+  applies from the first rebuild (a wake after `idle_teardown`).
+- The `wait` of `build_overflow` lasts until the dial's own deadline, at most 15 s.
+- A `build_max` below the number of nodes used at the same time makes them tear each other down
+  on every switch, each dial paying a device build. Set it for probe-heavy sessions, not as a
+  general memory knob.
+
+Every `lx.wg` key acts only in builds with `with_lx_idle_suspend` (the mobile AAR). A desktop/CLI
+binary refuses them at start — any idle window, an explicit `idle_teardown` (`"0"` included),
+`lazy_build`, a non-zero `build_max` or `build_overflow: "build"`:
+`lx.wg.* is set but this build lacks idle-suspend support; rebuild with -tags with_lx_idle_suspend (mobile-only feature)`.
+`sing-box check` validates the keys but does not start the router, so it accepts them on desktop.
+
+Validation errors name the full key path:
+
+- `lx.wg.idle_suspend_reachable must be >= lx.wg.idle_suspend`
+- `lx.wg.idle_suspend_reachable requires lx.wg.idle_suspend`, and the same for `idle_teardown`, `lazy_build`
+- `lx.wg.<key> must be >= 0` for a negative duration, `lx.wg.build_max must be >= 0`
+- `lx.wg.build_overflow must be "wait" or "build"`
+
+### `lx.masque` — MASQUE outbounds
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `idle_timeout` | duration ≥ 0 | off | Global idle window for every `masque` node without its own `idle_timeout`: after it the session (netstack, pumps, QUIC keepalive) is taken down and the next dial builds it again |
+
+Priority: the node's `idle_timeout` > `lx.masque.idle_timeout` > off. An explicit `"0"` on a node
+keeps that node's tunnel up even when the global value is set. MASQUE already builds its session
+lazily, so there is no cap here.
+
+Validation error: `lx.masque.idle_timeout must be >= 0` for a negative duration.
+
+### `lx.trusttunnel` — TrustTunnel outbounds
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `idle_timeout` | duration ≥ 0 | `5m` | Global idle window for every `trusttunnel` node without its own `idle_timeout`: after it the session is closed locally and the next dial opens it again. Absent or `0` means 5 minutes |
+
+Priority: the node's `idle_timeout` > `lx.trusttunnel.idle_timeout` > 5 minutes. An explicit `"0"`
+on a node disables teardown of its session whatever the global value is. Unlike `lx.masque`, a
+global `0` here does not turn the window off, it means "unset": teardown can only be disabled on
+the node. SPEC 133. The fields of the outbound itself, its `idle_timeout` included, are in
+[protocols-transports.md §6.2](protocols-transports.md#62-outbound-fields).
+
+Validation error: `lx.trusttunnel.idle_timeout must be >= 0` for a negative duration.
+
+### `lx.mtu_align` — path MTU / packet-size alignment
+
+A node that sits right above an IP tunnel — via `detour`, via a group under `detour` or as a
+`chain` link ([§10](#10-chain-outbound--a-virtual-multi-hop-path-of-groups-and-nodes-spec-073)) —
+gets a packet size that fits that tunnel: `mtu` on tunnels (`wireguard`, `masque`),
+`initial_packet_size` plus `disable_path_mtu_discovery: true` on QUIC proxies (`hysteria2`,
+`tuic`, `hysteria`). Computed once at start from the config, before the nodes are created; the
+upstream constructors read the already-adjusted options. Values only go down, and every changed
+field is visible in the start log with its reason. SPEC 120; the originating report is issue #37
+(hysteria2 via `detour` over WARP worked against an IPv4 server and was silent against an IPv6 one).
+
+One key in the root `lx` block, two shapes:
+
+```jsonc
+"lx": { "mtu_align": "clamp" }                                        // string — the mode
+"lx": { "mtu_align": { "mode": "clamp", "except": ["my-wg"] } }       // object — mode + exceptions
+```
+
+| Mode | Field not set | Set explicitly and **above** the limit | Set explicitly and fits |
+|---|---|---|---|
+| `off` | left alone | left alone | left alone |
+| `fill` | limit is filled in | left alone; warning "does not fit under `<tag>`" | left alone |
+| `clamp` **(default)** | limit is filled in | **lowered** to the limit; logged as configured → effective with the reason | left alone |
+
+No mode ever raises a value. `except` lists node tags that are never touched in any mode (an
+unknown mode is rejected when the config is parsed, an unknown tag later, when the instance is
+built and every node is known). No key = `clamp`; this is the contract `chain`
+has kept since SPEC 073 ("`mtu` in the config = as standalone, the chain only lowers"), now applied
+under a plain `detour` as well.
+
+Validation errors (`sing-box check` catches all three too):
+
+- `lx.mtu_align.mode must be "off", "fill" or "clamp"` — an unknown mode, in the string and in
+  the object form; at config parse
+- `lx.mtu_align.except: empty tag` — an empty string in `except`
+- `lx.mtu_align.except: unknown outbound/endpoint tag: <tags>` — the tag is neither an outbound
+  nor an endpoint; checked before alignment, ahead of node creation
+
+**Capacity of a node** — how many bytes of IP packet it carries for the node above it:
+
+| Node below | Capacity |
+|---|---|
+| `masque`, `wireguard` (endpoint and legacy outbound), `openvpn-client`, `openconnect` | its **effective** `mtu` (after its own alignment, recursively downwards) |
+| `tailscale` endpoint | `system_interface_mtu`, else 1280 |
+| `selector`, `urltest` | min over all reachable members, recursively |
+| `chain` as a `detour` target | unlimited + warning (a chain aligns itself) |
+| any other node — `direct` and every proxy (vless, trojan, ss, socks, hysteria2, tuic, …), with or without `detour` | unlimited: a proxy delivers the packet of the node above whole (as a TCP stream, or by its own fragmentation), so whatever lies under its `detour` does not limit the node above (SPEC 144) |
+
+Only tunnels and groups carry a capacity upwards. The one case this leaves out: a tunnel over
+`shadowsocks` / `socks` **UDP** whose own `detour` is a tunnel — those pass datagrams through, and
+the limit below them is real; set `mtu` on the upper tunnel by hand there.
+
+**What the node above gets** (`ipudp` = 28 for an IPv4 server, 48 for IPv6; a domain or an
+unparsed address counts as IPv6; a WG endpoint takes its family from `peers[0].address`):
+
+| Node above | Field | Limit | Overhead v4 / v6 |
+|---|---|---|---|
+| `wireguard` | `mtu` | `capacity − 32 − s4 − ipudp` (`s4` = AmneziaWG transport padding, 0 for plain WG) | 60 / 80 (+ `s4`) |
+| `masque` | `mtu` | `capacity − 51 − ipudp` | 79 / 99 |
+| `hysteria2`, `tuic`, `hysteria` | `initial_packet_size` (+ `disable_path_mtu_discovery: true`) | `capacity − ipudp`, clamped 1200…1452 | — |
+| `openvpn-client`, `openconnect` | — | not derived; one warning if there is capacity below the node | unknown |
+
+**IPv6 floor (SPEC 144).** A tunnel that carries IPv6 inside — a `wireguard` endpoint with an IPv6
+prefix in `address`, `masque` always — is never aligned below 1280: gvisor silently refuses to bring
+up IPv6 on a link with a smaller MTU, and a dead IPv6 inside the tunnel is worse than fragments. When
+the path leaves less than 1280, the tunnel gets 1280 and a Warn line (`… is above the path: … leaves
+1220 bytes, below the IPv6 minimum 1280; outer packets will be fragmented`). A tunnel with only IPv4
+inside goes below 1280 as before; an explicit `mtu` below 1280 is never raised.
+
+If a QUIC node's limit is below 1200 (a tunnel with `mtu` < 1248 under an IPv6 server), 1200 is set
+with a warning — QUIC cannot go below its minimum. PMTUD is switched off together with the derived
+`initial_packet_size`, because quic-go only knows how to search upwards to 1452: over IPv6 the
+probes are lost with the fragments, over IPv4 they "pass" by fragmentation and every packet then
+travels as two. A node with an explicit `initial_packet_size` is left alone entirely, PMTUD included.
+
+**Example — default WARP** (`masque` with `mtu` 1280) and hysteria2 with a `detour` to it:
+
+```jsonc
+{ "type": "masque", "tag": "warp", "mtu": 1280, /* … */ },
+{ "type": "hysteria2", "tag": "hy2", "server": "2001:db8::1", "detour": "warp", /* … */ }
+```
+
+`hy2` gets `initial_packet_size: 1232` (1280 − 48) and `disable_path_mtu_discovery: true`; with an
+IPv4 server — 1252 (1280 − 28). Without alignment quic-go sends 1280-byte payloads, 1328 bytes over
+IPv6, the tunnel splits them into fragments and WARP drops those ([§4](#4-masque-outbound--cloudflare-warp-spec-021)).
+
+**Groups.** Under a group the min over all members is taken at start; switching the selector/urltest
+does not recompute it — the QUIC packet size is fixed when the client is created, a WG device's MTU
+when the device is created, and a live connection does not migrate to the new path. The cost on a
+wide group member: up to 200 bytes per packet (1452 → 1252) and PMTUD off. If that matters — an
+explicit value in `fill`, the tag in `except`, or `off`.
+
+**Start log** — one Info line per changed field, warnings at Warn:
+
+```
+mtu_align: hy2 initial_packet_size → 1232 (detour warp[masque] mtu 1280 − 48 ipv6; pmtud off)
+mtu_align: wg-exit mtu 1420 → 1200 clamped (limited by warp[masque] mtu 1280 via sel −80 ipv6)
+```
+
+For `chain` the same decision shows in `ChainInfo` (`mtu_configured` / `mtu_effective` /
+`mtu_reason` with the mode prefix `clamped:` / `filled:`). Decisions made for `detour` are not yet
+exposed over the lx RPC.
+
+**Not aligned:** xhttp over h3 and naive (cronet) — their own QUIC transport; `openvpn-client` and
+`openconnect` as upper nodes — a warning only; the server → client direction — controlled by the
+server. What masque does from below (outer `InitialPacketSize` = `mtu + 51`, ICMP Packet Too Big
+with the real budget) is in [§4](#4-masque-outbound--cloudflare-warp-spec-021).
+
+### `lx.sniff_guard` — guard against rerouting by SNI
+
+A node between the client and the server can read the name out of the first handshake packet and
+send the connection to that name instead of the dialled address. This is what an Xray inbound
+with `sniffing.destOverride` and without `routeOnly` does — on a relay under `detour`, or on a
+router with a VPN or a transparent proxy in the local network. While the SNI is the server's own
+name, the rerouting leads to the same place; when the SNI is a disguise (REALITY, WARP, hysteria2
+or tuic with a fake SNI, the AmneziaWG QUIC masquerade), the connection lands on someone else's
+host and the node looks dead. The block makes the first handshake packet unreadable to the
+sniffer without changing what the server receives, and learns from connection outcomes which
+paths need it.
+
+Without the block, as without a `method` in a section, there is no protection: the handshake goes
+out as upstream sends it. A block in which neither section has a method is the same as no block.
+The block does not turn itself on — protection defaults are up to the application that writes
+the config.
+
+```jsonc
+"lx": {
+  "sniff_guard": {
+    "nodes": {
+      "sni_mismatch": true,                 // absent = true; false — no filter
+      "outbound_type": ["vless", "masque"]  // false | absent — no filter
+    },
+    "detour_type": {                        // no detour = "direct"
+      "direct": "clean",
+      "ssh":    "clean",
+      "socks":  "clean",
+      "*":      "suspect"
+    },
+    "override": false,
+    "tls": {
+      "method": "record_fragment",          // record_fragment | fragment | delay | off
+      "delay": "300ms",
+      "persist": true
+    },
+    "quic": {
+      "method": "decoy_first_byte",         // decoy_first_byte | delay | off
+      "detour_type": { "socks": "never" },
+      "persist": true
+    }
+  }
+}
+```
+
+**Which nodes — `nodes`.** Two filters; a node is guarded when it passes both. A node that does
+not pass works as without the block. Without a `nodes` block `sni_mismatch: true` applies: a node
+with its own name passes a sniffing relay unprotected anyway. `sni_mismatch: false` guards every
+node that supports it.
+
+| Key | Values | Absent | Meaning |
+|---|---|---|---|
+| `sni_mismatch` | `true`, `false` | `true` | `true` — only nodes whose SNI differs from the `server` address; `false` — no filter |
+| `outbound_type` | a list of types, `false` | no filter | Only nodes of the listed types. `true`, an empty list and an unknown type are load errors; a known type that cannot be guarded is allowed and skipped |
+
+Whether the SNI matches `server` is decided at load time by comparing strings, without DNS:
+case-insensitive, trailing dot ignored, a subdomain is a different name. The name compared is the
+one that actually goes into the ClientHello or Initial; with ECH, the outer, public one. The
+outer name is taken only from an ECH config given inline in the node (`ech.config`); with
+`ech.config_path` or ECH from DNS the plain `server_name` is compared.
+
+| `server` | SNI | Result |
+|---|---|---|
+| domain | not set, or the same domain | match |
+| domain | another name | mismatch |
+| IP | a name | mismatch |
+| IP | not set | match — nothing for a sniffer to read |
+| any | no SNI sent (`disable_sni`) | match |
+| hysteria2 with Salamander obfuscation | any | match — a sniffer cannot read the Initial |
+| REALITY, masque (WARP), AWG QUIC masquerade | any | always mismatch |
+
+A node behind a CDN (`server` is a CDN IP, SNI is its own domain) passes the filter without
+needing to; the protection does not hurt it. A node whose name the relay's DNS resolves to a
+different address does not pass `sni_mismatch` — use `sni_mismatch: false` for it, narrowed with
+`outbound_type` if needed.
+
+**Starting state of a path — `detour_type`.** A map "carrier type → state the path starts in".
+The carrier is the nearest non-group outbound the connection actually goes through: a group
+(`selector`, `urltest`) resolves to its selected member. A node without `detour`, with `detour`
+to `direct`, or to a group currently set to `direct`, is on a path of type `direct`. When the
+carrier cannot be determined, the path is unknown: no protection, no label.
+
+| Value | Meaning |
+|---|---|
+| `never` | Never any protection on this path: no label, no retries, node keys work as upstream |
+| `clean` | Starts without protection |
+| `suspect` | Starts with protection |
+
+The `"*"` key covers every type not in the map. Groups cannot be keys. The map default: `direct`,
+`ssh`, `socks` — `clean`; `"*"` — `suspect`. The `tls` or `quic` section can override single
+types with its own `detour_type` map; the rest come from the shared one. `"socks": "never"` in
+the `quic` section of the example comes from a field report: through `socks` with UDP-over-TCP
+the decoy byte broke the tunnel with no sniffer on the path.
+
+**The `tls` and `quic` sections, `override`.**
+
+| Key | Values | Absent | Meaning |
+|---|---|---|---|
+| `tls.method` | `record_fragment`, `fragment`, `delay`, `off` | `off` | Method for TLS over TCP (table below) |
+| `quic.method` | `decoy_first_byte`, `delay`, `off` | `off` | Method for QUIC |
+| `delay` (per section) | positive duration | `300ms` | Pause of that section's `delay` method. Against Xray it must exceed 200 ms; a smaller value is allowed for a sniffer that waits less. Zero and negative are load errors |
+| `persist` (per section) | `true`, `false` | `false` | Keep labels of encrypted relays in `experimental.cache_file`. `true` without `cache_file` enabled is a load error |
+| `detour_type` (per section) | a map as above | the shared map | Starting states overridden for that protocol |
+| `override` (shared) | `true`, `false` | `false` | `false` — a node's `fragment` / `record_fragment` win over the block; a node with an explicit value follows it. `true` — for a node that passed `nodes`, the path label decides the ClientHello shape: the block's method on `suspect`, no split on `clean`, even if the node asked for a split. On a `never` path the block does nothing. QUIC has no node keys, `override` has no effect there |
+
+The node keys `tls.fragment`, `tls.record_fragment` (an explicit `false` opts out of splitting)
+and `tls.fragment_fallback_delay` work in any state of the block, as upstream.
+
+**Methods.** The server receives a valid handshake in every case. Traffic after the handshake is
+untouched.
+
+| Method | What goes on the wire | Against the Xray sniffer | Cost |
+|---|---|---|---|
+| `tls.record_fragment` | The ClientHello split into several TLS records, split points inside the SNI name | The sniffer parses only the first record, which ends mid-extensions — "not a ClientHello" on the first try | None |
+| `tls.fragment` | The ClientHello as one record, in chunks over TCP segments, waiting for the ACK (on the device's own socket) or pausing (through a relay) | Protects while the pause between chunks exceeds 200 ms: through a relay that is `fragment_fallback_delay` (500 ms), and on the direct path behind a transparent proxy the core holds the same pause | `fragment_fallback_delay` pause through a relay and on the direct path behind a transparent proxy |
+| `tls.delay` | The ClientHello as one record, in two chunks split inside the SNI, with a `delay` pause between them | The first chunk is incomplete; the sniffer waits 200 ms for the rest and gives up | `delay` pause on every guarded handshake |
+| `quic.decoy_first_byte` | A one-byte datagram `0x00` ahead of the first Initial; the server drops it | The QUIC sniffer decides on the first datagram: "not QUIC" | None |
+| `quic.delay` | The second Initial is held back by `delay` | The sniffer assembles the ClientHello from Initial packets within 200 ms and runs out of time | `delay` pause on every guarded handshake |
+
+**Which nodes can be guarded.** TLS over TCP: vless, trojan, vmess, anytls, shadowtls, http with
+TLS, masque `h2`, trusttunnel `h2`, XHTTP on `h2`. QUIC: masque `h3`, hysteria2, tuic,
+trusttunnel with QUIC, XHTTP on `h3`, wireguard with the QUIC-shaped AmneziaWG masquerade.
+Skipped silently: naive and nodes with a system TLS engine (`engine: apple`, `windows`).
+
+| Method | Applies to | Does not apply to |
+|---|---|---|
+| `tls.record_fragment`, `tls.fragment`, `tls.delay` | every TLS node listed above | naive, system TLS engines |
+| `quic.decoy_first_byte` | every QUIC node listed, AmneziaWG included | — |
+| `quic.delay` | QUIC nodes whose ClientHello spans two Initial packets | AmneziaWG; a node whose ClientHello fits in one Initial; hysteria2 with Salamander obfuscation. On such a node the method does nothing |
+
+A node the section's method does not apply to goes as without the block and does not move the
+path label.
+
+**How the path label is learned.** A label is kept per "path + protocol": the path is `direct`
+or the tag of the nearest relay, the protocol is `tls` or `quic`. The key is the tag, not the
+type: two VLESS relays with different sniffing settings are told apart. The label is shared by
+all nodes on that path; TLS and QUIC do not affect each other. On `clean` a node goes without
+protection, on `suspect` with it.
+
+The label changes only on a pair of outcomes on one node:
+
+- the node failed without protection, then passed with it → the path becomes `suspect`;
+- the node failed with protection, then passed without it → the path becomes `clean`;
+- any other outcome leaves the label alone. A dead node that fails both ways changes nothing, so
+  a bulk test of many nodes, some of them dead, does not take protection off a path.
+
+A fast error (not a timeout) is retried in the same dial with the opposite decision. A timeout
+returns the error, and the opposite decision goes to the node's next dial on that path (within
+10 minutes). On a `suspect` path an attempt without protection after a failure is allowed at most
+once per 10 minutes per path; the rest of the time a failure on `suspect` leads to nothing.
+
+Only attempts in which the handshake actually happened and the block's decision was applied go
+into a pair. A dial that lands on an already open session (mux, the anytls pool, XHTTP, a long
+QUIC session of masque, hysteria2, tuic, trusttunnel) and a node with its own choice under
+`override: false` do not.
+
+Only nodes whose SNI differs from `server` (per the table above) move the label — regardless of
+the `sni_mismatch` filter: a node with its own name passes a sniffing relay unprotected anyway, so
+its outcomes say nothing about the sniffer. Such a node is protected by the label only with
+`sni_mismatch: false`. On a
+`clean` path it does not retry. On a `suspect` path, if it failed with protection and passed
+without it, the node records a **personal opt-out**: from then on it goes unprotected on that
+path, while the path label and the other nodes stay as they were. The reverse pair on that node
+(failed without, passed with) clears the opt-out. Retries for such a node happen at most once per
+10 minutes. The opt-out lives as long as the core instance and is not persisted.
+
+Protocol specifics:
+
+- **hysteria2, tuic** — the handshake runs inside the QUIC library; the outcome is judged by the
+  connection's lifetime: closed less than 30 s after the dial is a failure, longer is a success.
+  A success counts as soon as the connection has lived 30 s; a failure is learnt when the node
+  makes its next new connection. There is no retry within the same dial; a pair forms through the
+  next dial. With hysteria2 port hopping,
+  the sockets opened by later hops carry no handshake and are not guarded; hysteria2 realm mode
+  is not guarded at all.
+- **masque `auto`** — the legs follow different labels: h3 the `quic` one, h2 the `tls` one. A
+  fast-failing h3 is retried with the opposite decision before the h2 fallback; a silent h3 falls
+  back to h2 as before, and the opposite decision goes to the next h3 leg.
+- **AmneziaWG** — a `wireguard` endpoint is covered when its masquerade is `ip: "quic"` or it has
+  a non-empty `i1`; the byte goes only ahead of a QUIC-shaped burst. The decision is taken from
+  the label when the socket is created; the handshake outcome does not move the label, so
+  AmneziaWG never moves a path label. With no other QUIC node on the path the label stays at its
+  start; for an AWG node on a path that starts `clean` (direct, `socks`) set protection
+  explicitly — `suspect` for that carrier type in `quic.detour_type`.
+
+Every label change and every personal opt-out set or cleared writes an info-level log line: path,
+protocol, old and new state, the node, and the outcomes of both attempts. There is no separate
+API.
+
+**Cost of learning.**
+
+- The first failure on a `clean` path: a sniffer that reroutes to a name where nobody answers
+  gives a timeout, not an error. The node's first dial hangs until its deadline, its first URL
+  test fails, protection arrives from the second dial.
+- A node that fails fast costs two handshakes instead of one.
+- A random glitch on a clean path (a failure without protection followed by a success with it)
+  sets `suspect`, and only the reverse pair clears it. For `record_fragment` and
+  `decoy_first_byte` this costs nothing; for `delay` and `fragment` it is a pause on every
+  handshake, with `persist` across restarts too.
+
+**Network change and `persist`.** A network change resets the labels of the `direct` path and of
+unencrypted carriers (`socks`, `http` without TLS) to their start, together with the personal
+opt-outs and pending retries on them. Labels of encrypted relays survive a network change. If a
+different relay (type, address or port) shows up under the same tag, its labels and opt-outs are
+reset. Without `persist` labels live as long as the core instance: a restart or applying a new
+config starts from the starting states. With `persist` the labels of encrypted relays are written
+to `experimental.cache_file` and loaded at start if the same relay is under the same tag; an
+entry for a path the map now declares `never` is not applied. Labels of `direct` and unencrypted
+carriers are not stored.
+
+**Load errors.** All of them are caught by `sing-box check`. `<key>` is the full path of the key
+in question, for example `lx.sniff_guard.quic.detour_type`.
+
+| Cause | Message |
+|---|---|
+| Unknown method | `lx.sniff_guard.tls.method must be one of "record_fragment", "fragment", "delay", "off"`; `lx.sniff_guard.quic.method must be one of "decoy_first_byte", "delay", "off"` |
+| `nodes.outbound_type: true` | `lx.sniff_guard.nodes.outbound_type: true is not a filter; list the types, or use false for no filter` |
+| `nodes.outbound_type: []` | `lx.sniff_guard.nodes.outbound_type: empty list; list the types, or use false for no filter` |
+| A type no outbound or endpoint of this build knows, in `nodes.outbound_type` or as a `detour_type` key | `<key>: unknown outbound type "<t>"` |
+| A group in `nodes.outbound_type` | `lx.sniff_guard.nodes.outbound_type: "<t>" is a group; a group is never dialled itself, name the member types` |
+| A group as a `detour_type` key | `<key>: "<t>" is a group; name the member types, a group is resolved to the member it picks` |
+| An unknown value in a `detour_type` map | `<key>.<type> must be "never", "clean" or "suspect"` |
+| A zero or negative `delay` | `<key>.delay must be > 0` (`<key>` is `lx.sniff_guard.tls` or `lx.sniff_guard.quic`) |
+| `persist: true` without `experimental.cache_file` enabled | `lx.sniff_guard.tls.persist: requires experimental.cache_file to be enabled`; the same with `.quic` |
+| An unknown key, or a value that is not an object | the message starts with the key: `lx.sniff_guard`, `lx.sniff_guard.nodes`, `lx.sniff_guard.tls`, `lx.sniff_guard.quic` |
+| The removed `lx.quic_sniff_decoy` key | `lx.quic_sniff_decoy is removed: the QUIC sniff decoy is configured by lx.sniff_guard.quic` |
+
+The unknown-type and `persist` checks run only when at least one section has a method; `persist`
+is checked for the section that has one.
+
+**Limits.**
+
+- A sniffer is not detected directly and not told apart from other causes of failure — only by a
+  pair of outcomes on one node; a random glitch can form a false pair.
+- A handshake that completes without an error in the wrong place counts as a success: `tuic` with
+  `insecure` and an SNI that resolves to a live QUIC host. masque is protected by key pinning,
+  hysteria2 by authentication, TLS nodes by certificate verification (without `insecure`).
+- The full gRPC transport (`grpc`, not lite) is not shaped: its handshake runs outside the node's
+  dial. Such a node goes as without the block.
+- On the direct path shadowtls v2/v3 and any node with `tcp_fast_open` are not protected: the
+  path cannot be classified. Through `detour` they are protected like the others.
+- shadowtls v3 without uTLS is not protected on any path: its handshake bypasses the core TLS
+  layer. With uTLS it is protected like the others.
+- The block does not fix the relay; the fix on the relay side is `"routeOnly": true` in
+  `sniffing`.
+- Not tested against sniffers other than Xray. sing-box as a relay does not reroute by sniffing
+  and needs no protection. The 200 ms wait is an Xray constant; for another sniffer tune `delay`.
+- A DPI that drops a guarded handshake (treating record splitting as a signature) is not bypassed:
+  the pair moves that path's label to `clean`.
+
+### `lx.quic_sniff_decoy` — removed
+
+Replaced by the `lx.sniff_guard` block (SPEC 060). Any value of the key is a load error:
+`lx.quic_sniff_decoy is removed: the QUIC sniff decoy is configured by lx.sniff_guard.quic`;
+there is no backward compatibility. The `0x00` byte ahead of the QUIC
+Initial is now the `"decoy_first_byte"` method of the `quic` section:
+
+```json
+"lx": { "sniff_guard": { "quic": { "method": "decoy_first_byte" } } }
+```
+
+| Was | Now |
+|---|---|
+| `mode`, `detour_type` | the `detour_type` map (shared or `quic.detour_type`): `never` for paths that need no byte |
+| `send: "always"` | starting state `suspect` |
+| `send: "retry"` | starting state `clean`; protection turns on by a pair of outcomes |
+| `outbound_type` | `nodes.outbound_type`; the filter is shared by the `tls` and `quic` sections |
+
+The per-outbound `clean → armed → decoy` memory is replaced by a shared label per relay tag and
+protocol. History — [SPEC 060](../SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR/HISTORY.md).
+
+### `lx.awg_masquerade` — removed
+
+Removed in lx.33 (SPEC 060, owner 2026-11-07). Any value is a load error:
+`lx.awg_masquerade is removed: the AmneziaWG masquerade burst is sent on every path`. The
+AmneziaWG masquerade burst (the `ip`/`id`/`ib` decoy, `i1`…`i5`, `jc` junk) is sent on every path,
+over a `detour` too, as the lx.32 default `all` did. Drop the key from the config; the sniffing
+relay case (issue #64) is covered by the `quic` section of `lx.sniff_guard` (`decoy_first_byte`).
+History — [SPEC 153](../SPECS/TASKS/153-AWG_MASQUERADE_OVER_DETOUR/SPEC.md).
+
+### Removed `route.lx_idle_*`
+
+| Old key (removed) | Key |
+|---|---|
+| `route.lx_idle_suspend` | `lx.wg.idle_suspend` |
+| `route.lx_idle_suspend_reachable` | `lx.wg.idle_suspend_reachable` |
+| `route.lx_idle_teardown` | `lx.wg.idle_teardown` |
+
+The deprecated aliases are gone (owner 2026-11-02): a config that still carries one fails to load
+with an unknown-field error, like any misspelt key. Move the values to `lx.wg`.
+
+The running config (`GetRunningConfig`, SPEC 037) returns the `lx` block canonical (empty
+sub-blocks dropped).
+
+### Reserved: `lx.naive`
+
+`single_engine` and `lazy_start` are reserved for SPEC 096. Until that lands, an `lx.naive`
+sub-block is rejected like any unknown key.
+
+## 14. Tailscale: turning Taildrop off (SPEC 149)
+
+The `disable_taildrop` key on a `tailscale` endpoint. Without it Taildrop works as upstream.
+
+```json
+{ "type": "tailscale", "tag": "ts", "disable_taildrop": true }
+```
+
+With `true` the node accepts no files: the sender gets a 403 `Taildrop is disabled on this node`. Sending from the node is refused as well, and the status reports `canShareFiles = false`. Files received earlier stay in `taildrop_directory` and can still be opened and deleted. Other devices on the tailnet still see the node as a target; that is set by the Tailscale admin console, not by the node.

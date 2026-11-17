@@ -28,6 +28,7 @@ func (s *streamSession) Close() error {
 
 type StatusMessage struct {
 	Memory           int64
+	MemoryRuntime    int64 // lx: SPEC 148 — Go runtime memory; Memory stays the process RSS
 	Goroutines       int32
 	ConnectionsIn    int32
 	ConnectionsOut   int32
@@ -66,6 +67,12 @@ type OutboundGroupItem struct {
 	Type         string
 	URLTestTime  int64
 	URLTestDelay int32
+	// lx:begin lx_command
+	// SPEC 097: WG/AWG endpoint state and seconds since its last dial; empty /
+	// 0 for other outbounds and outside GetOutbounds.
+	EndpointState    string
+	IdleSinceSeconds int64
+	// lx:end lx_command
 }
 
 type OutboundGroupItemIterator interface {
@@ -358,6 +365,7 @@ func statusMessageFromGRPC(status *daemon.Status) *StatusMessage {
 	}
 	return &StatusMessage{
 		Memory:           int64(status.Memory),
+		MemoryRuntime:    int64(status.MemoryRuntime), // lx: SPEC 148
 		Goroutines:       status.Goroutines,
 		ConnectionsIn:    status.ConnectionsIn,
 		ConnectionsOut:   status.ConnectionsOut,
@@ -406,6 +414,10 @@ func outboundGroupItemListFromGRPC(list *daemon.OutboundList) OutboundGroupItemI
 			Type:         ob.Type,
 			URLTestTime:  ob.UrlTestTime,
 			URLTestDelay: ob.UrlTestDelay,
+			// lx:begin lx_command
+			EndpointState:    ob.EndpointState,
+			IdleSinceSeconds: ob.IdleSinceSeconds,
+			// lx:end lx_command
 		})
 	}
 	return newIterator(items)

@@ -6,7 +6,7 @@
 | Field | Value |
 |------|----------|
 | Type | B (bug) — upstream `wireguard-go` behaviour gap (`StdNetBind.Open`), triggered by an upstream `sing` asymmetry on Windows; kills all WG/AWG endpoints on affected machines |
-| Status | I (implemented) — fix + unit tests green (darwin, `-race`), `GOOS=windows` cross-build and vet clean (vet warnings are pre-existing upstream RIO code); **pending field validation** on the reporting client's machine |
+| Status | D (done) — fix + unit tests green (darwin, `-race`), `GOOS=windows` cross-build and vet clean (vet warnings are pre-existing upstream RIO code); not run on the reporting client's machine, in the field since `v1.14.0-lx.27-rc.1` with no reports, closed by the owner on 2026-09-24 |
 | Branch | `lx` |
 | Base | superproject `53a0a51d7`, submodule `wireguard-go` `334cad0` (`lx-awg2-v005`) |
 | Related | [041](../041-WG_HANDSHAKE_GIVEUP_REBIND/SPEC.md) (its give-up/early/nudge triggers multiply the exposure of this bug), [026](../026-AWG_MAGIC_VS_RESERVED_CLEAR/SPEC.md) (same file, both bind paths), [010](../010-WG_ENDPOINT_GRO_SPLIT_BRAIN/SPEC.md) (prior `conn/` hotfix, since removed) |
@@ -176,7 +176,7 @@ stack at all, which WireGuard handles routinely.
   upstream.** With the predicate in place the asymmetry is harmless to us,
   and we keep zero patches in that submodule.
 - **v6 dial errors on direct-out are not touched.** `dial tcp [2a00:…]:
-  An invalid argument` is an honest "no v6 through this interface" signal
+  An invalid argument` is a genuine "no v6 through this interface" signal
   on this machine; masking it belongs to DNS strategy (`ipv4_only`), not
   to the dialer.
 - **No retry-on-failed-`BindUpdate` hardening** (both `InterfaceUpdated`
@@ -216,7 +216,7 @@ stack at all, which WireGuard handles routinely.
   changes. Until shipped, the client-side workaround is: re-enable the
   IPv6 protocol checkbox on the default adapter (puts it back into the v6
   stack, making `IPV6_UNICAST_IF` valid); with no external v6 on that
-  network, `"strategy": "ipv4_only"` in DNS is the honest configuration
+  network, `"strategy": "ipv4_only"` in DNS is the correct configuration
   either way, and the `fdfe::` TUN address should be reverted.
 
 ## Removal condition (P1)

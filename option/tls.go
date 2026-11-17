@@ -124,7 +124,7 @@ type OutboundTLSOptions struct {
 	ClientKeyPath              string                              `json:"client_key_path,omitempty"`
 	Fragment                   bool                                `json:"fragment,omitempty"`
 	FragmentFallbackDelay      badoption.Duration                  `json:"fragment_fallback_delay,omitempty"`
-	RecordFragment             bool                                `json:"record_fragment,omitempty"`
+	RecordFragment             *bool                               `json:"record_fragment,omitempty"` // lx: SPEC 156 — explicit false opts out of the detour default
 	Spoof                      string                              `json:"spoof,omitempty"`
 	SpoofMethod                string                              `json:"spoof_method,omitempty" enum:"wrong-sequence,wrong-checksum,wrong-ack,wrong-md5,wrong-timestamp"`
 	KernelTx                   bool                                `json:"kernel_tx,omitempty"`
@@ -245,8 +245,9 @@ type OutboundECHOptions struct {
 }
 
 type OutboundUTLSOptions struct {
-	Enabled     bool   `json:"enabled,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty" enum:"chrome_psk,chrome_psk_shuffle,chrome_padding_psk_shuffle,chrome_pq,chrome_pq_psk,chrome,firefox,edge,safari,360,qq,ios,android,random,randomized"`
+	Enabled bool `json:"enabled,omitempty"`
+	// lx: SPEC 118 — `chrome_155` is the opt-in Chrome 155 preset from the utls fork.
+	Fingerprint string `json:"fingerprint,omitempty" enum:"chrome_psk,chrome_psk_shuffle,chrome_padding_psk_shuffle,chrome_pq,chrome_pq_psk,chrome,chrome_155,firefox,edge,safari,360,qq,ios,android,random,randomized"`
 }
 
 type OutboundRealityOptions struct {

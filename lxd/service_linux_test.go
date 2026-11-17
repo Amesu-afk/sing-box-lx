@@ -9,32 +9,24 @@ import (
 	"testing"
 )
 
-// fakeInit points the probes at a temp root so the detector can be driven
-// without the test machine's real init.
+// fakeInit swaps the host probe so the detector can be driven without the
+// test machine's real init.
 func fakeInit(t *testing.T, pid1Comm string, openwrt bool, systemdRun bool) {
 	t.Helper()
-	root := t.TempDir()
-	oldPid1, oldOpenwrt, oldSystemd := pid1CommPath, openwrtReleasePath, systemdRunPath
-	t.Cleanup(func() {
-		pid1CommPath, openwrtReleasePath, systemdRunPath = oldPid1, oldOpenwrt, oldSystemd
-	})
-
-	pid1CommPath = filepath.Join(root, "comm")
-	if pid1Comm != "" {
-		if err := os.WriteFile(pid1CommPath, []byte(pid1Comm+"\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	openwrtReleasePath = filepath.Join(root, "openwrt_release")
-	if openwrt {
-		if err := os.WriteFile(openwrtReleasePath, []byte("DISTRIB_ID='OpenWrt'\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	systemdRunPath = filepath.Join(root, "run-systemd-system")
-	if systemdRun {
-		if err := os.MkdirAll(systemdRunPath, 0o755); err != nil {
-			t.Fatal(err)
+	old := linuxInitProbe
+	t.Cleanup(func() { linuxInitProbe = old })
+	linuxInitProbe = func() linuxInitEnv {
+		return linuxInitEnv{
+			pid1Comm: pid1Comm + "\n",
+			pathKind: func(path string) (bool, bool) {
+				switch path {
+				case "/etc/openwrt_release":
+					return openwrt, false
+				case "/run/systemd/system":
+					return systemdRun, systemdRun
+				}
+				return false, false
+			},
 		}
 	}
 }
@@ -60,39 +52,11 @@ func capture(t *testing.T, fn func() error) string {
 	return string(buf[:n])
 }
 
-func TestDetectInitPrefersPID1(t *testing.T) {
-	// PID 1 is the honest answer even when the other markers disagree: an
-	// OpenWrt userland booted under systemd is systemd's machine.
-	fakeInit(t, "systemd", true, false)
-	if got := detectInit(); got != initSystemd {
-		t.Fatalf("pid1=systemd must win over the openwrt marker, got %v", got)
-	}
-	fakeInit(t, "procd", false, true)
-	if got := detectInit(); got != initProcd {
-		t.Fatalf("pid1=procd must win over /run/systemd/system, got %v", got)
-	}
-	// Unreadable /proc/1/comm (containers, restricted procfs) → file probes.
-	fakeInit(t, "", true, false)
-	if got := detectInit(); got != initProcd {
-		t.Fatalf("openwrt marker must be the fallback, got %v", got)
-	}
-	fakeInit(t, "", false, true)
-	if got := detectInit(); got != initSystemd {
-		t.Fatalf("/run/systemd/system must be the fallback, got %v", got)
-	}
-	fakeInit(t, "", false, false)
-	if got := detectInit(); got != initUnknown {
-		t.Fatalf("no markers must mean unknown, got %v", got)
-	}
-}
-
-// TestRecipeTouchesNothing is the principle as a test: --service on linux
-// prints and never writes. It must hold for install AND uninstall --purge.
 func TestRecipeTouchesNothing(t *testing.T) {
 	fakeInit(t, "procd", true, false)
 	stateDir := filepath.Join(t.TempDir(), "state")
 
-	capture(t, func() error { return InstallService([]string{"lxd", "--state-dir", stateDir}, false) })
+	capture(t, func() error { return InstallService([]string{"lxd", "--state-dir", stateDir}, "", false) })
 	if _, err := os.Stat(stateDir); !os.IsNotExist(err) {
 		t.Fatal("install must not create the state dir")
 	}
@@ -105,7 +69,7 @@ func TestRecipeTouchesNothing(t *testing.T) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	capture(t, func() error { return UninstallService(true, false) })
+	capture(t, func() error { return UninstallService(true, false, "", false) })
 	if _, err := os.Stat(stateDir); err != nil {
 		t.Fatal("uninstall --purge must not delete anything")
 	}
@@ -114,7 +78,7 @@ func TestRecipeTouchesNothing(t *testing.T) {
 func TestProcdRecipeContents(t *testing.T) {
 	fakeInit(t, "procd", true, false)
 	out := capture(t, func() error {
-		return InstallService([]string{"lxd", "--state-dir", "/etc/sing-box-lxd/state"}, false)
+		return InstallService([]string{"lxd", "--state-dir", "/etc/sing-box-lxd/state"}, "", false)
 	})
 
 	for _, want := range []string{
@@ -151,7 +115,7 @@ func TestProcdRecipeContents(t *testing.T) {
 func TestPairingStepKeepsCustomStateDir(t *testing.T) {
 	fakeInit(t, "procd", true, false)
 	out := capture(t, func() error {
-		return InstallService([]string{"lxd", "--state-dir", "/srv/custom/state"}, false)
+		return InstallService([]string{"lxd", "--state-dir", "/srv/custom/state"}, "", false)
 	})
 	if !strings.Contains(out, "--state-dir /srv/custom/state client add") {
 		t.Fatalf("custom state dir must stay in the pairing step:\n%s", out)
@@ -161,7 +125,7 @@ func TestPairingStepKeepsCustomStateDir(t *testing.T) {
 func TestSystemdRecipeContents(t *testing.T) {
 	fakeInit(t, "systemd", false, true)
 	out := capture(t, func() error {
-		return InstallService([]string{"lxd", "--state-dir", "/var/lib/sing-box-lxd/state"}, false)
+		return InstallService([]string{"lxd", "--state-dir", "/var/lib/sing-box-lxd/state"}, "", false)
 	})
 
 	for _, want := range []string{
@@ -182,7 +146,7 @@ func TestSystemdRecipeContents(t *testing.T) {
 
 func TestUnknownInitStillHelps(t *testing.T) {
 	fakeInit(t, "", false, false)
-	out := capture(t, func() error { return InstallService([]string{"lxd", "--state-dir", "/srv/lxd/state"}, false) })
+	out := capture(t, func() error { return InstallService([]string{"lxd", "--state-dir", "/srv/lxd/state"}, "", false) })
 	if !strings.Contains(out, "no supported init detected") {
 		t.Fatalf("unknown init must say so; got:\n%s", out)
 	}
@@ -198,8 +162,8 @@ func TestUnknownInitStillHelps(t *testing.T) {
 func TestDryRunChangesNothingHere(t *testing.T) {
 	fakeInit(t, "procd", true, false)
 	args := []string{"lxd", "--state-dir", "/etc/sing-box-lxd/state"}
-	plain := capture(t, func() error { return InstallService(args, false) })
-	dry := capture(t, func() error { return InstallService(args, true) })
+	plain := capture(t, func() error { return InstallService(args, "", false) })
+	dry := capture(t, func() error { return InstallService(args, "", true) })
 	if plain != dry {
 		t.Fatalf("--dry-run must not change the output on linux:\n--- plain ---\n%s\n--- dry ---\n%s", plain, dry)
 	}

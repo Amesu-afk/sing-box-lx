@@ -3,10 +3,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -33,9 +35,24 @@ var (
 	lxdRun         bool
 	lxdService     string
 	lxdPurge       bool
+	lxdKeepCopy    bool
 	lxdDryRun      bool
+	lxdExecDir     string
+	lxdAllowUnsafe bool
 	lxdClientName  string
+	// SPEC 103 §2.13: the pairing invite into a file instead of stdout.
+	lxdInviteOut       string
+	lxdInviteName      string
+	lxdClientInviteOut string
 )
+
+// defaultInviteName labels the client an --invite-out install pairs: the
+// launcher's own name (SPEC 103 §2.13).
+const defaultInviteName = "singbox-launcher"
+
+// pinCronetLibrary, when a build sets it (cronetpin_windows_lx.go), keeps a
+// privileged core from loading libcronet.dll out of PATH (SPEC 103 §4.2 p. 2).
+var pinCronetLibrary func()
 
 // devDefaultListen — адрес dev-запуска без daemon.json: plain h2c на
 // loopback, без секрета (FEATURE 014 §2). Всё остальное — только через
@@ -49,7 +66,13 @@ const devDefaultListen = "127.0.0.1:9091"
 var commandLxd = &cobra.Command{
 	Use:   "lxd",
 	Short: "Run the sing-box-lx daemon: host the core in-process behind a reload-surviving control channel",
-	Args:  cobra.NoArgs,
+	Long: `Run the sing-box-lx daemon: host the core in-process behind a reload-surviving control channel.
+
+Subcommands: client (mTLS enrollment), update (self-update, linux).
+daemon.json may list named root commands the launcher runs by name over
+/admin/commands, e.g. "commands": {"update": "/usr/bin/sing-box lxd update"}
+(docs-lx/lxd-daemon.md §8.5).`,
+	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := lxdMain(cmd); err != nil {
 			log.Fatal(err)
@@ -61,6 +84,56 @@ var commandLxdClient = &cobra.Command{
 	Use:   "client",
 	Short: "Manage trusted launcher clients (mTLS enrollment)",
 }
+
+// commandLxdUpdate is the self-updater (SPEC 129): the usual entry in
+// daemon.json is `"commands": {"update": "/usr/bin/sing-box lxd update"}`,
+// which the launcher runs by name (SPEC 128); by hand it prints the same lines.
+var commandLxdUpdate = &cobra.Command{
+	Use:   "update",
+	Short: "Update this binary to the latest release for its platform and restart the service (linux, root)",
+	Long: `Update this binary in place from the latest sing-box-lx release (linux, root).
+
+Reads the release's SHA256SUMS, streams the archive of this binary's platform
+into <binary>.new, verifies the sum, checks that the new binary runs and
+accepts the current config, swaps it atomically (the old one stays as a hard
+link until the new service is up), restarts the service through the host's
+init (procd, systemd, openrc) and rolls back when the new service does not
+come up within 15 s or its core is not started (GET /admin/status over
+loopback) within 20 s more. Downloads honour HTTPS_PROXY / ALL_PROXY.
+
+Exit codes: 0 updated or already up to date, 1 nothing changed, 2 rolled back.
+
+Expose it to the launcher as a named command in daemon.json:
+  "commands": {"update": "/usr/bin/sing-box lxd update"}
+See docs-lx/lxd-daemon.md §8.5-8.6.`,
+	Args: cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		stateDir := ""
+		if cmd.Flags().Changed("state-dir") {
+			stateDir = lxdStateDir
+		} else if dir, found := lxd.FindServiceStateDir(); found {
+			stateDir = dir
+		}
+		code, err := lxd.Update(lxd.UpdateOptions{
+			DryRun:     lxdUpdateDryRun,
+			Prerelease: lxdUpdatePrerelease,
+			NoRestart:  lxdUpdateNoRestart,
+			Service:    lxdUpdateService,
+			StateDir:   stateDir,
+		}, os.Stdout)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "update: ERROR:", err)
+		}
+		os.Exit(code)
+	},
+}
+
+var (
+	lxdUpdateDryRun     bool
+	lxdUpdatePrerelease bool
+	lxdUpdateNoRestart  bool
+	lxdUpdateService    string
+)
 
 var commandLxdClientAdd = &cobra.Command{
 	Use:   "add",
@@ -103,17 +176,56 @@ func init() {
 	commandLxd.PersistentFlags().StringVar(&lxdStateDir, "state-dir", "lxd-state", "daemon home: daemon.json, last-good config, run-state, client trust, keys")
 	commandLxd.Flags().StringVar(&lxdConfigForce, "config-force", "", "always boot from this config file, overriding recorded last-good")
 	commandLxd.Flags().BoolVar(&lxdRun, "run", false, "force the core up regardless of recorded run-state")
-	commandLxd.Flags().StringVar(&lxdService, "service", "", "install (system LaunchDaemon, root) | install-user (per-user LaunchAgent, no sudo) | uninstall")
+	serviceUsage := "install (system LaunchDaemon, root) | install-user (per-user LaunchAgent, no sudo) | copy (root-owned copy only, no service; root) | uninstall | status (exit 0 OK, 2 reinstall needed, 3 not installed, 4 copy only, 5 not running)"
+	allowUnsafeUsage := "debug only: let the root launchd service start from a binary that is not a root-owned copy (logs a WARN instead of refusing)"
+	execDirUsage := "with --service=install|copy|uninstall|status: directory for the root-owned binary copy sing-box-lxd and its sidecar (default /Library/PrivilegedHelperTools, created root:wheel 0755 if missing; a directory given here is created if missing, with any missing parents); every component from / must be root-owned and not group/world-writable"
+	if runtime.GOOS == "windows" {
+		serviceUsage = "install (Windows service sing-box-lxd; elevated) | copy (protected copy only, no service; elevated) | uninstall (elevated) | status (no elevation; exit 0 OK, 2 reinstall needed, 3 not installed, 4 copy only, 5 not running)"
+		allowUnsafeUsage = "debug only: let the Windows service start from a binary that is not a protected copy (logs a WARN instead of refusing)"
+		execDirUsage = `with --service=install|copy|uninstall|status: directory for the protected copy sing-box-lxd.exe (with libcronet.dll when it lies beside this binary) and its sidecar (default <ProgramFiles>\sing-box-lxd, created if missing); every component from the volume root must have an administrative owner and not be replaceable by other accounts`
+	}
+	commandLxd.Flags().StringVar(&lxdService, "service", "", serviceUsage)
 	commandLxd.Flags().BoolVar(&lxdPurge, "purge", false, "with --service=uninstall: also delete the state directory (clients, last-good, keys)")
+	commandLxd.Flags().BoolVar(&lxdKeepCopy, "keep-copy", false, "with --service=uninstall: remove the service but keep the root-owned copy and its sidecar for non-service use (--purge still only concerns the state)")
 	commandLxd.Flags().BoolVar(&lxdDryRun, "dry-run", false, "with --service: show what would be done, change nothing")
+	commandLxd.Flags().BoolVar(&lxdAllowUnsafe, "allow-unsafe-exec", false, allowUnsafeUsage)
+	commandLxd.Flags().StringVar(&lxdExecDir, "exec-dir", "", execDirUsage)
+	commandLxd.Flags().StringVar(&lxdInviteOut, "invite-out", "", "with --service=install: write the pairing invite into this new file (created exclusively, 0600) instead of printing it; a failed mint exits 1")
+	commandLxd.Flags().StringVar(&lxdInviteName, "invite-name", "", "with --service=install: the name the paired client gets (default "+defaultInviteName+" with --invite-out, none without)")
 
 	commandLxd.AddCommand(commandLxdClient)
-	commandLxdClientAdd.Flags().StringVar(&lxdClientName, "name", "", "human label for the client")
+	commandLxdClientAdd.Flags().StringVar(&lxdClientName, "name", "", "human label for the client (1-64 printable characters; a named invite replaces the client of that name)")
+	commandLxdClientAdd.Flags().StringVar(&lxdClientInviteOut, "invite-out", "", "write the invite into this new file (created exclusively, 0600) instead of printing it")
 	commandLxdClient.AddCommand(commandLxdClientAdd)
 	commandLxdClient.AddCommand(commandLxdClientList)
 	commandLxdClient.AddCommand(commandLxdClientRemove)
 
+	commandLxdUpdate.Flags().BoolVar(&lxdUpdateDryRun, "dry-run", false, "report installed and available versions and the asset, change nothing")
+	commandLxdUpdate.Flags().BoolVar(&lxdUpdatePrerelease, "prerelease", false, "take the newest release including rc builds (default: the latest stable)")
+	commandLxdUpdate.Flags().BoolVar(&lxdUpdateNoRestart, "no-restart", false, "replace the binary and stop; restart the service yourself")
+	commandLxdUpdate.Flags().StringVar(&lxdUpdateService, "service", "sing-box-lxd", "service name for the init's restart and health check")
+	commandLxd.AddCommand(commandLxdUpdate)
+
 	mainCommand.AddCommand(commandLxd)
+
+	// Root running the core outside the lxd service — the launcher's classic
+	// TUN mode elevates `sing-box run` — gets the same executable check,
+	// which outside the service only warns (SPEC 100), and only on macOS and
+	// Windows (SPEC 132).
+	// Wraps Run only while upstream defines the command through Run; if it
+	// moves to RunE this hook drops out instead of calling nil, and the
+	// guard test in cmd_lxd_lx_test.go flags the move.
+	if upstreamRun := commandRun.Run; upstreamRun != nil {
+		commandRun.Run = func(cmd *cobra.Command, args []string) {
+			if err := lxd.CheckServiceExecutable(false, false); err != nil {
+				log.Fatal(err)
+			}
+			if pinCronetLibrary != nil && lxd.ServiceActionPrivileged() {
+				pinCronetLibrary()
+			}
+			upstreamRun(cmd, args)
+		}
+	}
 }
 
 func lxdMain(cmd *cobra.Command) error {
@@ -121,23 +233,96 @@ func lxdMain(cmd *cobra.Command) error {
 	if lxdService != "" {
 		return runServiceAction(cmd)
 	}
-
-	fileConfig, installed, err := daemonConnection(lxdStateDir)
+	if cmd.Flags().Changed("exec-dir") {
+		return E.New("--exec-dir needs --service=install, copy, uninstall or status")
+	}
+	if lxdKeepCopy {
+		return E.New("--keep-copy needs --service=uninstall")
+	}
+	if cmd.Flags().Changed("invite-out") || cmd.Flags().Changed("invite-name") {
+		return E.New("--invite-out and --invite-name need --service=install")
+	}
+	// Under the Windows SCM the handler owns the process (SPEC 103 §2.10):
+	// daemon.json, then the log, then the self-check, so a refusal lands in
+	// lxd.log.
+	if lxd.IsWindowsService() {
+		return lxd.RunService(func() (lxd.ServiceBody, error) {
+			return lxdServiceBody(cmd)
+		})
+	}
+	// A root launchd service must execute a root-owned copy (SPEC 100):
+	// refused here, before anything binds or boots, with the path, owner
+	// and mode in the message that launchd writes to lxd.log.
+	if err := lxd.CheckServiceExecutable(lxdAllowUnsafe, true); err != nil {
+		return err
+	}
+	daemonOptions, err := lxdDaemonOptions(cmd)
 	if err != nil {
 		return err
+	}
+	return lxd.Run(globalCtx, daemonOptions)
+}
+
+// lxdServiceBody prepares the daemon inside the SCM handler: daemon.json,
+// the log taken over, the self-check (strict here), libcronet pinned, the
+// working directory moved into the state dir — relative paths of the config
+// (cache.db, a tailscale state_directory) resolve there, not in System32
+// (SPEC 103 §4.2 p. 1).
+func lxdServiceBody(cmd *cobra.Command) (lxd.ServiceBody, error) {
+	daemonOptions, err := lxdDaemonOptions(cmd)
+	if err != nil {
+		return nil, err
+	}
+	daemonOptions.StateDir = absPathOr(daemonOptions.StateDir)
+	release := lxd.TakeOverLog(daemonOptions)
+	daemonOptions.LogTakenOver = true
+	fail := func(err error) (lxd.ServiceBody, error) {
+		if release != nil {
+			release()
+		}
+		return nil, err
+	}
+	if err = lxd.CheckServiceExecutable(lxdAllowUnsafe, true); err != nil {
+		return fail(err)
+	}
+	if pinCronetLibrary != nil {
+		pinCronetLibrary()
+	}
+	if err = os.Chdir(daemonOptions.StateDir); err != nil {
+		return fail(E.Cause(err, "lxd: enter the state directory"))
+	}
+	return func(ctx context.Context) error {
+		if release != nil {
+			defer release()
+		}
+		// The SCM handler's ctx only carries the stop: the core needs the
+		// service registry of globalCtx, like the console path in lxdMain.
+		runCtx, cancel := context.WithCancel(globalCtx)
+		defer cancel()
+		defer context.AfterFunc(ctx, cancel)()
+		return lxd.Run(runCtx, daemonOptions)
+	}, nil
+}
+
+// lxdDaemonOptions reads the daemon's settings: daemon.json (or the dev
+// defaults), the boot flags, and for an installed daemon its log.
+func lxdDaemonOptions(cmd *cobra.Command) (lxd.Options, error) {
+	fileConfig, installed, err := daemonConnection(lxdStateDir)
+	if err != nil {
+		return lxd.Options{}, err
 	}
 
 	// Config directories are not supported at all (FEATURE 014 §2) — reject
 	// them loudly instead of silently ignoring a -C the operator relied on.
 	if len(configDirectories) > 0 {
-		return E.New("lxd does not support -C config directories; pass a single -c file")
+		return lxd.Options{}, E.New("lxd does not support -C config directories; pass a single -c file")
 	}
 	// -c is an optional seed: preRun injects a default config.json, so only an
 	// explicitly passed flag counts.
 	seed := ""
 	if cmd.Root().PersistentFlags().Changed("config") {
 		if len(configPaths) != 1 {
-			return E.New("lxd takes at most one -c config file")
+			return lxd.Options{}, E.New("lxd takes at most one -c config file")
 		}
 		seed = configPaths[0]
 	}
@@ -154,6 +339,8 @@ func lxdMain(cmd *cobra.Command) error {
 		// client directory serves a dev run too, and an absent list just means
 		// the platform defaults.
 		DHCPLeaseFiles: fileConfig.DHCPLeaseFiles,
+		Commands:       fileConfig.Commands,
+		Hooks:          fileConfig.Hooks,
 	}
 	// The rotated log file exists only for an installed daemon (daemon.json
 	// present): a fileless dev run keeps its terminal, and Run additionally
@@ -169,7 +356,7 @@ func lxdMain(cmd *cobra.Command) error {
 		daemonOptions.LogMaxBackups = fileConfig.LogMaxBackups
 		daemonOptions.LogMaxAgeHours = fileConfig.LogMaxAgeHours
 	}
-	return lxd.Run(globalCtx, daemonOptions)
+	return daemonOptions, nil
 }
 
 // daemonConnection resolves the DAEMON's settings with exactly one source of
@@ -220,9 +407,42 @@ func clientConnection(stateDir string) (listen string, useTLS bool, secret strin
 // linux every action is already advisory, so the flag is a no-op there by
 // construction — the same output either way.
 func runServiceAction(cmd *cobra.Command) error {
+	// --exec-dir places the root-owned copy of the binary (SPEC 100);
+	// absolute, because the plist and the invariant need it so.
+	execDir := ""
+	if cmd.Flags().Changed("exec-dir") {
+		switch lxdService {
+		case "install", "copy", "uninstall", "status":
+		default:
+			return E.New("--exec-dir applies to --service=install, copy, uninstall and status (the root-owned copy) only")
+		}
+		execDir = absPathOr(lxdExecDir)
+	}
+	if lxdKeepCopy && lxdService != "uninstall" {
+		return E.New("--keep-copy applies to --service=uninstall only")
+	}
+	invite, err := installInviteOptions(cmd)
+	if err != nil {
+		return err
+	}
 	switch lxdService {
 	case "install", "install-user":
 		userScope := lxdService == "install-user"
+		if userScope {
+			if err = lxd.CheckUserScope(); err != nil {
+				return err
+			}
+		}
+		// The invite file must not exist: refused before anything changes
+		// (SPEC 103 §2.13).
+		if invite.path != "" {
+			if lxd.ServiceInstallIsAdvisory {
+				return E.New("--invite-out needs a platform where --service=install installs the service (macOS, Windows)")
+			}
+			if err = lxd.CheckInviteFileAbsent(invite.path); err != nil {
+				return err
+			}
+		}
 		stateDir := serviceStateDir(cmd, userScope)
 		// Two ways to end up printing instead of installing: the platform's
 		// installer is advisory (linux), or the operator asked for a dry run.
@@ -232,7 +452,13 @@ func runServiceAction(cmd *cobra.Command) error {
 			if userScope {
 				return lxd.InstallUserService(daemonArgsForService(cmd, stateDir), lxdDryRun)
 			}
-			return lxd.InstallService(daemonArgsForService(cmd, stateDir), lxdDryRun)
+			if err = lxd.InstallService(daemonArgsForService(cmd, stateDir), execDir, lxdDryRun); err != nil {
+				return err
+			}
+			if invite.path != "" {
+				fmt.Println("lxd: would write the invite for client", strconvQuote(invite.name), "to", invite.path)
+			}
+			return nil
 		}
 		// Connection settings are owned by daemon.json, which install itself
 		// materializes (free-port scan, generated secret). The connection
@@ -245,18 +471,79 @@ func runServiceAction(cmd *cobra.Command) error {
 		if userScope {
 			err = lxd.InstallUserService(daemonArgsForService(cmd, stateDir), false)
 		} else {
-			err = lxd.InstallService(daemonArgsForService(cmd, stateDir), false)
+			err = lxd.InstallService(daemonArgsForService(cmd, stateDir), execDir, false)
 		}
 		if err != nil {
 			return err
 		}
-		printServiceSummary(config, stateDir, userScope)
-		return nil
+		return printServiceSummary(config, stateDir, userScope, invite)
+	case "copy":
+		// Only the root-owned copy and its sidecar: no plist, no launchd —
+		// for a launcher that runs the core as root by itself.
+		return lxd.InstallServiceCopy(execDir, lxdDryRun)
 	case "uninstall":
-		return lxd.UninstallService(lxdPurge, lxdDryRun)
+		return lxd.UninstallService(lxdPurge, lxdKeepCopy, execDir, lxdDryRun)
+	case "status":
+		// Read-only, no root needed. The exit code is the launcher's
+		// contract: 0 OK, 2 MISMATCH/UNSAFE, 3 NOT INSTALLED, 4 COPY ONLY,
+		// 5 NOT RUNNING, 1 an error.
+		verdict, err := lxd.ServiceStatus(execDir)
+		if err != nil {
+			return err
+		}
+		if code := verdict.ExitCode(); code != 0 {
+			os.Exit(code)
+		}
+		return nil
 	default:
-		return E.New("--service must be install, install-user, or uninstall")
+		return E.New("--service must be install, install-user, copy, uninstall, or status")
 	}
+}
+
+// inviteDelivery is where install's pairing invite goes: a new file
+// (--invite-out) or stdout, and the client name minted with it.
+type inviteDelivery struct {
+	path string
+	name string
+}
+
+// installInviteOptions validates --invite-out/--invite-name (SPEC 103
+// §2.13): install only; the name follows the mint norm; with a file the name
+// defaults to the launcher's, without one it is --invite-name or none, as
+// before.
+func installInviteOptions(cmd *cobra.Command) (inviteDelivery, error) {
+	outSet, nameSet := cmd.Flags().Changed("invite-out"), cmd.Flags().Changed("invite-name")
+	if !outSet && !nameSet {
+		return inviteDelivery{}, nil
+	}
+	if lxdService != "install" && lxdService != "install-user" {
+		return inviteDelivery{}, E.New("--invite-out and --invite-name apply to --service=install only")
+	}
+	if outSet && lxdInviteOut == "" {
+		return inviteDelivery{}, E.New("--invite-out needs a file path")
+	}
+	name, err := lxd.NormalizeClientName(installInviteName(lxdInviteOut, lxdInviteName, nameSet))
+	if err != nil {
+		return inviteDelivery{}, err
+	}
+	return inviteDelivery{path: lxdInviteOut, name: name}, nil
+}
+
+// installInviteName: --invite-name wins; with --invite-out and no name the
+// client is the launcher; otherwise no name, as before.
+func installInviteName(inviteOut, inviteName string, nameSet bool) string {
+	switch {
+	case nameSet:
+		return inviteName
+	case inviteOut != "":
+		return defaultInviteName
+	default:
+		return ""
+	}
+}
+
+func strconvQuote(value string) string {
+	return fmt.Sprintf("%q", value)
 }
 
 // serviceStateDir resolves the state dir a service should use: the explicit
@@ -304,10 +591,17 @@ func firstFreeLoopbackAddr(start, tries int) (string, error) {
 //   - secret: kept if present, generated otherwise — the daemon owns its
 //     credential.
 func prepareServiceConfig(stateDir string, userScope bool) (lxd.DaemonConfig, error) {
-	// Same root requirement as the plist write below, checked first so the
-	// operator gets the actionable message before any disk mutation.
-	if !userScope && os.Getuid() != 0 {
-		return lxd.DaemonConfig{}, E.New("--service=install needs root (run with sudo); for a per-user agent without sudo use --service=install-user")
+	// Same privilege requirement as the service write below, checked first so
+	// the operator gets the actionable message before any disk mutation.
+	if !userScope && !lxd.ServiceActionPrivileged() {
+		return lxd.DaemonConfig{}, lxd.ServiceInstallPrivilegeError()
+	}
+	// Windows: the data dir is taken over BEFORE the secret is written into
+	// it (SPEC 103 §2.3); elsewhere a no-op.
+	if !userScope {
+		if err := lxd.PrepareServiceHome(os.Stdout); err != nil {
+			return lxd.DaemonConfig{}, err
+		}
 	}
 	config, _, err := lxd.LoadDaemonConfig(stateDir)
 	if err != nil {
@@ -321,6 +615,11 @@ func prepareServiceConfig(stateDir string, userScope bool) (lxd.DaemonConfig, er
 		config.Listen = lxd.ListenAddress(address)
 	}
 	config.TLS = true
+	// Windows keeps the log in logs\ beside the launcher's classic.log
+	// (SPEC 103 §2.12); an operator's log_file stays.
+	if defaultLog := lxd.ServiceDefaultLogFile(); !userScope && config.LogFile == "" && defaultLog != "" {
+		config.LogFile = defaultLog
+	}
 	if config.Secret == "" {
 		config.Secret, err = lxd.GenerateSecret()
 		if err != nil {
@@ -337,35 +636,57 @@ func prepareServiceConfig(stateDir string, userScope bool) (lxd.DaemonConfig, er
 // one screen: the channel address, the admin secret, the settings file, the
 // restart command, and a one-time pairing invite. The secret and the invite
 // go to install's stdout — the operator's terminal, not the service log; the
-// invite code burns on the first enroll.
-func printServiceSummary(config lxd.DaemonConfig, stateDir string, userScope bool) {
-	restartTarget := "system/" + "com.leadaxe.sing-box-lxd"
-	restartPrefix := "sudo "
-	if userScope {
-		restartTarget = fmt.Sprintf("gui/%d/com.leadaxe.sing-box-lxd", os.Getuid())
-		restartPrefix = ""
-	}
+// invite code burns on the first enroll. With --invite-out the invite goes
+// into the file instead, and a failed mint is an error: the launcher judges
+// by the exit code (SPEC 103 §2.13); without it a failed mint only warns, as
+// before.
+func printServiceSummary(config lxd.DaemonConfig, stateDir string, userScope bool, invite inviteDelivery) error {
 	fmt.Println("lxd: control channel:", strings.Join(config.Listen.Addresses(), ", "))
 	fmt.Println("lxd: admin secret:   ", config.Secret)
 	fmt.Println("lxd: settings file:  ", filepath.Join(stateDir, "daemon.json"))
-	fmt.Println("lxd: restart command:", restartPrefix+"launchctl kickstart -k "+restartTarget)
+	fmt.Println("lxd: restart command:", lxd.ServiceRestartCommand(userScope))
 
+	var file *os.File
+	if invite.path != "" {
+		var err error
+		if file, err = lxd.CreateInviteFile(invite.path); err != nil {
+			return E.Cause(err, "service installed, but the invite file cannot be created")
+		}
+	}
 	client := lxd.NewLocalClient(config.Listen.Advertise(), config.Secret, config.TLS)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		invite, err := client.MintClientCode("")
+		code, err := client.MintClientCode(invite.name)
 		if err == nil {
-			fmt.Println("lxd: pair a launcher with this one-time invite:")
-			fmt.Println(invite)
-			return
+			return deliverInvite(code, file)
 		}
 		if time.Now().After(deadline) {
 			fmt.Fprintln(os.Stderr, "lxd: service installed, but minting an invite failed:", err)
-			fmt.Fprintln(os.Stderr, "lxd: mint one manually: sudo "+os.Args[0]+" lxd client add")
-			return
+			fmt.Fprintln(os.Stderr, "lxd: mint one manually: "+lxd.PrivilegedCommand(os.Args[0]+" lxd client add"))
+			if file != nil {
+				lxd.DiscardInviteFile(file)
+				return E.Cause(err, "service installed, but no invite was written to ", invite.path)
+			}
+			return nil
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// deliverInvite writes the invite into the file made for it, or prints it.
+func deliverInvite(invite string, file *os.File) error {
+	if file == nil {
+		fmt.Println("lxd: pair a launcher with this one-time invite:")
+		fmt.Println(invite)
+		return nil
+	}
+	path := file.Name()
+	if err := lxd.WriteInvite(file, invite); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	fmt.Println("lxd: invite written to", path)
+	return nil
 }
 
 // daemonArgsForService reconstructs the daemon invocation without --service.
@@ -395,18 +716,27 @@ func daemonArgsForService(cmd *cobra.Command, stateDir string) []string {
 // else the dev default. This is what lets bare `sudo sing-box lxd client add`
 // work on a host with an installed service: listen/tls/secret all come from
 // the daemon's own settings file.
-func clientStateDir(cmd *cobra.Command) string {
+func clientStateDir(cmd *cobra.Command) (string, error) {
 	if cmd.Flags().Changed("state-dir") {
-		return lxdStateDir
+		return lxdStateDir, nil
 	}
 	if dir, found := lxd.FindServiceStateDir(); found {
-		return dir
+		return dir, nil
 	}
-	return lxdStateDir
+	// Windows: the service's daemon.json exists but is closed to this
+	// token — say so instead of falling back to the dev state dir.
+	if err := lxd.ServiceStateDirAccessError(); err != nil {
+		return "", err
+	}
+	return lxdStateDir, nil
 }
 
 func lxdClientCommandClient(cmd *cobra.Command) (*lxd.LocalClient, error) {
-	listen, useTLS, secret, err := clientConnection(clientStateDir(cmd))
+	stateDir, err := clientStateDir(cmd)
+	if err != nil {
+		return nil, err
+	}
+	listen, useTLS, secret, err := clientConnection(stateDir)
 	if err != nil {
 		return nil, err
 	}
@@ -414,13 +744,31 @@ func lxdClientCommandClient(cmd *cobra.Command) (*lxd.LocalClient, error) {
 }
 
 func lxdClientAdd(cmd *cobra.Command) error {
+	name, err := lxd.NormalizeClientName(lxdClientName)
+	if err != nil {
+		return err
+	}
 	client, err := lxdClientCommandClient(cmd)
 	if err != nil {
 		return err
 	}
-	invite, err := client.MintClientCode(lxdClientName)
+	// The file is made before the mint: an existing one refuses, and a mint
+	// without a place to put the invite would only burn the previous code.
+	var file *os.File
+	if lxdClientInviteOut != "" {
+		if file, err = lxd.CreateInviteFile(lxdClientInviteOut); err != nil {
+			return err
+		}
+	}
+	invite, err := client.MintClientCode(name)
 	if err != nil {
+		if file != nil {
+			lxd.DiscardInviteFile(file)
+		}
 		return err
+	}
+	if file != nil {
+		return deliverInvite(invite, file)
 	}
 	fmt.Println("copy this invite into the launcher:")
 	fmt.Println(invite)

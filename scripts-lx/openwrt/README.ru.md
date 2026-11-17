@@ -20,8 +20,8 @@ SSID → мост → tun (auto_route + include_interface) → ядро sing-box
 ## Требования
 
 - OpenWrt 22.03+ с fw4/nftables (форки с `ID="openwrt"` в `/etc/os-release` подходят) и dnsmasq;
-- ~50 МБ свободного места (бинарь ~41 МБ; на маленьком overlay нужен extroot);
-- архитектура из релизов форка: aarch64, x86_64, armv7l, mips, mipsel.
+- ~100 МБ свободного места (бинарь 75–90 МБ). На aarch64 и mipsel, если на overlay тесно, установщик предлагает вместо него копию, сжатую UPX (~17 МБ на флеше, больше RAM, старт 15–20 с на mipsel); на остальных маленькому overlay нужен extroot;
+- архитектура из релизов форка: aarch64, x86_64, armv7l, mips, mipsel, i686 (SSE2, Pentium 4 и новее), riscv64.
 
 ## Установка
 
@@ -223,7 +223,23 @@ awk -v d=$((B-A)) -v t=$T -v c=$(grep -c ^processor /proc/cpuinfo) \
 /etc/init.d/sing-box-lxd status | restart | stop | start
 logread | grep sing-box | tail -20        # системный лог
 tail -f /etc/sing-box-lxd/lxd.log         # собственный лог демона, ротация своя
+sing-box lxd update --dry-run             # установленный и доступный релиз
+sing-box lxd update                       # обновить ядро и перезапустить (то же делает кнопка Update лаунчера)
 ```
+
+**Хуки жизненного цикла.** Демон создаёт `/etc/sing-box-lxd/state/hooks/` с четырьмя
+скриптами-заготовками — `pre_start`, `post_start`, `post_reload`, `post_stop` — и вызывает
+их на границах жизни ядра, когда в `daemon.json` есть `"hooks": {"enabled": true}`
+(нетронутая заготовка пропускается как «не настроено»). Скрипт получает факты в окружении
+(`LXD_EVENT`, `LXD_REASON`, `LXD_TUN_ADDRESS`, `LXD_TUN_INTERFACE`, …); типичная задача —
+направить резолвер роутера на tun и вернуть обратно. Каталог должен оставаться root-owned
+и без записи для group/other: демон проверяет это перед каждым запуском. Init-скрипт
+ставит `term_timeout 30`, чтобы procd не убил `post_stop` по умолчательному бюджету 5 с.
+Подробности: `docs-lx/lxd-daemon.ru.md`, раздел «Хуки».
+
+### Память на маленьком роутере
+
+Служба запускается с `GOMEMLIMIT` (RAM/3 в границах 64..512 MiB, считается при установке) и `GOGC=50`: Go GC держит кучу ниже лимита, вместо роста до ядерного OOM-killer'а, который вешает роутер. Оба значения — в `/etc/init.d/sing-box-lxd` (`procd_set_param env`), правьте и `restart`. Сервис `oom-killer` в ядре — вторая линия: он меряет RSS процесса и сбрасывает соединения, только когда RSS у `memory_limit`, поэтому на роутере с 256 МБ `memory_limit` должен быть заметно ниже RAM (около 120 МБ), а не 260 МБ — иначе он не сработает никогда. Прежде чем крутить, убедитесь, что виновата память: `logread | grep -i "out of memory"`.
 
 Apply, rollback и статус ядра — **только из лаунчера**: они за mTLS, `curl` с роутера отвечает `client certificate not trusted`.
 

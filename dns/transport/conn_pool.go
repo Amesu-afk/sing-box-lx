@@ -47,10 +47,14 @@ type connPoolState[T comparable] struct {
 	shared        T
 	hasShared     bool
 	sharedClaimed bool
+	sharedUsers   int
+	sharedWaiters int
 	sharedCtx     context.Context
 	sharedCancel  context.CancelCauseFunc
 
 	connecting *connPoolConnect[T]
+
+	lx connPoolStateLx[T] // lx: SPEC 139 — connection-test state (conntest_lx.go)
 }
 
 type connPoolConnect[T comparable] struct {
@@ -116,11 +120,15 @@ func (p *ConnPool[T]) Release(conn T, reuse bool) {
 		p.options.Close(conn, net.ErrClosed)
 		return
 	}
+	reuse = reuse && !p.releaseProbeOwnedLx(state, conn) // lx: SPEC 139 — a test's connection is not parked for production
 	if !reuse || !p.options.IsAlive(conn) {
 		p.removeConn(state, conn, net.ErrClosed)
 		p.access.Unlock()
 		p.options.Close(conn, net.ErrClosed)
 		return
+	}
+	if p.options.Mode == ConnPoolSingle && state.hasShared && state.shared == conn && state.sharedUsers > 0 {
+		state.sharedUsers--
 	}
 	if p.options.Mode == ConnPoolOrdered {
 		if _, idle := state.idleElements[conn]; !idle {
@@ -175,6 +183,7 @@ func (p *ConnPool[T]) releaseSlot() {
 // removeConn must be called with p.access held.
 func (p *ConnPool[T]) removeConn(state *connPoolState[T], conn T, cause error) {
 	delete(state.all, conn)
+	p.forgetProbeOwnedLx(state, conn, cause) // lx: SPEC 139
 	switch p.options.Mode {
 	case ConnPoolSingle:
 		if state.hasShared && state.shared == conn {
@@ -182,6 +191,7 @@ func (p *ConnPool[T]) removeConn(state *connPoolState[T], conn T, cause error) {
 			state.shared = zero
 			state.hasShared = false
 			state.sharedClaimed = false
+			state.sharedUsers = 0
 			state.sharedCtx = nil
 			if state.sharedCancel != nil {
 				state.sharedCancel(cause)
@@ -194,6 +204,23 @@ func (p *ConnPool[T]) removeConn(state *connPoolState[T], conn T, cause error) {
 			delete(state.idleElements, conn)
 		}
 	}
+}
+
+func (p *ConnPool[T]) CloseIdle() {
+	p.access.Lock()
+	if p.closed {
+		p.access.Unlock()
+		return
+	}
+	state := p.state
+	if p.options.Mode != ConnPoolSingle || !state.hasShared || state.sharedUsers > 0 || state.sharedWaiters > 0 {
+		p.access.Unlock()
+		return
+	}
+	conn := state.shared
+	p.removeConn(state, conn, net.ErrClosed)
+	p.access.Unlock()
+	p.options.Close(conn, net.ErrClosed)
 }
 
 func (p *ConnPool[T]) Reset() {
@@ -225,6 +252,9 @@ func (p *ConnPool[T]) Close() error {
 }
 
 func (p *ConnPool[T]) acquireOrdered(ctx context.Context, dial func(context.Context) (T, error)) (T, bool, error) {
+	if isFreshLx(ctx) { // lx: SPEC 139 — fresh: a connection of the test's own, never pooled
+		return p.acquireOrderedFreshLx(ctx, dial)
+	}
 	var zero T
 	for {
 		p.access.Lock()
@@ -238,6 +268,7 @@ func (p *ConnPool[T]) acquireOrdered(ctx context.Context, dial func(context.Cont
 			delete(current.idleElements, idleConn)
 			if p.options.IsAlive(idleConn) {
 				p.access.Unlock()
+				p.tracePooledLx(ctx, current, idleConn) // lx: SPEC 139 — REUSED with its age
 				return idleConn, false, nil
 			}
 			delete(current.all, idleConn)
@@ -291,11 +322,15 @@ func (p *ConnPool[T]) dialAndInstall(ctx context.Context, current *connPoolState
 		return zero, false, net.ErrClosed
 	}
 	current.all[conn] = struct{}{}
+	p.installedLx(current, ctx, conn) // lx: SPEC 139
 	p.access.Unlock()
 	return conn, true, nil
 }
 
 func (p *ConnPool[T]) acquireShared(ctx context.Context, dial func(context.Context) (T, error)) (T, context.Context, bool, error) {
+	if isFreshLx(ctx) { // lx: SPEC 139 — fresh: a connection of the test's own, never shared
+		return p.acquireFreshLx(ctx, dial)
+	}
 	var zero T
 	for {
 		p.access.Lock()
@@ -309,8 +344,10 @@ func (p *ConnPool[T]) acquireShared(ctx context.Context, dial func(context.Conte
 			if p.options.IsAlive(conn) {
 				created := !current.sharedClaimed
 				current.sharedClaimed = true
+				current.sharedUsers++
 				connCtx := current.sharedCtx
 				p.access.Unlock()
+				p.tracePooledLx(ctx, current, conn) // lx: SPEC 139 — REUSED with its age
 				return conn, connCtx, created, nil
 			}
 			p.removeConn(current, conn, net.ErrClosed)
@@ -324,6 +361,7 @@ func (p *ConnPool[T]) acquireShared(ctx context.Context, dial func(context.Conte
 			current.connecting = &connPoolConnect[T]{done: make(chan struct{})}
 		}
 		state := current.connecting
+		current.sharedWaiters++
 		p.access.Unlock()
 
 		if startDial {
@@ -336,11 +374,16 @@ func (p *ConnPool[T]) acquireShared(ctx context.Context, dial func(context.Conte
 			if retry {
 				continue
 			}
+			p.traceCollectedLx(ctx, current, conn, startDial, err) // lx: SPEC 139
 			return conn, connCtx, created, err
 		case <-ctx.Done():
+			p.access.Lock()
+			current.sharedWaiters--
+			p.access.Unlock()
 			return zero, nil, false, ctx.Err()
 		case <-current.ctx.Done():
 			p.access.Lock()
+			current.sharedWaiters--
 			closed := p.closed
 			p.access.Unlock()
 			if closed {
@@ -387,6 +430,7 @@ func (p *ConnPool[T]) connectSingle(current *connPoolState[T], state *connPoolCo
 		current.sharedCtx = sharedCtx
 		current.sharedCancel = sharedCancel
 		current.all[conn] = struct{}{}
+		p.installedLx(current, ctx, conn) // lx: SPEC 139
 	}
 	p.access.Unlock()
 
@@ -400,6 +444,7 @@ func (p *ConnPool[T]) collectShared(current *connPoolState[T], state *connPoolCo
 	var zero T
 
 	p.access.Lock()
+	current.sharedWaiters--
 	if state.err != nil {
 		err := state.err
 		p.access.Unlock()
@@ -431,6 +476,7 @@ func (p *ConnPool[T]) collectShared(current *connPoolState[T], state *connPoolCo
 
 	created := !current.sharedClaimed
 	current.sharedClaimed = true
+	current.sharedUsers++
 	connCtx := current.sharedCtx
 	p.access.Unlock()
 	return conn, connCtx, created, false, nil

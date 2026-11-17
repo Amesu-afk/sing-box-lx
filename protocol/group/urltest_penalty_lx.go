@@ -20,9 +20,9 @@ package group
 //   - Тотальные штрафы (нет кандидата со штрафом < порога) → принудительный
 //     force-прогон проб, не чаще раза в penaltyForcedRetestGap, отсчёт от
 //     ЗАВЕРШЕНИЯ прошлого прогона (последнего ответа), не от старта.
-//   - Пока действует аварийный режим, passive-skip проб отключён (см. urlTest):
-//     иначе рабочий запасной пассивно подтверждается, циклы пропускаются, и
-//     оштрафованный бывший лучший никогда не получает пробу для сброса.
+//   - Режим failover (SPEC 116) пользуется той же машинерией: отказ
+//     удерживаемого узла переносит выбор на лучшего кандидата через
+//     penaltyFailoverDial, аварийный режим и клапан действуют как здесь.
 //
 // Ошибки НЕ этого класса штрафа не дают и fallback не запускают: RST означает
 // «узел донёс, назначение отказало» — через другой узел будет тот же отказ;
@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/lxtrace"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -109,7 +110,7 @@ func (g *URLTestGroup) fastestByDelay(network string) adapter.Outbound {
 		if !supportsNetwork(detour, network) {
 			continue
 		}
-		history := g.history.LoadURLTestHistory(RealTag(g.outbound, detour))
+		history := g.history.LoadURLTestHistory(RealTag(detour, N.NetworkTCP))
 		if history == nil {
 			continue
 		}
@@ -124,7 +125,7 @@ func (g *URLTestGroup) fastestByDelay(network string) adapter.Outbound {
 // penaltyEmergency — аварийный режим: лучший-по-скорости набрал ≥ порога.
 func (g *URLTestGroup) penaltyEmergency(network string) bool {
 	fastest := g.fastestByDelay(network)
-	return fastest != nil && g.penaltyOf(RealTag(g.outbound, fastest)) >= penaltyThreshold
+	return fastest != nil && g.penaltyOf(RealTag(fastest, N.NetworkTCP)) >= penaltyThreshold
 }
 
 // penaltyBest — двухуровневое ранжирование (штрафы ↑, задержка ↑) среди узлов
@@ -137,7 +138,7 @@ func (g *URLTestGroup) penaltyBest(network string, excludeTag string) adapter.Ou
 		if !supportsNetwork(detour, network) {
 			continue
 		}
-		realTag := RealTag(g.outbound, detour)
+		realTag := RealTag(detour, N.NetworkTCP)
 		if realTag == excludeTag {
 			continue
 		}
@@ -168,19 +169,27 @@ func (g *URLTestGroup) selectPenaltyAware(network string) (adapter.Outbound, boo
 
 // pickForDial — выбор узла для боевого дайла: аварийный режим обходит кеш
 // selectedOutbound* (он может указывать на оштрафованного лучшего), обычный —
-// апстримная семантика (кеш, иначе Select).
-func (g *URLTestGroup) pickForDial(network string) adapter.Outbound {
+// апстримная семантика (кеш, иначе Select). lx: SPEC 139 — the pick is written
+// to the connection test trace as a `group` stage.
+func (g *URLTestGroup) pickForDial(ctx context.Context, network string) adapter.Outbound {
+	outbound := g.pickForDialNode(network)
+	g.traceGroup(ctx, outbound, "")
+	return outbound
+}
+
+func (g *URLTestGroup) pickForDialNode(network string) adapter.Outbound {
 	if g.balancer == nil && g.penaltyEmergency(network) {
 		if best := g.penaltyBest(network, ""); best != nil {
 			return best
 		}
 	}
 	var cached adapter.Outbound
+	selectedTCP, selectedUDP := g.selectedLx()
 	switch network {
 	case N.NetworkTCP:
-		cached = g.selectedOutboundTCP
+		cached = selectedTCP
 	case N.NetworkUDP:
-		cached = g.selectedOutboundUDP
+		cached = selectedUDP
 	}
 	if cached != nil {
 		return cached
@@ -193,8 +202,11 @@ func (g *URLTestGroup) pickForDial(network string) adapter.Outbound {
 // Без Interrupt: живые соединения не рвём; дерево достижимости (SPEC 020)
 // инвалидируется, как при любом переизборе.
 func (g *URLTestGroup) moveSelection(network string, detour adapter.Outbound) {
-	g.access.Lock()
+	// lx: SPEC 139 — the selection is guarded by selectedAccess, not g.access:
+	// this runs on the dial path, concurrently with performSelectionUpdate and
+	// with every reader of the selection.
 	var changed bool
+	g.selectedAccess.Lock()
 	switch network {
 	case N.NetworkTCP:
 		if g.selectedOutboundTCP != detour {
@@ -207,7 +219,7 @@ func (g *URLTestGroup) moveSelection(network string, detour adapter.Outbound) {
 			changed = true
 		}
 	}
-	g.access.Unlock()
+	g.selectedAccess.Unlock()
 	if changed {
 		g.logger.Info("lx penalty: selection moved to ", detour.Tag(), " (", network, ")")
 		invalidateReachability(g.ctx)
@@ -223,12 +235,18 @@ func (g *URLTestGroup) penaltyFailoverDial(ctx context.Context, network string, 
 	if g.balancer != nil || !isPathDeadDialError(dialErr) {
 		return nil, nil, false
 	}
-	g.penaltyAdd(RealTag(g.outbound, failed))
-	g.maybeForceRetest()
-	fallback := g.penaltyBest(network, RealTag(g.outbound, failed))
+	// lx: SPEC 139 §5.7 — a connection test takes the same fallback path but
+	// leaves penalties, history, selection and the retest valve untouched.
+	probe := lxtrace.IsProbe(ctx)
+	if !probe {
+		g.penaltyAdd(RealTag(failed, N.NetworkTCP))
+		g.maybeForceRetest()
+	}
+	fallback := g.penaltyBest(network, RealTag(failed, N.NetworkTCP))
 	if fallback == nil {
 		return nil, nil, false
 	}
+	g.traceGroup(ctx, fallback, failed.Tag())
 	// lx: SPEC 073 — fallback-дайл внутри цепочки тоже идёт в звено, не в оригинал.
 	fallbackDialer, err := adapter.ResolveChainLeaf(ctx, fallback)
 	if err != nil {
@@ -237,19 +255,21 @@ func (g *URLTestGroup) penaltyFailoverDial(ctx context.Context, network string, 
 	conn, err := fallbackDialer.DialContext(ctx, network, destination)
 	if err != nil {
 		g.logger.Error("lx penalty: fallback via ", fallback.Tag(), ": ", E.Cause(err, "dial"))
+		if probe {
+			return nil, nil, false
+		}
 		// Симметрия с апстримным поведением least_test для отказавшего дайла.
-		g.history.DeleteURLTestHistory(RealTag(g.outbound, fallback))
+		g.history.DeleteURLTestHistory(RealTag(fallback, N.NetworkTCP))
 		if isPathDeadDialError(err) {
-			g.penaltyAdd(RealTag(g.outbound, fallback))
+			g.penaltyAdd(RealTag(fallback, N.NetworkTCP))
 			g.maybeForceRetest()
 		}
 		return nil, nil, false
 	}
-	g.penaltyReset(RealTag(g.outbound, fallback))
-	if g.passiveCheck && network == N.NetworkTCP {
-		g.markPassiveAlive(fallback.Tag())
+	if !probe {
+		g.penaltyReset(RealTag(fallback, N.NetworkTCP))
+		g.moveSelection(network, fallback)
 	}
-	g.moveSelection(network, fallback)
 	return conn, fallback, true
 }
 
@@ -288,7 +308,7 @@ func (g *URLTestGroup) penaltyTotal(network string) bool {
 		if !supportsNetwork(detour, network) {
 			continue
 		}
-		realTag := RealTag(g.outbound, detour)
+		realTag := RealTag(detour, N.NetworkTCP)
 		if g.history.LoadURLTestHistory(realTag) == nil {
 			continue
 		}

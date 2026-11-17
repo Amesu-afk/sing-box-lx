@@ -74,15 +74,40 @@ jobs:
             -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
             ./option/ ./constant/ ./transport/v2ray/ ./transport/v2rayxhttp/ \
             ./protocol/wireguard/ ./transport/wireguard/ ./lxd/
+          # trusttunnel (SPEC 133/134): upstream-form files, so no _lx suffix —
+          # the packages are listed here and in the gofmt filter explicitly.
+          go vet \
+            -tags "${BASE_TAGS},with_trusttunnel" \
+            ./transport/trusttunnel/ ./protocol/trusttunnel/ ./include/
           go vet -unsafeptr=false \
             -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
             ./daemon/ ./experimental/libbox/
+
+      # The darwin half of the daemon (service_darwin.go — the root-owned
+      # service copy, status, plist handling — hostinfo/logredirect_darwin.go)
+      # is behind `with_lxd && darwin` and never compiled on this runner, while
+      # the tests below run the linux half only. Vet it cross (cgo is off when
+      # cross-compiling, like the purego darwin build). SPEC 100.
+      - name: go vet (lxd + cli, GOOS=darwin)
+        run: |
+          GOOS=darwin go vet \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
+            ./lxd/ ./cmd/sing-box/
+
+      # The Windows service half (SPEC 103: service/scm/datadir/svcrun/
+      # logredirect_windows.go, the dllsearch/cronetpin init of the CLI) is
+      # behind `with_lxd && windows`; vet compiles it and its tests here.
+      - name: go vet (lxd + cli, GOOS=windows)
+        run: |
+          GOOS=windows go vet \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd,with_lx_chain" \
+            ./lxd/ ./cmd/sing-box/
 
       - name: gofmt (lx-owned files only)
         run: |
           # Only our downstream files — never the whole upstream tree.
           # Generated *.pb.go are excluded (machine output, not hand-edited).
-          files=$(git ls-files '*.go' | grep -E 'v2rayxhttp|_xhttp|_awg|_lx(_test)?\.go|_command_lx|^lxd/' | grep -v '\.pb\.go' || true)
+          files=$(git ls-files '*.go' | grep -E 'v2rayxhttp|_xhttp|_awg|_lx(_test)?\.go|_command_lx|^lxd/|trusttunnel' | grep -v '\.pb\.go' || true)
           echo "checking:"; echo "$files"
           if [ -n "$files" ]; then
             bad=$(gofmt -l $files)
@@ -104,6 +129,120 @@ jobs:
           go test -race -count=1 \
             -ldflags "-checklinkname=0" \
             -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd" \
+            ./lxd/ ./cmd/sing-box/
+
+      # StartConnectionTest (SPEC 139): the trace holder, the handler, the
+      # libbox client and every package that carries a `// lx: SPEC 139` stage
+      # insertion or an IsProbe guard. The common/tls suite runs minutes under
+      # -race, so only its REALITY verdict and lx tests run, without -race.
+      - name: go test (SPEC 139 connection test, race)
+        run: |
+          go test -race -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd,with_lx_chain" \
+            ./common/lxtrace/ ./common/lxdatagram/ ./common/dialer/ ./daemon/ ./experimental/libbox/ \
+            ./dns/ ./dns/transport/ ./dns/transport/fakeip/ ./dns/transport/quic/ ./dns/transport/group/ ./protocol/group/ ./protocol/chain/ \
+            ./protocol/masque/... ./protocol/hysteria2/ ./protocol/tuic/ ./transport/v2rayxhttp/ ./lx-test/conntest/
+          go test -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            ./common/tls/ -run 'Reality|Lx'
+
+      # tailscale endpoint lx code: SPEC 112 send headroom, SPEC 115 peer path,
+      # SPEC 149 on/off switch and login refusals, control HTTPS. No other step
+      # lists the package, so without this one its tests run nowhere.
+      - name: go test (tailscale endpoint, race)
+        run: |
+          go test -race -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_lx_command" \
+            ./protocol/tailscale/
+
+      # trusttunnel core and adapters (SPEC 133/134): the core's end-to-end
+      # tests run client against server in-process over H2 and, with
+      # with_quic from BASE_TAGS, over H3.
+      - name: go test (trusttunnel)
+        run: |
+          go test -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_trusttunnel" \
+            ./transport/trusttunnel/ ./protocol/trusttunnel/
+
+      # lx.sniff_guard (SPEC 060, FEATURE 019): the label store, the outbound
+      # wrapper, the option block and the box-level load checks. The seams run
+      # in the steps above (common/tls -run Lx, lxdatagram, dialer, masque,
+      # tuic, v2rayxhttp, trusttunnel) and below (wireguard, cachefile). The
+      # root package needs every covered outbound type registered, hence the
+      # trusttunnel tag there.
+      - name: go test (lx.sniff_guard, race)
+        run: |
+          go test -race -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd,with_lx_chain" \
+            ./common/lxsniffguard/ ./adapter/ ./adapter/outbound/ ./option/
+          go test -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd,with_lx_chain,with_trusttunnel" \
+            -run 'SniffGuard|ApplyLXOptions' .
+
+      # WireGuard endpoint (transport + protocol), the router's lx mechanisms
+      # (idle-suspend tick, shutdown quiesce, reference manager) and the
+      # lx-test/startclose stands over a live box. Upstream's test.yml runs
+      # `go test ./...` only on its own branches (stable/testing), never on
+      # `lx`, so without this step none of these suites runs in CI — the SPEC 030
+      # pre-pass regression (upstream 6364d9a5f) went unnoticed that way.
+      # with_lx_idle_suspend compiles the SPEC 020/030 tests that are tag-gated
+      # like the code. The stands run without -race on purpose (see the header
+      # of wireguard_start_close_race_lx_test.go).
+      # adapter/endpoint + common/lxclosewatch: the SPEC 030 §8 close watchdog.
+      # experimental/cachefile: the SPEC 147 cache.db takeover from a Box still
+      # stuck in Close.
+      # service/oomkiller + common/lxmemory: the SPEC 148 runtime_limit mode and
+      # runtime memory figure.
+      - name: go test (wireguard endpoint, route, close watchdog, startclose stands)
+        run: |
+          go test -race -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_awg,with_lx_idle_suspend" \
+            ./transport/wireguard/ ./protocol/wireguard/ ./route/ \
+            ./adapter/endpoint/ ./common/lxclosewatch/ ./experimental/cachefile/ \
+            ./service/oomkiller/ ./common/lxmemory/
+          go test -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_awg,with_lx_idle_suspend" \
+            ./lx-test/startclose/
+
+  # SPEC 103 §4.2 p. 9: the Windows service code runs its tests on Windows —
+  # the handler, the command line round trip, the file-level half of the
+  # set and every portable test under Windows semantics (no unix modes, no
+  # deleting open files). No live SCM test here: the service is proven by a
+  # run on a real machine.
+  test-windows:
+    name: test-windows (lxd + cli)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Long paths
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v5
+        with: { submodules: recursive }
+      - name: Go toolchain pin
+        id: go_pin
+        run: echo "version=$(tr -d '[:space:]' < go.version | sed 's/^go//')" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with: { go-version: '${{ steps.go_pin.outputs.version }}' }
+      - name: go vet (lxd + cli)
+        run: |
+          go vet \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd,with_lx_chain" \
+            ./lxd/ ./cmd/sing-box/
+      - name: go test (lxd + cli)
+        run: |
+          go test -count=1 \
+            -ldflags "-checklinkname=0" \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd,with_lx_chain" \
             ./lxd/ ./cmd/sing-box/
 
   build-check:

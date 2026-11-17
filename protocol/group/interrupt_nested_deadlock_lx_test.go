@@ -9,7 +9,7 @@
 // обёрнуто B, затем A (Close идёт A→B). Переключение inner (Clash API) зовёт
 // Interrupt(B), HTTP/2-клиент в это же время закрывает DoH — до SPEC 084 это
 // был ABBA-дедлок, после которого каждое новое соединение вставало в
-// NewConn/NewSingPacketConn на том же замке.
+// NewConn/NewPacketConn на том же замке.
 //
 // Детерминированность — «затвором»: первое соединение группы B блокирует свой
 // Close до сигнала, чтобы обе стороны гарантированно встретились.
@@ -27,6 +27,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/interrupt"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/route"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -62,14 +63,13 @@ func newNestedSelectorsUnderTest(t *testing.T) (outer, inner *Selector, nodeA, n
 
 	ctx := context.Background()
 	ctx = service.ContextWith[adapter.OutboundManager](ctx, mgr)
-	ctx = service.ContextWith[adapter.ConnectionManager](ctx, route.NewConnectionManager(logger.NOP()))
+	ctx = service.ContextWith[adapter.ConnectionManager](ctx, route.NewConnectionManager(context.Background(), logger.NOP()))
 
 	newSelector := func(tag string, tags []string) *Selector {
 		return &Selector{
 			Adapter:                      outbound.NewAdapter(C.TypeSelector, tag, nil, tags),
 			ctx:                          ctx,
 			outbound:                     mgr,
-			connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 			logger:                       logger.NOP(),
 			tags:                         tags,
 			defaultTag:                   tags[0],
@@ -82,10 +82,10 @@ func newNestedSelectorsUnderTest(t *testing.T) (outer, inner *Selector, nodeA, n
 	mgr.byTag["eu-auto-out"] = inner
 	outer = newSelector("global-auto-out", []string{"eu-auto-out"})
 
-	if err := inner.Start(); err != nil {
+	if err := inner.Start(adapter.StartStateStart, adapter.NewScope(context.Background(), log.NewNOPFactory().Logger())); err != nil {
 		t.Fatalf("inner.Start: %v", err)
 	}
-	if err := outer.Start(); err != nil {
+	if err := outer.Start(adapter.StartStateStart, adapter.NewScope(context.Background(), log.NewNOPFactory().Logger())); err != nil {
 		t.Fatalf("outer.Start: %v", err)
 	}
 	return outer, inner, nodeA, nodeB
@@ -112,14 +112,14 @@ func TestLxNestedSelectorSwitchDuringDetourCloseNoDeadlock(t *testing.T) {
 		t.Fatalf("inner.DialContext: %v", err)
 	}
 
-	// 2. Входящее из TUN: outer.NewConnection → inner.NewConnection → узел.
+	// 2. Входящее из TUN: роутер прикрепляет его к outer и inner, узел берёт.
 	inboundClient, inboundServer := net.Pipe()
 	defer inboundClient.Close()
 	metadata := adapter.InboundContext{
 		Network:     N.NetworkTCP,
 		Destination: M.ParseSocksaddr("example.com:80"),
 	}
-	go outer.NewConnection(context.Background(), inboundServer, metadata, func(it error) {})
+	go routeLikeRouter(outer, inboundServer, metadata, func(it error) {})
 	deadline := time.Now().Add(2 * time.Second)
 	for nodeA.dialed.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
@@ -160,10 +160,14 @@ func TestLxNestedSelectorSwitchDuringDetourCloseNoDeadlock(t *testing.T) {
 		}
 	}
 
-	if now := inner.Now(); now != "node-b" {
-		t.Errorf("inner.Now() = %q, ожидали node-b", now)
+	if now := adapter.GroupNow(inner); now != "node-b" {
+		t.Errorf("GroupNow(inner) = %q, ожидали node-b", now)
 	}
-	if connAlive(t, upstreamRemote) {
+	// Сокет узла interrupt не держит: его закрывает цикл копирования
+	// ConnectionManager, когда видит закрытое входящее, — уже после возврата
+	// SelectOutbound. Проверка сразу же ловила цикл живым (проба уходила в его
+	// чтение), отсюда ожидание.
+	if !connClosedWithin(t, upstreamRemote, 2*time.Second) {
 		t.Error("сокет узла пережил переключение — interrupt не сработал")
 	}
 	if connAlive(t, inboundClient) {
@@ -188,4 +192,18 @@ func TestLxNestedSelectorSwitchDuringDetourCloseNoDeadlock(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("новый dial после переключения завис — замок группы не отпущен")
 	}
+}
+
+// connClosedWithin ждёт, пока конец пайпа не окажется закрытым, — для
+// сокетов, которые рвутся асинхронно.
+func connClosedWithin(t *testing.T, c net.Conn, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for connAlive(t, c) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return true
 }

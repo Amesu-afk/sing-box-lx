@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -76,8 +77,8 @@ func TestServerIdentityCorruptCertFails(t *testing.T) {
 }
 
 func TestServerIdentityUnreadableCertFails(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("chmod 0 does not block reads for root")
+	if os.Geteuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("chmod 0 does not block reads for root, nor on Windows")
 	}
 	dir := t.TempDir()
 	original, err := loadOrCreateServerIdentity(dir, time.Now())
@@ -197,7 +198,8 @@ func TestServerIdentityKeyFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	// Windows has no unix modes; the data dir's DACL guards the key there.
+	if perm := info.Mode().Perm(); perm != 0o600 && runtime.GOOS != "windows" {
 		t.Fatalf("server key must be 0600, got %o", perm)
 	}
 }

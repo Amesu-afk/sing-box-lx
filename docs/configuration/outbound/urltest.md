@@ -59,7 +59,7 @@ Only inbound connections are affected by this setting, internal connections will
 
 !!! quote "sing-box-lx"
 
-    An `lx` extension (SPEC 019), not present in upstream sing-box.
+    An `lx` extension (SPEC 019, SPEC 116), not present in upstream sing-box.
 
 Load-balancing mode — how a node is chosen per connection:
 
@@ -68,6 +68,16 @@ Load-balancing mode — how a node is chosen per connection:
 - `round_robin`: rotate over a fixed-size **pool** of nodes (see `balancer`). Selection
   happens once per connection; a UDP/QUIC session stays on one node. Designed to scale to
   large node lists — only the pool is health-checked, not every node.
+- `failover` (SPEC 116): pick the lowest-delay node and **hold it until it fails**, even if
+  another node becomes faster. Each `interval` only the held node is tested. When it fails
+  a test, or a dial through it fails with a "path is dead" error, the group moves to the
+  lowest-delay live node and holds that one. A degraded node moves too (SPEC 126): when the
+  held node answers more than 2× slower than the fastest other node of the same network,
+  it is tested once more; still more than 2× slower → every node is tested, and the group
+  moves only to a node more than 1.5× faster (otherwise the whole network got slower, not
+  the node). These ratios have no config key. A manual URL test tests every node and
+  re-selects the fastest. `tolerance` is ignored (a startup warning says so); `balancer`
+  must not be set.
 
 `least_connection` was considered and dropped (`round_robin` is statistically even).
 
@@ -98,9 +108,17 @@ In milliseconds. Controls how the pool is filled and maintained:
   only when an outside node beats it by more than `pool_tolerance` ms (hysteresis against
   churn). Testing all nodes is more expensive — suitable for smaller lists.
 
-A dead pool node keeps its slot until a live replacement is found, so the pool never empties.
-A dial error never changes the pool (its cause is unknowable from one failure); only the
-periodic health-check does.
+A dead pool node keeps its slot until a live replacement is found, so the pool never empties,
+but while the pool has a live node, new connections skip the slot of a node that failed its
+last health-check: with stickiness the keys of dead slots spread evenly over the live slots
+and come back once the node answers again, without stickiness the rotation runs over the
+live slots. When every slot is dead, selection is unchanged. A dial error never changes the
+pool (its cause is unknowable from one failure); only the periodic health-check does.
+
+Liveness is the node's shared URL test history. A manual delay test with a short timeout
+(Clash API `/proxies/{name}/delay`, the daemon's `URLTestOutbound`) that does not complete,
+or a failed dial of a `least_test` group sharing the node, also takes the node out of the
+rotation until the next pool health-check, at most `interval` plus the probe time.
 
 ##### balancer.sticky_hash
 

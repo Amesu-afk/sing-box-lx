@@ -5,10 +5,10 @@
 | Поле | Значение |
 |------|----------|
 | Тип | F (feature) — клиентский outbound (CONSTITUTION §3.1 а1–а3: запрос владельца; в нашем канале многохоп только ручным `detour` без групп; своя реализация дешевле, чем тащить чужую — см. §8 ребейз-цены) |
-| Статус | I (implemented) — код, юниты (`protocol/chain`) и приёмочный стенд на живых shadowsocks-хопах (`lx-test/chain`) зелёные 2026-08-22; полевой проверки (WG-звенья на устройстве) не было |
+| Статус | D (done) — код, юниты (`protocol/chain`) и приёмочный стенд на живых shadowsocks-хопах (`lx-test/chain`) зелёные 2026-08-22; WG-звенья на устройстве не гонялись; в поле с `v1.14.0-lx.27-rc.5` без жалоб, закрыта владельцем 2026-09-24 |
 | Ветка | `lx` |
 | Build-tag | `with_lx_chain` (ядро) · `with_lx_command` (выдача состояния в UI, §3.6) |
-| Связанные | [[SPECS/TASKS/017-CONNECTION_DETOUR]] (`detourList` — сюда ложится путь цепочки) · [[SPECS/TASKS/019-URLTEST_MODE_STICKY]] / [[SPECS/TASKS/054-URLTEST_PENALTY_FAILOVER]] (логика групп, которую цепочка НЕ дублирует; точка хука — в том числе fallback-дайл) · [[SPECS/TASKS/020-MULTI_WG_IDLE_SUSPEND]] (звенья-endpoint'ы обязаны спать и закрываться вместе со всеми) · [[SPECS/TASKS/028-NESTED_TUNNEL_UDP_FRAGMENT]] (вложенные туннели через `detour` — звенья наследуют) · [[SPECS/TASKS/029-ENDPOINT_DETOUR_START_ORDER]] (резолв `detour` звена за барьером старта) · [[SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR]] (`record_fragment` под `detour` — звенья его получают, `strip` не снимает) · [[SPECS/TASKS/030-FAST_BOX_SHUTDOWN]] (пауза/закрытие endpoint'ов — звенья в том же обходе) |
+| Связанные | [[SPECS/TASKS/017-CONNECTION_DETOUR]] (`detourList` — сюда ложится путь цепочки) · [[SPECS/TASKS/019-URLTEST_MODE_STICKY]] / [[SPECS/TASKS/054-URLTEST_PENALTY_FAILOVER]] (логика групп, которую цепочка НЕ дублирует; точка хука — в том числе fallback-дайл) · [[SPECS/TASKS/020-MULTI_WG_IDLE_SUSPEND]] (звенья-endpoint'ы обязаны спать и закрываться вместе со всеми) · [[SPECS/TASKS/028-NESTED_TUNNEL_UDP_FRAGMENT]] (вложенные туннели через `detour` — звенья наследуют) · [[SPECS/TASKS/029-ENDPOINT_DETOUR_START_ORDER]] (резолв `detour` звена за барьером старта) · [[SPECS/TASKS/060-TLS_FRAGMENT_AUTO_ON_DETOUR]] (`record_fragment` под `detour` — звенья его получают, `strip` не снимает) · [[SPECS/TASKS/030-FAST_BOX_SHUTDOWN]] (пауза/закрытие endpoint'ов — звенья в том же обходе) · [[SPECS/TASKS/120-PATH_MTU_ALIGN]] / [[SPECS/TASKS/144-MTU_ALIGN_STREAM_BOUNDARY]] (правило MTU §3.5 переехало в общий пакет `common/lxmtu`; линия от [[SPECS/TASKS/028-NESTED_TUNNEL_UDP_FRAGMENT]]; не путать с [[SPECS/TASKS/150-QUIC_DETOUR_OVERSIZE_DATAGRAM]] — приём через потоковый `detour`) |
 
 ## 0. TL;DR
 
@@ -279,6 +279,7 @@ overhead: WG внутри IP-туннеля = 60 (v4) / 80 (v6; домен → 8
 | `common/trafficcontrol/tracker.go` | ветка `PathProvider` в обходе `detourList` — внутри уже существующей lx-зоны SPEC 017 | расширение существующего маркера |
 | `daemon/started_service.proto` | поле `ChainInfo` в `OutboundInfo` (§3.6) + регенерация `.pb.go` | `lx:begin lx_command` |
 | `Makefile.lx`, `cmd/internal/build_libbox/main.go` | тег `with_lx_chain` | lx-блоки |
+| `constant/proxy.go` (2 строки) | `case TypeChain` в `ProxyDisplayName` → «Chain» (Clash API `type`, `Libbox.ProxyDisplayType`; без него — «Unknown»), решение владельца 2026-10-15 | `lx:begin chain` |
 
 Всё остальное — новые файлы: `protocol/group/chain*.go` (или пакет
 `protocol/chain`), `adapter/chain_lx.go` (привязка, `ResolveChainLeaf`,

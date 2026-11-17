@@ -24,6 +24,7 @@ import (
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/interrupt"
+	"github.com/sagernet/sing-box/common/lxmtu"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -66,6 +67,8 @@ type Chain struct {
 	idleTimeout time.Duration
 	strip       stripSet
 	rewrite     map[string]any
+	// mtuPolicy — lx.mtu_align из контекста бокса (SPEC 120); без блока — clamp.
+	mtuPolicy lxmtu.Policy
 
 	// SPEC 075: runtime position toggle. disabled is per position; a disabled
 	// position >= 1 is a passthrough to the previous hop, a disabled entry
@@ -129,6 +132,11 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	} else if idleTimeout < 0 {
 		idleTimeout = 0
 	}
+	mtuAlign := service.PtrFromContext[option.LXResolved](ctx).MTUAlignOrDefault()
+	mtuPolicy, err := lxmtu.NewPolicy(mtuAlign.Mode, mtuAlign.Except)
+	if err != nil {
+		return nil, E.Cause(err, "lx.mtu_align")
+	}
 	return &Chain{
 		Adapter:           outbound.NewAdapter(C.TypeChain, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
 		ctx:               ctx,
@@ -142,6 +150,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		idleTimeout:       idleTimeout,
 		strip:             strip,
 		rewrite:           options.Rewrite,
+		mtuPolicy:         mtuPolicy,
 		disabled:          make([]atomic.Bool, len(options.Outbounds)),
 		interruptGroup:    interrupt.NewGroup(),
 		interruptExternal: options.InterruptExistConnections,
@@ -159,9 +168,21 @@ func (c *Chain) hopTag(index int) string {
 	return c.Tag() + "#" + strconv.Itoa(index)
 }
 
-// Start: резолв позиций, валидация типов и патчей по всем достижимым узлам,
+// Start — жизненный цикл апстрима (scope, 2026-10): Close регистрируется в
+// scope на Initialize, работа стадии Start — в start().
+func (c *Chain) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	switch stage {
+	case adapter.StartStateInitialize:
+		scope.Add(c.Close)
+	case adapter.StartStateStart:
+		return c.start()
+	}
+	return nil
+}
+
+// start: резолв позиций, валидация типов и патчей по всем достижимым узлам,
 // регистрация хопов, прогрев детерминированных позиций, тикер эвикшна.
-func (c *Chain) Start() error {
+func (c *Chain) start() error {
 	registrar, ok := c.outbound.(adapter.InternalOutboundRegistrar)
 	if !ok {
 		return E.New("outbound manager does not support chain hops")
@@ -272,7 +293,7 @@ func deterministicLeaf(manager adapter.OutboundManager, target adapter.Outbound)
 		if target.Type() != C.TypeSelector {
 			return nil
 		}
-		now := group.Now()
+		now := adapter.GroupNow(group)
 		if now == "" || seen[now] {
 			return nil
 		}
@@ -396,6 +417,7 @@ func (c *Chain) Close() error {
 
 func (c *Chain) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	c.stats.dials.Add(1)
+	c.traceChain(ctx) // SPEC 139
 	conn, err := c.hops[len(c.hops)-1].DialContext(ctx, network, destination)
 	if err != nil {
 		c.stats.errors.Add(1)
@@ -408,6 +430,7 @@ func (c *Chain) DialContext(ctx context.Context, network string, destination M.S
 
 func (c *Chain) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
 	c.stats.dials.Add(1)
+	c.traceChain(ctx) // SPEC 139
 	conn, err := c.hops[len(c.hops)-1].ListenPacket(ctx, destination)
 	if err != nil {
 		c.stats.errors.Add(1)
@@ -421,12 +444,12 @@ func (c *Chain) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.
 // treated as internal and ripped on any toggle regardless of
 // interrupt_exist_connections (SPEC 075, selector model).
 func (c *Chain) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	c.connection.NewConnection(ctx, c, conn, metadata, onClose)
 }
 
 func (c *Chain) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext, onClose N.CloseHandlerFunc) {
-	ctx = interrupt.ContextWithIsExternalConnection(ctx)
+	ctx = interrupt.ContextWithIsExternalConnection(ctx, true)
 	c.connection.NewPacketConnection(ctx, c, conn, metadata, onClose)
 }
 
@@ -440,7 +463,7 @@ func (c *Chain) resolvedLeaf(position int) adapter.Outbound {
 		if !isGroup {
 			return target
 		}
-		now := group.Now()
+		now := adapter.GroupNow(group)
 		if now == "" || seen[now] {
 			return nil
 		}

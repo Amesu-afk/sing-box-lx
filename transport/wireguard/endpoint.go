@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/lxsniffguard"
 	"github.com/sagernet/sing-box/service/powerreport"
 	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
@@ -67,6 +68,8 @@ type Endpoint struct {
 	// lx: SPEC 020 — test seam standing in for a device.Up() failure, which needs
 	// a real bind to reproduce. Nil in production.
 	resumeErrHook func() error
+	// lx: SPEC 145 — session start for the per-peer status (peer_session_lx.go).
+	session peerSession
 }
 
 // SetResumeErrHookForTest injects a Resume failure. Test-only.
@@ -131,7 +134,7 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		}
 		if len(rawPeer.Reserved) > 0 {
 			if len(rawPeer.Reserved) != 3 {
-				return nil, E.New("invalid reserved value for peer ", peerIndex, ", required 3 bytes, got ", len(peer.reserved))
+				return nil, E.New("invalid reserved value for peer ", peerIndex, ", required 3 bytes, got ", len(rawPeer.Reserved))
 			}
 			copy(peer.reserved[:], rawPeer.Reserved[:])
 		}
@@ -200,6 +203,11 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		Address:         options.Address,
 		AllowedAddress:  allowedAddresses,
 	}
+	// lx:begin lazy-build
+	if options.LazyDevice {
+		return newLazyEndpoint(options, peers, ipcConf, allowedAddresses, deviceOptions), nil
+	}
+	// lx:end lazy-build
 	tunDevice, err := NewDevice(deviceOptions)
 	if err != nil {
 		return nil, E.Cause(err, "create WireGuard device")
@@ -236,6 +244,7 @@ func (e *Endpoint) Teardown() {
 		e.device.Close()
 		e.device = nil
 	}
+	e.resetSession() // lx: SPEC 145 — a rebuilt device counts from zero
 	e.pauseOpAccess.Unlock()
 	e.closeTunDevice()
 	e.allowedIPs = nil
@@ -253,7 +262,7 @@ func (e *Endpoint) Rebuild() error {
 	if e.tunDevice != nil {
 		return nil // never torn down (or already rebuilt)
 	}
-	tunDevice, err := NewDevice(e.deviceOptions)
+	tunDevice, err := newDeviceFn(e.deviceOptions) // lx: SPEC 097 — counted in tests
 	if err != nil {
 		return E.Cause(err, "rebuild WireGuard device")
 	}
@@ -287,6 +296,8 @@ func (e *Endpoint) Start(postStart bool) error {
 		return nil
 	}
 	var bind conn.Bind
+	// lx: SPEC 060 — how the sniff guard learns which path the burst is on.
+	var burstPath func() (lxsniffguard.Path, any, error)
 	udpListener, isUDPListener := common.Cast[dialer.UDPListener](e.options.Dialer)
 	if isUDPListener {
 		listenerControl, egressEnabled := udpListener.UDPListenerControl()
@@ -305,14 +316,18 @@ func (e *Endpoint) Start(postStart bool) error {
 			recorder := powerManager.Recorder()
 			if recorder != nil {
 				attribution := &powerreport.Attribution{Endpoint: e.options.Tag}
+				counter := recorder.TrafficCounter(powerreport.TrafficEndpoint, e.options.Tag)
 				standardBind.SetIOActivityFuncs(func(size int) {
+					counter.CountIn(int64(size))
 					recorder.Touch(powerreport.DirectionInbound, size, attribution)
 				}, func(size int) {
+					counter.CountOut(int64(size))
 					recorder.Touch(powerreport.DirectionOutbound, size, attribution)
 				})
 			}
 		}
 		bind = standardBind
+		burstPath = func() (lxsniffguard.Path, any, error) { return lxsniffguard.Path{Direct: true}, nil, nil }
 	} else {
 		var (
 			isConnect   bool
@@ -326,7 +341,9 @@ func (e *Endpoint) Start(postStart bool) error {
 				connectAddr = e.peers[0].endpoint
 			}
 		}
-		bind = NewClientBind(e.options.Context, e.options.Logger, e.options.Dialer, isConnect, connectAddr, reserved)
+		clientBind := NewClientBind(e.options.Context, e.options.Logger, e.options.Dialer, isConnect, connectAddr, reserved)
+		bind = clientBind
+		burstPath = clientBind.Path
 	}
 	if isUDPListener || len(e.peers) > 1 {
 		for _, peer := range e.peers {
@@ -353,29 +370,38 @@ func (e *Endpoint) Start(postStart bool) error {
 	// re-initiates, so a dead NAT/DPI flow entry cannot hold the endpoint in
 	// ERR until a manual reconnect.
 	wgDevice.SetGiveUpRebind(true, e.options.ListenPort == 0)
+	// lx: SPEC 009 — the ip=quic masquerade decoy is generated per handshake
+	// (fresh DCID/ciphertext each time) instead of a static i1 CPS blob.
+	if decoy := awgDecoyFunc(e.options.AmneziaWG, e.options.Logger); decoy != nil {
+		wgDevice.SetDecoyPacketsFunc(decoy)
+	}
+	// lx: SPEC 060 — a QUIC-shaped masquerade burst goes out behind the
+	// sniff decoy byte on the paths lx.sniff_guard protects.
+	if e.options.AmneziaWG.IsSet() {
+		if filter := newHandshakeBurstFilter(lxsniffguard.FromContext(e.options.Context).Node(e.options.Tag), burstPath, e.options.Logger); filter != nil {
+			wgDevice.SetHandshakeBurstFunc(filter)
+		}
+	}
 	e.tunDevice.SetDevice(wgDevice)
-	var ipcConf strings.Builder
-	ipcConf.WriteString(e.ipcConf)
-	for _, peer := range e.peers {
-		ipcConf.WriteString(peer.GenerateIpcLines())
-	}
-	err = wgDevice.IpcSet(ipcConf.String())
-	if err != nil {
-		wgDevice.Close()
-		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
-	}
-	for _, peer := range e.peers {
+	domainPeers := make(map[device.NoisePublicKey]*peerConfig)
+	for peerIndex, peer := range e.peers {
 		if !peer.destination.IsDomain() {
 			continue
 		}
 		var publicKey device.NoisePublicKey
-		common.Must(publicKey.FromHex(peer.publicKeyHex))
-		wgPeer, found := wgDevice.LookupActivePeer(publicKey)
-		if !found {
+		err = publicKey.FromHex(peer.publicKeyHex)
+		if err != nil {
 			wgDevice.Close()
-			return E.New("missing configured peer: ", peer.destination)
+			return E.Cause(err, "decode public key for peer ", peerIndex)
 		}
-		wgPeer.SetEndpointResolver(func() ([]conn.Endpoint, error) {
+		domainPeers[publicKey] = &e.peers[peerIndex]
+	}
+	if len(domainPeers) > 0 {
+		wgDevice.SetEndpointResolverFunc(func(publicKey device.NoisePublicKey) ([]conn.Endpoint, error) {
+			peer, found := domainPeers[publicKey]
+			if !found {
+				return nil, nil
+			}
 			addresses, lookupErr := e.options.ResolvePeer(peer.destination.Fqdn)
 			if lookupErr != nil {
 				return nil, lookupErr
@@ -394,6 +420,16 @@ func (e *Endpoint) Start(postStart bool) error {
 			}
 			return endpoints, nil
 		})
+	}
+	var ipcConf strings.Builder
+	ipcConf.WriteString(e.ipcConf)
+	for _, peer := range e.peers {
+		ipcConf.WriteString(peer.GenerateIpcLines())
+	}
+	err = wgDevice.IpcSet(ipcConf.String())
+	if err != nil {
+		wgDevice.Close()
+		return E.Cause(err, "setup wireguard: \n", ipcConf.String())
 	}
 	e.device = wgDevice
 	e.pause = service.FromContext[pause.Manager](e.options.Context)
@@ -466,6 +502,7 @@ func (e *Endpoint) Suspend() {
 	e.suspended.Store(true)
 	if e.device != nil {
 		e.device.Down()
+		e.markSessionDown() // lx: SPEC 145
 	}
 }
 
@@ -486,6 +523,7 @@ func (e *Endpoint) Resume() error {
 		return e.resumeErrHook()
 	}
 	if e.device != nil {
+		e.markSessionUp() // lx: SPEC 145
 		return e.device.Up()
 	}
 	return nil
@@ -596,16 +634,22 @@ func (e *Endpoint) applyPauseEvent(event int) {
 		return
 	}
 	switch event {
-	case pause.EventNetworkPause:
-		e.device.Down()
-	case pause.EventNetworkWake:
-		// lx: SPEC 020/007 — a suspended device (idle-suspend or AWG guard) stays
-		// down through pause/wake cycles; the owning state machine wakes it
-		// (resumeOnDial) or keeps it down (guard) on its own terms.
-		if e.suspended.Load() {
-			return
+	case pause.EventNetworkPause, pause.EventNetworkWake:
+		// upstream cc022098f: apply the current pause state, not the event, so
+		// a pause and a wake that race each other settle on the latest state.
+		if e.pause.IsNetworkPaused() {
+			e.device.Down()
+			e.markSessionDown() // lx: SPEC 145
+		} else {
+			// lx: SPEC 020/007 — a suspended device (idle-suspend or AWG guard)
+			// stays down through pause/wake cycles; the owning state machine
+			// wakes it (resumeOnDial) or keeps it down (guard) on its own terms.
+			if e.suspended.Load() {
+				return
+			}
+			e.markSessionUp() // lx: SPEC 145
+			e.device.Up()
 		}
-		e.device.Up()
 	}
 }
 

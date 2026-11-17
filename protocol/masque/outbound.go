@@ -25,6 +25,8 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/lxdatagram"
+	"github.com/sagernet/sing-box/common/lxsniffguard"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -33,6 +35,7 @@ import (
 	"github.com/sagernet/sing-box/transport/wireguard"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
+	"github.com/sagernet/sing/common/bufio/deadline"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json/badoption"
 	"github.com/sagernet/sing/common/logger"
@@ -59,6 +62,25 @@ const maxH2MTU = 16000
 // genuinely slow-but-working path lose h3.
 const autoH3Timeout = 3 * time.Second
 
+// lx: SPEC 121 — how long `auto` keeps preferring h2 after it won. The memory
+// exists so that a filtered path does not pay the 3 s h3 probe on every
+// tunnel; a window makes it a preference, not a verdict: networks change, and
+// the bring-up after the window tries h3 first again. The window climbs a
+// ladder: the first h2 win is remembered for 1 s (in practice "retry h3 on
+// the next bring-up" — seen in the field as intermittent PROTOCOL_VIOLATION
+// from WARP that succeeds on the next attempt, where a permanent memory
+// silently parked the node on TCP until h2 itself failed, SPEC 108), every
+// further h2 win takes the next rung, the top rung (10 min) repeats, and an
+// h3 success drops back to the first. Few rungs on purpose: with a silent h3
+// each rung below the tunnel's rebuild period costs one 3 s probe.
+var autoH2MemoryLadder = []time.Duration{
+	time.Second,
+	10 * time.Second,
+	30 * time.Second,
+	5 * time.Minute,
+	10 * time.Minute,
+}
+
 type Outbound struct {
 	outbound.Adapter
 	ctx         context.Context
@@ -67,6 +89,7 @@ type Outbound struct {
 	dnsRouter   adapter.DNSRouter
 	profile     masque.Profile
 	idleTimeout time.Duration
+	sniffGuard  *lxsniffguard.Node // lx: SPEC 060 — nil when lx.sniff_guard does not cover this node
 
 	server    M.Socksaddr
 	uri       string
@@ -82,11 +105,21 @@ type Outbound struct {
 	// Tunnel lifecycle. The current live tunnel is a *session; it is nil
 	// whenever no tunnel is up (before the first dial, after an idle-suspend, or
 	// after the tunnel died). A fresh session is built lazily on the next dial.
-	// runMu guards sess and closed. (lx: SPEC 021 B1/C1/C2 — stateless idle,
-	// self-healing reconnect, no leaked half-open tunnel.)
-	runMu  sync.Mutex
-	sess   *session
-	closed bool
+	// (lx: SPEC 021 B1/C1/C2 — stateless idle, self-healing reconnect, no
+	// leaked half-open tunnel.)
+	//
+	// runMu serializes tunnel establishment: one connect per gap. It is held
+	// across the network dial, so nothing that has to return promptly may take
+	// it — Close in particular (lx: SPEC 146, field dump 2026-11-01: Box.Close
+	// stood behind a dial that quic-go never finished).
+	//
+	// stateMu guards sess, closed and connectCancel. It is never held across
+	// I/O, so Close and teardown always get it within microseconds.
+	runMu         sync.Mutex
+	stateMu       sync.Mutex
+	sess          *session
+	closed        bool
+	connectCancel context.CancelFunc // cancels the connect in flight, if any
 
 	// lx:begin masque-auto
 	// SPEC 074 — `vhttp: auto`. autoMode means "try h3, fall back to h2"; the
@@ -97,10 +130,24 @@ type Outbound struct {
 	// Network()/logging outside it.
 	autoMode    bool
 	autoH3Delay time.Duration
-	autoNetwork atomic.Pointer[string]
+	// autoH2Ladder bounds a remembered h2 (lx: SPEC 121): each h2 win takes
+	// the next rung, the last rung repeats, an h3 win drops back to the first.
+	// autoH2Rung is the index the NEXT h2 win gets. nil ladder = no window
+	// (tests built without the wiring remember h2 until Close, as before 121).
+	autoH2Ladder []time.Duration
+	autoH2Rung   atomic.Int64
+	autoNetwork  atomic.Pointer[autoMemory]
 	// legsForTest substitutes the two dial legs in unit tests; nil in production.
 	legsForTest *connectLegs
 	// lx:end masque-auto
+}
+
+// autoMemory is the remembered leg of `auto` and, for h2, when the memory
+// expires (zero = never). lx: SPEC 121.
+type autoMemory struct {
+	network string
+	window  time.Duration
+	expires time.Time
 }
 
 // session is one established MASQUE tunnel with its userspace stack and pumps.
@@ -114,6 +161,7 @@ type session struct {
 	// by the idle watcher. Atomic so pumps update it lock-free.
 	activity atomic.Int64
 	teardown sync.Once
+	opened   time.Time // lx: SPEC 139 — the age of a reused tunnel
 }
 
 func (s *session) markActivity(now int64) { s.activity.Store(now) }
@@ -313,13 +361,14 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 
 	// Idle-suspend window: after this long with no traffic the tunnel + stack +
-	// pumps are torn down and rebuilt on the next dial. Off by default (absent,
-	// "0" and negative all keep the tunnel up until Close): the owner's call —
-	// the wake-up costs a full QUIC handshake + CONNECT-IP + a fresh gVisor
-	// stack on the first request after any quiet spell, which on routers and
-	// desktops is a worse trade than ~6 MB RSS and one keepalive packet per
-	// 30s. Only a positive value turns suspend on. lx: SPEC 021 B1.
-	idleTimeout := idleWindow(options.IdleTimeout)
+	// pumps are torn down and rebuilt on the next dial. Off by default: the
+	// owner's call — the wake-up costs a full QUIC handshake + CONNECT-IP + a
+	// fresh gVisor stack on the first request after any quiet spell, which on
+	// routers and desktops is a worse trade than ~6 MB RSS and one keepalive
+	// packet per 30s. The node's own idle_timeout wins, then the global
+	// lx.masque.idle_timeout from the box context. lx: SPEC 021 B1, SPEC 098.
+	idleTimeout := idleWindow(options.IdleTimeout,
+		service.PtrFromContext[option.LXResolved](ctx).MASQUEOrZero().IdleTimeout)
 
 	// QUIC keepalive: keeps the tunnel alive through the server's idle-timeout
 	// (and the provider's UDP NAT mapping) while it is up. With suspend off by
@@ -330,32 +379,37 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 	} else if options.KeepAlivePeriod < 0 {
 		keepAlive = 0
 	}
+	// lx: SPEC 120 §2.6 — derived from the tunnel MTU (see
+	// outer_packet_size_lx.go), not the usque constant 1242 that left a ~6 RTT
+	// window after tunnel-up in which full-size inner packets were dropped.
 	quicConfig := &quic.Config{
 		EnableDatagrams:   true,
-		InitialPacketSize: 1242,
+		InitialPacketSize: outerInitialPacketSize(mtu),
 		KeepAlivePeriod:   keepAlive,
 	}
 
 	networkList := options.NetworkList.Build()
 
 	return &Outbound{
-		Adapter:     outbound.NewAdapterWithDialerOptions(C.TypeMASQUE, tag, networkList, options.DialerOptions),
-		ctx:         ctx,
-		logger:      logger,
-		dialer:      outboundDialer,
-		dnsRouter:   service.FromContext[adapter.DNSRouter](ctx),
-		profile:     profile,
-		idleTimeout: idleTimeout,
-		server:      options.ServerOptions.Build(),
-		uri:         uri,
-		network:     network,
-		autoMode:    autoMode,
-		autoH3Delay: autoH3Timeout,
-		mtu:         mtu,
-		prefixes:    prefixes,
-		tlsConfig:   tlsConfig,
-		h2TLSClient: h2TLSClient,
-		quicConfig:  quicConfig,
+		Adapter:      outbound.NewAdapterWithDialerOptions(C.TypeMASQUE, tag, networkList, options.DialerOptions),
+		ctx:          ctx,
+		logger:       logger,
+		dialer:       dialer.NewSessionDialerLx(outboundDialer), // lx: SPEC 152 — session underlay is internal to the tunnel
+		dnsRouter:    service.FromContext[adapter.DNSRouter](ctx),
+		profile:      profile,
+		idleTimeout:  idleTimeout,
+		sniffGuard:   lxsniffguard.FromContext(ctx).Node(tag),
+		server:       options.ServerOptions.Build(),
+		uri:          uri,
+		network:      network,
+		autoMode:     autoMode,
+		autoH3Delay:  autoH3Timeout,
+		autoH2Ladder: autoH2MemoryLadder, // lx: SPEC 121
+		mtu:          mtu,
+		prefixes:     prefixes,
+		tlsConfig:    tlsConfig,
+		h2TLSClient:  h2TLSClient,
+		quicConfig:   quicConfig,
 	}, nil
 }
 
@@ -396,9 +450,6 @@ func buildH2TLSClient(
 		// An empty server_name is legitimate here: some endpoints only present
 		// their real certificate when the ClientHello carries no SNI at all.
 		AllowEmptyServerName: true,
-		// lx: SPEC 060 — masque over a detour is exactly the case that surfaced
-		// the PMTU black hole; fragment the ClientHello by default there.
-		DialedThroughDetour: tls.DialedThroughDetour(options.DialerOptions),
 	})
 	if err != nil {
 		return nil, err
@@ -424,12 +475,28 @@ func buildH2TLSClient(
 func (o *Outbound) ensureSession(ctx context.Context) (*session, error) {
 	o.runMu.Lock()
 	defer o.runMu.Unlock()
+	o.stateMu.Lock()
 	if o.closed {
-		return nil, E.New("masque: outbound closed")
+		o.stateMu.Unlock()
+		return nil, errOutboundClosed
 	}
-	if o.sess != nil {
-		return o.sess, nil
+	if s := o.sess; s != nil {
+		o.stateMu.Unlock()
+		o.traceTunnelReusedLx(ctx, s) // lx: SPEC 139 — REUSED `auth` with the tunnel's age
+		return s, nil
 	}
+	// lx: SPEC 146 — the connect runs under a context Close can cancel, so a
+	// closing outbound does not wait for a dial parked in a detour or a
+	// handshake; the caller gets a cancellation error instead of a tunnel.
+	connectCtx, connectCancel := context.WithCancel(ctx)
+	o.connectCancel = connectCancel
+	o.stateMu.Unlock()
+	defer func() {
+		o.stateMu.Lock()
+		o.connectCancel = nil
+		o.stateMu.Unlock()
+		connectCancel()
+	}()
 
 	device, err := wireguard.NewDevice(wireguard.DeviceOptions{
 		Context: o.ctx,
@@ -450,7 +517,7 @@ func (o *Outbound) ensureSession(ctx context.Context) (*session, error) {
 	o.logger.DebugContext(ctx, "masque: establishing ", network, " tunnel to ", o.server, " (sni=", o.tlsConfig.ServerName, ")")
 	var closer io.Closer
 	var ipConn masque.IpConn
-	closer, ipConn, network, err = o.connect(ctx, network)
+	closer, ipConn, network, err = o.connect(connectCtx, network)
 	if err != nil {
 		o.logger.WarnContext(ctx, "masque: ", network, " tunnel to ", o.server, " failed: ", err)
 		_ = device.Close()
@@ -465,9 +532,19 @@ func (o *Outbound) ensureSession(ctx context.Context) (*session, error) {
 		ipConn: ipConn,
 		ctx:    sessCtx,
 		cancel: cancel,
+		opened: time.Now(), // lx: SPEC 139
 	}
 	s.markActivity(time.Now().UnixNano())
+	o.stateMu.Lock()
+	if o.closed {
+		// lx: SPEC 146 — Close ran while the tunnel was coming up: it found no
+		// session to tear down, so this one is ours to dispose of.
+		o.stateMu.Unlock()
+		o.teardownSession(s)
+		return nil, errOutboundClosed
+	}
 	o.sess = s
+	o.stateMu.Unlock()
 
 	go o.pumpToTunnel(s)
 	go o.pumpFromTunnel(s)
@@ -495,20 +572,30 @@ func (o *Outbound) teardownSession(s *session) {
 		if s.device != nil {
 			_ = s.device.Close()
 		}
-		o.runMu.Lock()
+		o.stateMu.Lock()
 		if o.sess == s {
 			o.sess = nil // next dial rebuilds a fresh tunnel (self-healing)
 		}
-		o.runMu.Unlock()
+		o.stateMu.Unlock()
 	})
 }
 
-// idleWindow resolves the configured idle_timeout into the suspend window:
-// positive = suspend after that long with no traffic; absent, "0" and negative
-// = 0 = never suspend (the idle watcher is not started). lx: SPEC 021 B1.
-func idleWindow(configured badoption.Duration) time.Duration {
-	if configured > 0 {
-		return time.Duration(configured)
+var errOutboundClosed = E.New("masque: outbound closed")
+
+// idleWindow resolves the suspend window: the node's idle_timeout when set
+// (positive = suspend after that long with no traffic; an explicit "0" or a
+// negative value = never, whatever the global default), otherwise the global
+// lx.masque.idle_timeout (0 when unset). 0 means the idle watcher is not
+// started. lx: SPEC 021 B1, SPEC 098.
+func idleWindow(node *badoption.Duration, global time.Duration) time.Duration {
+	if node != nil {
+		if *node > 0 {
+			return time.Duration(*node)
+		}
+		return 0
+	}
+	if global > 0 {
+		return global
 	}
 	return 0
 }
@@ -547,6 +634,10 @@ func (o *Outbound) idleWatcher(s *session) {
 type connectLegs struct {
 	h3 func(context.Context, time.Duration) (io.Closer, masque.IpConn, error)
 	h2 func(context.Context) (io.Closer, masque.IpConn, error)
+	// h3Once and h2Once replace one attempt of a leg under the lx.sniff_guard
+	// retry (lx: SPEC 060); used when h3 and h2 are nil.
+	h3Once func(context.Context, time.Duration) (io.Closer, masque.IpConn, error)
+	h2Once func(context.Context) (io.Closer, masque.IpConn, error)
 }
 
 // SPEC 074 — one dial attempt, with the `auto` fallback folded in.
@@ -555,7 +646,7 @@ type connectLegs struct {
 // truth rather than the configured value.
 func (o *Outbound) connect(ctx context.Context, network string) (io.Closer, masque.IpConn, string, error) {
 	connectH3, connectH2 := o.connectH3WithBudget, o.connectH2
-	if o.legsForTest != nil {
+	if o.legsForTest != nil && o.legsForTest.h3 != nil {
 		connectH3, connectH2 = o.legsForTest.h3, o.legsForTest.h2
 	}
 	// Fixed h3 keeps the unbounded handshake; only `auto` needs a cap.
@@ -563,12 +654,27 @@ func (o *Outbound) connect(ctx context.Context, network string) (io.Closer, masq
 	if o.autoMode {
 		h3Budget = o.autoH3Delay
 	}
+	var (
+		h2Err   error
+		h2Tried bool // the remembered h2 leg already failed in this attempt
+	)
 	if network == "h2" {
 		closer, ipConn, err := connectH2(ctx)
-		if err == nil && o.autoMode {
-			o.rememberNetwork("h2")
+		if err == nil {
+			if o.autoMode {
+				o.rememberNetwork("h2")
+			}
+			return closer, ipConn, "h2", nil
 		}
-		return closer, ipConn, "h2", err
+		if !o.autoMode || ctx.Err() != nil {
+			return nil, nil, "h2", err
+		}
+		// lx: SPEC 108 — the remembered leg is a shortcut, not a verdict: the
+		// network may have changed to one where TCP is closed and UDP is open.
+		// Drop the memory and give h3 its turn instead of failing until restart.
+		o.forgetNetwork()
+		h2Err, h2Tried = err, true
+		o.logger.InfoContext(ctx, "masque: remembered h2 to ", o.server, " did not come up (", err, "); trying h3")
 	}
 	if !o.autoMode {
 		closer, ipConn, err := connectH3(ctx, 0)
@@ -605,8 +711,15 @@ func (o *Outbound) connect(ctx context.Context, network string) (io.Closer, masq
 			}
 		}()
 	}
-	budget := time.NewTimer(o.autoH3Delay)
-	defer budget.Stop()
+	// lx: SPEC 108 — with h2 already failed there is nothing to fall back to, so
+	// the wall-clock timer is off (nil channel) and the leg is waited for until
+	// it answers or the caller gives up; its own handshake budget still applies.
+	var budgetC <-chan time.Time
+	if !h2Tried {
+		budget := time.NewTimer(o.autoH3Delay)
+		defer budget.Stop()
+		budgetC = budget.C
+	}
 	var (
 		h3Err      error
 		h3Returned bool // the leg's single result is already consumed
@@ -624,8 +737,10 @@ func (o *Outbound) connect(ctx context.Context, network string) (io.Closer, masq
 			return nil, nil, "h3", outcome.err
 		}
 		h3Err = outcome.err
-		o.logger.InfoContext(ctx, "masque: h3 to ", o.server, " did not come up (", h3Err, "); falling back to h2")
-	case <-budget.C:
+		if !h2Tried {
+			o.logger.InfoContext(ctx, "masque: h3 to ", o.server, " did not come up (", h3Err, "); falling back to h2")
+		}
+	case <-budgetC:
 		// Leg still running — possibly wedged. Abandon it, do not wait.
 		h3Err = E.New("h3 handshake exceeded ", o.autoH3Delay)
 		o.logger.InfoContext(ctx, "masque: ", h3Err, " to ", o.server, "; falling back to h2 (h3 attempt abandoned)")
@@ -636,11 +751,27 @@ func (o *Outbound) connect(ctx context.Context, network string) (io.Closer, masq
 		return nil, nil, "h3", ctx.Err()
 	}
 
-	h2Closer, h2Conn, h2Err := connectH2(ctx)
-	if h2Err == nil {
-		drainH3()
-		o.rememberNetwork("h2")
-		return h2Closer, h2Conn, "h2", nil
+	if !h2Tried {
+		var (
+			h2Closer io.Closer
+			h2Conn   masque.IpConn
+		)
+		h2Closer, h2Conn, h2Err = connectH2(ctx)
+		if h2Err == nil {
+			// lx: SPEC 137 — the leg's single result may already be consumed by
+			// the first select (h3 failed before the budget): draining it again
+			// parked a goroutine on the empty channel forever, and its closure
+			// kept this Outbound — and the Box behind o.ctx — reachable after
+			// Close (issue #52).
+			if !h3Returned {
+				drainH3()
+			}
+			o.rememberNetwork("h2")
+			if memory := o.autoNetwork.Load(); memory != nil && memory.window > 0 {
+				o.logger.InfoContext(ctx, "masque: h2 to ", o.server, " remembered for ", memory.window, "; then h3 is tried first again")
+			}
+			return h2Closer, h2Conn, "h2", nil
+		}
 	}
 	// h2 failed. If the h3 leg is still out there it may yet succeed (a slow but
 	// alive path where the budget was simply too tight) — that result is worth
@@ -669,17 +800,66 @@ func (o *Outbound) effectiveNetwork() string {
 	if !o.autoMode {
 		return o.network
 	}
-	if remembered := o.autoNetwork.Load(); remembered != nil {
-		return *remembered
+	remembered := o.autoNetwork.Load()
+	if remembered == nil {
+		return "h3"
 	}
-	return "h3"
+	// lx: SPEC 121 — an expired h2 memory is dropped on read: the bring-up that
+	// finds it expired starts with h3 again, and h2 is remembered afresh (with
+	// a longer window) only if h3 still does not come up.
+	if !remembered.expires.IsZero() && !time.Now().Before(remembered.expires) {
+		if o.autoNetwork.CompareAndSwap(remembered, nil) {
+			o.logger.Info("masque: remembered h2 to ", o.server, " expired after ", remembered.window, "; trying h3 first again")
+		}
+		return "h3"
+	}
+	return remembered.network
 }
 
+// rememberNetwork records the leg that just won. h3 is remembered without
+// limit and drops the h2 ladder back to its first rung; h2 for the current
+// rung, which then advances (lx: SPEC 121). Re-recording the same leg keeps
+// the existing window: the clock runs from the fallback, not from every
+// bring-up that reused h2, so h3 gets its retry at most once per window.
 func (o *Outbound) rememberNetwork(network string) {
-	if previous := o.autoNetwork.Load(); previous != nil && *previous == network {
+	if previous := o.autoNetwork.Load(); previous != nil && previous.network == network {
 		return
 	}
-	o.autoNetwork.Store(&network)
+	memory := &autoMemory{network: network}
+	if network == "h2" {
+		memory.window = o.nextH2Window()
+		if memory.window > 0 {
+			memory.expires = time.Now().Add(memory.window)
+		}
+	} else {
+		o.autoH2Rung.Store(0)
+	}
+	o.autoNetwork.Store(memory)
+}
+
+// nextH2Window hands out the current rung of the h2 ladder and arms the next
+// one; the last rung repeats. No ladder (tests, or an Outbound built without
+// the wiring) means "no window": h2 is remembered until Close or until it
+// fails, as before 121.
+func (o *Outbound) nextH2Window() time.Duration {
+	if len(o.autoH2Ladder) == 0 {
+		return 0
+	}
+	for {
+		rung := o.autoH2Rung.Load()
+		next := rung + 1
+		if next >= int64(len(o.autoH2Ladder)) {
+			next = int64(len(o.autoH2Ladder)) - 1
+		}
+		if o.autoH2Rung.CompareAndSwap(rung, next) {
+			return o.autoH2Ladder[rung]
+		}
+	}
+}
+
+// forgetNetwork returns `auto` to its default order (h3 first). lx: SPEC 108.
+func (o *Outbound) forgetNetwork() {
+	o.autoNetwork.Store(nil)
 }
 
 // lx:end masque-auto
@@ -697,9 +877,49 @@ func (o *Outbound) connectH3(ctx context.Context) (io.Closer, masque.IpConn, err
 // needs to bound is the handshake: the failure mode is a ClientHello that leaves
 // and never gets an answer, which produces no error of its own.
 func (o *Outbound) connectH3WithBudget(ctx context.Context, handshakeBudget time.Duration) (io.Closer, masque.IpConn, error) {
-	udpConn, err := o.dialer.DialContext(ctx, N.NetworkUDP, o.server)
+	// lx: SPEC 060 — one h3 attempt runs inside lx.sniff_guard's Node.Dial on
+	// the quic label: a fast failure is redone at once with the opposite
+	// decision (before `auto` falls back to h2), a silent one leaves a pending
+	// pair for the next h3 leg.
+	var (
+		closer io.Closer
+		ipConn masque.IpConn
+	)
+	once := o.connectH3Once
+	if o.legsForTest != nil && o.legsForTest.h3Once != nil {
+		once = o.legsForTest.h3Once
+	}
+	err := o.sniffGuard.Dial(ctx, func(ctx context.Context) error {
+		var err error
+		closer, ipConn, err = once(ctx, handshakeBudget)
+		return err
+	})
+	return closer, ipConn, err
+}
+
+// connectH3Once is one h3 attempt (lx: SPEC 060).
+func (o *Outbound) connectH3Once(ctx context.Context, handshakeBudget time.Duration) (io.Closer, masque.IpConn, error) {
+	dialCtx, carrier := adapter.ContextWithCarrierRecord(ctx) // lx: SPEC 060 — which outbound carries this attempt
+	udpConn, err := o.dialer.DialContext(dialCtx, N.NetworkUDP, o.server)
 	if err != nil {
 		return nil, nil, E.Cause(err, "dial udp")
+	}
+	// lx: SPEC 146 — quic-go never closes a PacketConn it did not create. When
+	// its single-use transport shuts down (handshake failed, dial cancelled) it
+	// sets a read deadline on the conn and waits for its listener to return.
+	// Through a detour the "socket" is a stream-tunnelled conn (vless XUDP over
+	// WebSocket, …) whose SetReadDeadline is a no-op: the listener never woke,
+	// Transport.Close never returned, DialEarly never came back, and the dial
+	// held runMu for good (field dump 2026-11-01). Conns that say so get a real
+	// read deadline here, the way the stream transports do for themselves.
+	// lx: SPEC 150 — a stream-carried conn gets kernel read semantics: an
+	// oversize datagram (Cloudflare's PMTUD probes run 1453–1462 bytes over the
+	// 1452 quic-go reads into) is truncated and dropped instead of surfacing as
+	// io.ErrShortBuffer, which quic-go treats as fatal. Closest to the detour
+	// conn, below the SPEC 146 wrapper; a kernel socket passes through untouched.
+	rawConn := lxdatagram.TruncateReads(udpConn, o.logger)
+	if deadline.NeedAdditionalReadDeadline(rawConn) {
+		rawConn = deadline.NewConn(rawConn)
 	}
 	// UDP socket is up; the QUIC handshake is the next (and most commonly stuck)
 	// step — a hang here means our ClientHello left but no ServerHello came back
@@ -711,12 +931,21 @@ func (o *Outbound) connectH3WithBudget(ctx context.Context, handshakeBudget time
 		handshakeCtx, cancel = context.WithTimeout(ctx, handshakeBudget)
 		defer cancel()
 	}
-	quicConn, err := quic.DialEarly(handshakeCtx, bufio.NewUnbindPacketConn(udpConn), udpConn.RemoteAddr(), o.tlsConfig, o.quicConfig)
+	// lx: SPEC 060 — the lx.sniff_guard form of this handshake, after the
+	// wrappers and before quic-go's first Initial: the decoy datagram ahead of
+	// it, or the second Initial held back.
+	rawConn, sniffGuard := lxdatagram.GuardQUIC(lxsniffguard.AttemptFromContext(ctx), udpConn, carrier, rawConn, o.logger)
+	quicStage := o.beginQUICLx(ctx) // lx: SPEC 139 — `quic` stage
+	quicConn, err := quic.DialEarly(handshakeCtx, bufio.NewUnbindPacketConn(rawConn), udpConn.RemoteAddr(), o.tlsConfig, o.quicConfig)
+	quicStage.End(err) // lx: SPEC 139
+	sniffGuard.Done()  // lx: SPEC 060
 	if err != nil {
 		_ = udpConn.Close()
 		return nil, nil, E.Cause(err, "dial quic")
 	}
+	authStage := o.beginAuthLx(ctx, "h3") // lx: SPEC 139 — `auth` stage: CONNECT-IP status
 	tr, ipConn, err := masque.ConnectTunnelH3(ctx, o.profile, quicConn, o.uri)
+	endAuthLx(authStage, err) // lx: SPEC 139
 	if err != nil {
 		_ = udpConn.Close()
 		return nil, nil, err
@@ -725,6 +954,28 @@ func (o *Outbound) connectH3WithBudget(ctx context.Context, handshakeBudget time
 }
 
 func (o *Outbound) connectH2(ctx context.Context) (io.Closer, masque.IpConn, error) {
+	// lx: SPEC 060 — the h2 leg raises its session inside lx.sniff_guard's
+	// Node.Dial on the tls label, so its outcome is the session's and not the
+	// first stream's; a fast failure is redone with the opposite decision.
+	var (
+		closer io.Closer
+		ipConn masque.IpConn
+	)
+	once := o.connectH2Once
+	if o.legsForTest != nil && o.legsForTest.h2Once != nil {
+		once = o.legsForTest.h2Once
+	}
+	err := o.sniffGuard.Dial(ctx, func(ctx context.Context) error {
+		var err error
+		closer, ipConn, err = once(ctx)
+		return err
+	})
+	return closer, ipConn, err
+}
+
+// connectH2Once is one h2 attempt (lx: SPEC 060).
+func (o *Outbound) connectH2Once(ctx context.Context) (io.Closer, masque.IpConn, error) {
+	ctx, _ = adapter.ContextWithCarrierRecord(ctx) // lx: SPEC 060 — which outbound carries this attempt, for the TLS hook
 	c, err := o.dialer.DialContext(ctx, N.NetworkTCP, o.server)
 	if err != nil {
 		return nil, nil, E.Cause(err, "dial tcp")
@@ -737,7 +988,10 @@ func (o *Outbound) connectH2(ctx context.Context) (io.Closer, masque.IpConn, err
 		_ = c.Close()
 		return nil, nil, E.Cause(err, "tls handshake")
 	}
-	return masque.ConnectTunnelH2(ctx, o.profile, tlsConn, o.uri)
+	authStage := o.beginAuthLx(ctx, "h2") // lx: SPEC 139 — `auth` stage: CONNECT-IP status
+	closer, ipConn, err := masque.ConnectTunnelH2(ctx, o.profile, tlsConn, o.uri)
+	endAuthLx(authStage, err) // lx: SPEC 139
+	return closer, ipConn, err
 }
 
 // pumpToTunnel reads outgoing IP packets from the userspace stack and writes
@@ -858,16 +1112,35 @@ func (o *Outbound) lookup(ctx context.Context, domain string) ([]netip.Addr, err
 	return o.dnsRouter.Lookup(ctx, domain, adapter.DNSQueryOptions{})
 }
 
+// Start — upstream scope lifecycle (2026-10): the outbound has no start work,
+// it only registers Close.
+func (o *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
+	if stage == adapter.StartStateInitialize {
+		scope.Add(o.Close)
+	}
+	return nil
+}
+
+// Close tears the current tunnel down and cancels a connect in flight. It
+// deliberately does not take runMu: that lock is held for the whole dial, and
+// a dial through a detour can sit in a handshake for as long as the path lets
+// it. Waiting there kept Box.Close — and with it the next start — hostage
+// (lx: SPEC 146). A session that comes up after Close is disposed of by
+// ensureSession itself.
 func (o *Outbound) Close() error {
-	o.runMu.Lock()
+	o.stateMu.Lock()
 	if o.closed {
-		o.runMu.Unlock()
+		o.stateMu.Unlock()
 		return nil
 	}
 	o.closed = true
 	s := o.sess
 	o.sess = nil
-	o.runMu.Unlock()
+	connectCancel := o.connectCancel
+	o.stateMu.Unlock()
+	if connectCancel != nil {
+		connectCancel()
+	}
 	if s != nil {
 		o.teardownSession(s)
 	}

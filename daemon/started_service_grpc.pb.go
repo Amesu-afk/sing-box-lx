@@ -69,6 +69,11 @@ const (
 	StartedService_GetChains_FullMethodName                      = "/daemon.StartedService/GetChains"
 	StartedService_SetChainPositionEnabled_FullMethodName        = "/daemon.StartedService/SetChainPositionEnabled"
 	StartedService_GetChainCloneConfig_FullMethodName            = "/daemon.StartedService/GetChainCloneConfig"
+	StartedService_SetEndpointEnabled_FullMethodName             = "/daemon.StartedService/SetEndpointEnabled"
+	StartedService_GetWireGuardStatus_FullMethodName             = "/daemon.StartedService/GetWireGuardStatus"
+	StartedService_GetTailscaleStatus_FullMethodName             = "/daemon.StartedService/GetTailscaleStatus"
+	StartedService_TailscaleLogin_FullMethodName                 = "/daemon.StartedService/TailscaleLogin"
+	StartedService_StartConnectionTest_FullMethodName            = "/daemon.StartedService/StartConnectionTest"
 )
 
 // StartedServiceClient is the client API for StartedService service.
@@ -129,6 +134,15 @@ type StartedServiceClient interface {
 	GetChains(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*ChainList, error)
 	SetChainPositionEnabled(ctx context.Context, in *SetChainPositionEnabledRequest, opts ...grpc.CallOption) (*SetChainPositionEnabledResponse, error)
 	GetChainCloneConfig(ctx context.Context, in *GetChainCloneConfigRequest, opts ...grpc.CallOption) (*RunningConfig, error)
+	SetEndpointEnabled(ctx context.Context, in *SetEndpointEnabledRequest, opts ...grpc.CallOption) (*SetEndpointEnabledResponse, error)
+	// Per-endpoint status snapshots (SPEC 114, SPEC 115): one unary getter per
+	// endpoint type, so GetOutbounds stays a plain node list.
+	GetWireGuardStatus(ctx context.Context, in *WireGuardStatusRequest, opts ...grpc.CallOption) (*WireGuardEndpointStatus, error)
+	GetTailscaleStatus(ctx context.Context, in *TailscaleStatusRequest, opts ...grpc.CallOption) (*TailscaleEndpointStatus, error)
+	// Login of a Tailscale endpoint with a new auth key without a box restart
+	// (SPEC 149); on/off of the endpoint is SetEndpointEnabled.
+	TailscaleLogin(ctx context.Context, in *TailscaleLoginRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	StartConnectionTest(ctx context.Context, in *ConnectionTestRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConnectionTestProgress], error)
 }
 
 type startedServiceClient struct {
@@ -850,6 +864,65 @@ func (c *startedServiceClient) GetChainCloneConfig(ctx context.Context, in *GetC
 	return out, nil
 }
 
+func (c *startedServiceClient) SetEndpointEnabled(ctx context.Context, in *SetEndpointEnabledRequest, opts ...grpc.CallOption) (*SetEndpointEnabledResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetEndpointEnabledResponse)
+	err := c.cc.Invoke(ctx, StartedService_SetEndpointEnabled_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) GetWireGuardStatus(ctx context.Context, in *WireGuardStatusRequest, opts ...grpc.CallOption) (*WireGuardEndpointStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WireGuardEndpointStatus)
+	err := c.cc.Invoke(ctx, StartedService_GetWireGuardStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) GetTailscaleStatus(ctx context.Context, in *TailscaleStatusRequest, opts ...grpc.CallOption) (*TailscaleEndpointStatus, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TailscaleEndpointStatus)
+	err := c.cc.Invoke(ctx, StartedService_GetTailscaleStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) TailscaleLogin(ctx context.Context, in *TailscaleLoginRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, StartedService_TailscaleLogin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *startedServiceClient) StartConnectionTest(ctx context.Context, in *ConnectionTestRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConnectionTestProgress], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[21], StartedService_StartConnectionTest_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ConnectionTestRequest, ConnectionTestProgress]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_StartConnectionTestClient = grpc.ServerStreamingClient[ConnectionTestProgress]
+
 // StartedServiceServer is the server API for StartedService service.
 // All implementations must embed UnimplementedStartedServiceServer
 // for forward compatibility.
@@ -908,6 +981,15 @@ type StartedServiceServer interface {
 	GetChains(context.Context, *emptypb.Empty) (*ChainList, error)
 	SetChainPositionEnabled(context.Context, *SetChainPositionEnabledRequest) (*SetChainPositionEnabledResponse, error)
 	GetChainCloneConfig(context.Context, *GetChainCloneConfigRequest) (*RunningConfig, error)
+	SetEndpointEnabled(context.Context, *SetEndpointEnabledRequest) (*SetEndpointEnabledResponse, error)
+	// Per-endpoint status snapshots (SPEC 114, SPEC 115): one unary getter per
+	// endpoint type, so GetOutbounds stays a plain node list.
+	GetWireGuardStatus(context.Context, *WireGuardStatusRequest) (*WireGuardEndpointStatus, error)
+	GetTailscaleStatus(context.Context, *TailscaleStatusRequest) (*TailscaleEndpointStatus, error)
+	// Login of a Tailscale endpoint with a new auth key without a box restart
+	// (SPEC 149); on/off of the endpoint is SetEndpointEnabled.
+	TailscaleLogin(context.Context, *TailscaleLoginRequest) (*emptypb.Empty, error)
+	StartConnectionTest(*ConnectionTestRequest, grpc.ServerStreamingServer[ConnectionTestProgress]) error
 	mustEmbedUnimplementedStartedServiceServer()
 }
 
@@ -1132,6 +1214,26 @@ func (UnimplementedStartedServiceServer) SetChainPositionEnabled(context.Context
 
 func (UnimplementedStartedServiceServer) GetChainCloneConfig(context.Context, *GetChainCloneConfigRequest) (*RunningConfig, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetChainCloneConfig not implemented")
+}
+
+func (UnimplementedStartedServiceServer) SetEndpointEnabled(context.Context, *SetEndpointEnabledRequest) (*SetEndpointEnabledResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SetEndpointEnabled not implemented")
+}
+
+func (UnimplementedStartedServiceServer) GetWireGuardStatus(context.Context, *WireGuardStatusRequest) (*WireGuardEndpointStatus, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetWireGuardStatus not implemented")
+}
+
+func (UnimplementedStartedServiceServer) GetTailscaleStatus(context.Context, *TailscaleStatusRequest) (*TailscaleEndpointStatus, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTailscaleStatus not implemented")
+}
+
+func (UnimplementedStartedServiceServer) TailscaleLogin(context.Context, *TailscaleLoginRequest) (*emptypb.Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TailscaleLogin not implemented")
+}
+
+func (UnimplementedStartedServiceServer) StartConnectionTest(*ConnectionTestRequest, grpc.ServerStreamingServer[ConnectionTestProgress]) error {
+	return status.Errorf(codes.Unimplemented, "method StartConnectionTest not implemented")
 }
 func (UnimplementedStartedServiceServer) mustEmbedUnimplementedStartedServiceServer() {}
 func (UnimplementedStartedServiceServer) testEmbeddedByValue()                        {}
@@ -1967,6 +2069,89 @@ func _StartedService_GetChainCloneConfig_Handler(srv interface{}, ctx context.Co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StartedService_SetEndpointEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetEndpointEnabledRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).SetEndpointEnabled(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_SetEndpointEnabled_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).SetEndpointEnabled(ctx, req.(*SetEndpointEnabledRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_GetWireGuardStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WireGuardStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).GetWireGuardStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_GetWireGuardStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).GetWireGuardStatus(ctx, req.(*WireGuardStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_GetTailscaleStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TailscaleStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).GetTailscaleStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_GetTailscaleStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).GetTailscaleStatus(ctx, req.(*TailscaleStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_TailscaleLogin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TailscaleLoginRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).TailscaleLogin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_TailscaleLogin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).TailscaleLogin(ctx, req.(*TailscaleLoginRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _StartedService_StartConnectionTest_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ConnectionTestRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(StartedServiceServer).StartConnectionTest(m, &grpc.GenericServerStream[ConnectionTestRequest, ConnectionTestProgress]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type StartedService_StartConnectionTestServer = grpc.ServerStreamingServer[ConnectionTestProgress]
+
 // StartedService_ServiceDesc is the grpc.ServiceDesc for StartedService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2106,6 +2291,22 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetChainCloneConfig",
 			Handler:    _StartedService_GetChainCloneConfig_Handler,
 		},
+		{
+			MethodName: "SetEndpointEnabled",
+			Handler:    _StartedService_SetEndpointEnabled_Handler,
+		},
+		{
+			MethodName: "GetWireGuardStatus",
+			Handler:    _StartedService_GetWireGuardStatus_Handler,
+		},
+		{
+			MethodName: "GetTailscaleStatus",
+			Handler:    _StartedService_GetTailscaleStatus_Handler,
+		},
+		{
+			MethodName: "TailscaleLogin",
+			Handler:    _StartedService_TailscaleLogin_Handler,
+		},
 	},
 	Streams: []grpc.StreamDesc{
 		{
@@ -2214,6 +2415,11 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "SubscribeDNSQueries",
 			Handler:       _StartedService_SubscribeDNSQueries_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "StartConnectionTest",
+			Handler:       _StartedService_StartConnectionTest_Handler,
 			ServerStreams: true,
 		},
 	},

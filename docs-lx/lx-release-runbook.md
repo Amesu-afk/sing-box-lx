@@ -123,20 +123,29 @@ done
 For `gvisor` the `require` version carries no hash (it is a snapshot) — compare the version string
 against the snapshot date in the submodule's history.
 
-For `utls` the pin is a `metacubex/utls vX.Y.Z` tag (currently `v1.8.7`), also without a hash: the
-fork's `lx` branch must sit **on that tag** and carry exactly three commits ported from refraction on
-top (Firefox 148 + key share reuse, SPEC 086; Safari 26.3, SPEC 087):
+For `utls` the pin is a `metacubex/utls vX.Y.Z` tag (currently `v1.9.0-alpha.1`), also without a
+hash: the fork's `lx` branch must **contain that tag** and differ from it by five commits: the
+cherry-pick of refraction 6ebdceb (the Chrome 155 preset, SPEC 118) and three of ours around it
+(ML-DSA signature scheme codepoints only, before it; the dropped ML-DSA handshake test and
+`HelloChrome_Auto` kept at Chrome 133, after it — Chrome 155 is opt-in as `chrome_155`), and ours
+on top: the new file `u_conn_release_lx.go` with `UConn.ReleaseHandshakeState` (SPEC 122).
+Firefox 148 with key share reuse and Safari 26.3 (SPEC 086/087) come from metacubex itself since
+`v1.9.0-alpha.1`.
 
 ```bash
-req=$(grep -oE 'metacubex/utls v[0-9.]+' go.mod | awk '{print $2}')
+req=$(grep -oE 'metacubex/utls v[0-9a-z.-]+' go.mod | head -1 | awk '{print $2}')
 git -C submodules/utls fetch metacubex --tags 2>/dev/null
-git -C submodules/utls merge-base --is-ancestor "$req" HEAD && echo "✅ lx sits on $req" || echo "❌ DRIFT: go.mod requires $req"
-git -C submodules/utls log --oneline "$req..HEAD"   # expect exactly 3 lines (cherry-picks of fc716b2, ddebe39, aa6edf4)
+git -C submodules/utls merge-base --is-ancestor "$req" HEAD && echo "✅ lx contains $req" || echo "❌ DRIFT: go.mod requires $req"
+git -C submodules/utls diff --stat "$req" HEAD   # only the Chrome 155 / ML-DSA codepoint / trust_anchors files and u_conn_release_lx*.go
 ```
 
-An upstream `metacubex/utls` bump means moving the fork's `lx` branch onto the new tag with the
-same three commits on top (metacubex accepts no external PRs — the sync is ours alone); the
-condition for dropping the fork is in SPEC 086/087.
+metacubex rebuilds its history between tags (`v1.9.0-alpha.1` does not descend from `v1.8.7`), so
+`git log "$req..HEAD"` also lists the fork's older line and is no longer the check — compare
+trees. An upstream `metacubex/utls` bump means re-grafting: a side branch from the new tag, the
+same commits cherry-picked on top (dropping those the tag already carries), then one commit on the
+fork's `lx` whose tree is that side branch and whose parents are the old `lx` and the side branch —
+the fork's `lx` is not force-pushed, and old gitlinks stay reachable (metacubex accepts no external
+PRs — the sync is ours alone); the condition for dropping the fork is in SPEC 086/087/118.
 
 ### 1.2 Take the whole upstream line, not selected commits
 
@@ -166,7 +175,7 @@ compare the pin against. The upstream version is not recorded in the tree (`cons
 are incomplete: `origin` carries only old pure-upstream ones (≤ `v1.13.11`), while `v1.13.13` and
 `v1.14.0-beta.*` exist solely in local clones where someone ran `git fetch upstream --tags`. A
 tag-based gate was tried (commit `5c621c089`, reverted in `d7fa017a8`): green locally, red in CI,
-where it honestly reported `1.13.11` — exactly what a user with a clean clone sees. So after a
+where it reported `1.13.11` — exactly what a user with a clean clone sees. So after a
 re-graft, verify this by eye.
 
 ### 1.3 The second class of drift: API absent from the fork's base
@@ -196,7 +205,7 @@ an order of magnitude). A gate on testing is permanently red and blocks releases
 
 ```bash
 git fetch upstream --tags
-# THE honest check: if merge-base == tip of upstream/stable, there is no drift
+# The reliable check: if merge-base == tip of upstream/stable, there is no drift
 git merge-base lx upstream/stable
 git rev-parse upstream/stable
 # what exactly arrived (empty = nothing):

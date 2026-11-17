@@ -3,6 +3,7 @@ package dialer
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -17,8 +18,8 @@ import (
 )
 
 var (
-	_ N.Dialer                = (*resolveDialer)(nil)
-	_ ParallelInterfaceDialer = (*resolveParallelNetworkDialer)(nil)
+	_ ResolveDialer                  = (*resolveDialer)(nil)
+	_ ParallelInterfaceResolveDialer = (*resolveParallelNetworkDialer)(nil)
 )
 
 type ResolveDialer interface {
@@ -28,6 +29,7 @@ type ResolveDialer interface {
 
 type ParallelInterfaceResolveDialer interface {
 	ParallelInterfaceDialer
+	PacketDialerWithDestination
 	QueryOptions() adapter.DNSQueryOptions
 }
 
@@ -100,35 +102,43 @@ func (d *resolveDialer) DialContext(ctx context.Context, network string, destina
 		return d.dialer.DialContext(ctx, network, destination)
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+	addresses, err := d.lookupLx(ctx, destination.Fqdn) // lx: SPEC 139 — d.router.Lookup inside a `lookup` stage
 	if err != nil {
 		return nil, err
 	}
 	if d.parallel {
-		return N.DialParallel(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, d.fallbackDelay)
+		return N.DialParallel(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), d.fallbackDelay)
 	} else {
 		return N.DialSerial(ctx, d.dialer, network, destination, addresses)
 	}
 }
 
 func (d *resolveDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
-	err := d.initialize()
+	conn, destinationAddress, err := d.ListenPacketWithDestination(ctx, destination)
 	if err != nil {
 		return nil, err
 	}
-	if !destination.IsDomain() {
-		return d.dialer.ListenPacket(ctx, destination)
-	}
-	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
-	if err != nil {
-		return nil, err
-	}
-	conn, destinationAddress, err := N.ListenSerial(ctx, d.dialer, destination, addresses)
-	if err != nil {
-		return nil, err
+	if !destinationAddress.IsValid() {
+		return conn, nil
 	}
 	return bufio.NewNATPacketConn(bufio.NewPacketConn(conn), M.SocksaddrFrom(destinationAddress, destination.Port), destination), nil
+}
+
+func (d *resolveDialer) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
+	err := d.initialize()
+	if err != nil {
+		return nil, netip.Addr{}, err
+	}
+	if !destination.IsDomain() {
+		conn, err := d.dialer.ListenPacket(ctx, destination)
+		return conn, netip.Addr{}, err
+	}
+	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
+	addresses, err := d.lookupLx(ctx, destination.Fqdn) // lx: SPEC 139 — d.router.Lookup inside a `lookup` stage
+	if err != nil {
+		return nil, netip.Addr{}, err
+	}
+	return N.ListenSerial(ctx, d.dialer, destination, addresses)
 }
 
 func (d *resolveDialer) QueryOptions() adapter.DNSQueryOptions {
@@ -148,7 +158,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		return d.dialer.DialContext(ctx, network, destination)
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+	addresses, err := d.lookupLx(ctx, destination.Fqdn) // lx: SPEC 139 — d.router.Lookup inside a `lookup` stage
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +166,7 @@ func (d *resolveParallelNetworkDialer) DialParallelInterface(ctx context.Context
 		fallbackDelay = d.fallbackDelay
 	}
 	if d.parallel {
-		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, d.queryOptions.Strategy == C.DomainStrategyPreferIPv6, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
+		return DialParallelNetwork(ctx, d.dialer, network, destination, addresses, addresses[0].Is6(), strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 	} else {
 		return DialSerialNetwork(ctx, d.dialer, network, destination, addresses, strategy, interfaceType, fallbackInterfaceType, fallbackDelay)
 	}
@@ -171,7 +181,7 @@ func (d *resolveParallelNetworkDialer) ListenSerialInterfacePacket(ctx context.C
 		return d.dialer.ListenPacket(ctx, destination)
 	}
 	ctx = log.ContextWithOverrideLevel(ctx, log.LevelDebug)
-	addresses, err := d.router.Lookup(ctx, destination.Fqdn, d.queryOptions)
+	addresses, err := d.lookupLx(ctx, destination.Fqdn) // lx: SPEC 139 — d.router.Lookup inside a `lookup` stage
 	if err != nil {
 		return nil, err
 	}
