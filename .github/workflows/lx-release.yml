@@ -117,7 +117,7 @@ jobs:
       - name: Cache Win7 Go toolchain
         if: matrix.legacy_win7
         id: cache-go-win7
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/go/go_win7
           key: go_win7_${{ hashFiles('.github/setup_go_for_windows7.sh') }}
@@ -360,7 +360,7 @@ jobs:
           done
 
       - name: Cache Chromium toolchain
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/cronet-go/naiveproxy/src/third_party/llvm-build/
