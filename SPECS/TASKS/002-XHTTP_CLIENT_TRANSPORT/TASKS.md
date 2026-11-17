@@ -52,3 +52,38 @@
 - [x] lean-native клиент (`client.go`/`conn.go`/`register.go`) — `d1b434fc`
 - [x] padding в Referer, sessionId path-layout, stream-one bare-path fix (задача 011) — `5a398a5e`
 - [x] Лайв packet-up/auto против Xray/3x-ui (см. IMPLEMENTATION_REPORT v1)
+
+## Восстановление после сна — 2026-10-01
+
+- [x] Реестр физических сокетов переживает замену участников пула.
+- [x] Silent retirement очищает заменённых соседей и сохраняет принимающие трафик соединения.
+- [x] Полный reset закрывает активные/старые сокеты; завершившийся поздно dial старого поколения отвергается.
+- [x] HTTP/2 получает настоящий Close тела upload pipe и освобождает зависшее чтение ответа.
+- [x] Общий Android-планировщик учитывает screen/deep/light idle, отмену и wake cooldown.
+- [x] Обычное восстановление выполняет native network/DNS reset вместо полного reload ядра.
+- [x] Безопасный единичный DoH retry при пересечении reset, без продления caller deadline.
+- [x] Локальные HTTP/2-регрессии и Android policy/scheduler-тесты.
+- [x] Сборка/проверка обоих AAR и обоих вариантов APK на итоговом дереве: четыре ABI, 10 подписанных APK, Android 23/21.
+- [ ] Цикл сон → Telegram/YouTube на физическом телефоне, Wi-Fi и handover.
+
+## Кандидат локализации timeout — 2026-10-19
+
+- [x] Регрессии молчащих исправных соседей, конкурирующих ошибок и позднего timeout старой сети: падение на исходном коде.
+- [x] Точечная замена участника вместо общего pool refresh; независимое восстановление разных отказавших участников.
+- [x] Сохранение socket ownership и полного network reset; новый маркер member-refreshes.
+- [x] Итоговые Go tests/vet и проверки сборки.
+- [x] Пересборка обоих AAR и двух универсальных APK alpha.67, проверка native payload/подписи/версии.
+- [ ] Сравнение длинных Shorts на физическом телефоне, TestMiami-Test, та же Wi-Fi сеть.
+
+## Общая надёжность открытия и ожиданий — 2026-10-21
+
+- [x] Воспроизведены блокировки HTTP/2 preface после timeout/cancel и поздний ответ; synchronous RoundTrip не гарантировал возврат по таймеру.
+- [x] Ограничен сам возврат вызывающему, поздние/отклонённые ответы очищаются без удержания ошибки открытия.
+- [x] Исправлен warm-state после закрытия последнего physical socket; сохранён warm при наличии другого сокета.
+- [x] Успешный packet-up ack не ждёт произвольный EOF тела ответа.
+- [x] Slow/timeout WARN содержит request ID и httptrace-этапы, stable member/generation, inflight/socket count и last-rx.
+- [x] Итоговые 70 Go-тестов, включая здоровый принимающий поток на том же сокете при чужом timeout.
+- [x] Итоговые CLI/untagged gates, оба AAR и APK alpha.68, native/подпись/metadata.
+- [ ] Проверка вкладок браузера и длинных Shorts на установленной alpha.68.
+
+Race-прогон этой добавки не выполнен: Windows Go не нашёл gcc (go-race.log). Это ограничение инструментов, не успешная race-проверка.

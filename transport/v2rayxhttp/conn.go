@@ -191,7 +191,7 @@ func (c *Client) dialStreamUp(ctx context.Context, sessionID string, xmuxClient 
 	// lx: SPEC 072 — conn-scoped request context; see dialStreamOne.
 	connCtx, connCancel := context.WithCancel(sniffGuardRequestContext(ctx, trace.requestContext(c.transportContext()))) // lx: SPEC 139, 060 — the trace and the sniff guard attempt, not the dial's cancellation
 	// Download: GET response body (no seq — stream mode).
-	downReq, err := c.newRequest(connCtx, http.MethodGet, sessionID, "", nil)
+	downReq, err := c.newDownloadRequest(connCtx, sessionID)
 	if err != nil {
 		connCancel()
 		return nil, err
@@ -287,7 +287,7 @@ func (c *Client) dialPacketUp(ctx context.Context, sessionID string, xmuxClient 
 	_ = ctx
 	connCtx, connCancel := context.WithCancel(sniffGuardRequestContext(ctx, trace.requestContext(c.transportContext()))) // lx: SPEC 139, 060 — the trace and the sniff guard attempt, not the dial's cancellation
 	// Download stream: GET with the session id but no seq (downlink).
-	downReq, err := c.newRequest(connCtx, http.MethodGet, sessionID, "", nil)
+	downReq, err := c.newDownloadRequest(connCtx, sessionID)
 	if err != nil {
 		connCancel()
 		return nil, err

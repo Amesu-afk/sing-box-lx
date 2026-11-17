@@ -1,6 +1,10 @@
 package option
 
-import "github.com/sagernet/sing/common/json/badoption"
+import (
+	"encoding/json"
+
+	"github.com/sagernet/sing/common/json/badoption"
+)
 
 // V2RayXHTTPOptions configures the XHTTP (Xray "splithttp"/"xhttp") client
 // transport. It is a sing-box-lx downstream addition; see SPECS/TASKS/002. JSON keys
@@ -9,7 +13,8 @@ import "github.com/sagernet/sing/common/json/badoption"
 // per-field semantics audited against Xray-core and sing-box-extended.
 //
 // Modes (Xray-compatible):
-//   - "auto"       : Reality → stream-one, otherwise → packet-up.
+//   - "auto"       : download_settings → stream-up, Reality → stream-one,
+//     otherwise → packet-up.
 //   - "packet-up"  : separate GET download stream + sequential POST upload packets.
 //   - "stream-up"  : single streamed POST upload + separate GET download stream.
 //   - "stream-one" : a single bidirectional HTTP stream (request body up,
@@ -40,6 +45,14 @@ type V2RayXHTTPOptions struct {
 	// enables XMUX with Xray-compatible defaults (see V2RayXHTTPXmuxOptions) —
 	// matching Xray-core, where the pool is always on. See SPECS/TASKS/059.
 	Xmux *V2RayXHTTPXmuxOptions `json:"xmux,omitempty"`
+
+	// DownloadSettings shapes the download (GET) half of packet-up and
+	// stream-up sessions — Xray's `downloadSettings`, typically to route
+	// downloads through a CDN while the upload keeps going to the origin.
+	// Absent keeps both halves on the same Host/path/headers. Only the request
+	// shape can differ: the client dials one endpoint per profile, so a
+	// download block with another address/port/security is rejected.
+	DownloadSettings *V2RayXHTTPDownloadOptions `json:"download_settings,omitempty"`
 
 	// NoGRPCHeader omits the "Content-Type: application/grpc" request header that
 	// the streamed-body modes (stream-one, stream-up) set by default, mirroring
@@ -194,3 +207,79 @@ type V2RayXHTTPXmuxOptions struct {
 	// matching the reference.
 	HKeepAlivePeriod int64 `json:"h_keep_alive_period,omitempty"`
 }
+
+// V2RayXHTTPDownloadXHTTPSettings is the block Xray nests under
+// downloadSettings.xhttpSettings: only the request-shaping fields this client
+// uses are represented.
+type V2RayXHTTPDownloadXHTTPSettings struct {
+	Host    string               `json:"host,omitempty"`
+	Path    string               `json:"path,omitempty"`
+	Headers badoption.HTTPHeader `json:"headers,omitempty"`
+}
+
+// V2RayXHTTPDownloadOptions shapes the download (GET) half of packet-up and
+// stream-up sessions, mirroring Xray's `downloadSettings` — typically to route
+// downloads through a CDN while the upload keeps going to the origin. The block
+// only makes sense for those modes: stream-one carries both directions on one
+// stream and ignores it.
+//
+// Address, port and security are accepted for config compatibility and must
+// match the transport itself. The client builds one dialer/TLS stack per
+// profile, so a download that points somewhere else is rejected at
+// construction rather than silently ignored.
+//
+// Two shapes are accepted: flat host/path/headers on this object, or the Xray
+// nesting under xhttpSettings (also accepted as xhttp_settings). Nested values
+// win over flat ones.
+type V2RayXHTTPDownloadOptions struct {
+	Address  string               `json:"address,omitempty"`
+	Port     int                  `json:"port,omitempty"`
+	Security string               `json:"security,omitempty"`
+	Host     string               `json:"host,omitempty"`
+	Path     string               `json:"path,omitempty"`
+	Headers  badoption.HTTPHeader `json:"headers,omitempty"`
+}
+
+func (o *V2RayXHTTPDownloadOptions) UnmarshalJSON(content []byte) error {
+	var raw struct {
+		Address       string                           `json:"address"`
+		Port          int                              `json:"port"`
+		Security      string                           `json:"security"`
+		Host          string                           `json:"host"`
+		Path          string                           `json:"path"`
+		Headers       badoption.HTTPHeader             `json:"headers"`
+		SnakeSettings *V2RayXHTTPDownloadXHTTPSettings `json:"xhttp_settings"`
+		CamelSettings *V2RayXHTTPDownloadXHTTPSettings `json:"xhttpSettings"`
+	}
+	// Deliberately lenient (plain encoding/json): Xray configs may carry keys
+	// this client does not model, and rejecting the whole block over one of them
+	// would make the option unusable exactly where it is meant to be pasted in.
+	if err := json.Unmarshal(content, &raw); err != nil {
+		return err
+	}
+	nested := raw.SnakeSettings
+	if nested == nil {
+		nested = raw.CamelSettings
+	}
+	*o = V2RayXHTTPDownloadOptions{
+		Address:  raw.Address,
+		Port:     raw.Port,
+		Security: raw.Security,
+		Host:     raw.Host,
+		Path:     raw.Path,
+		Headers:  raw.Headers,
+	}
+	if nested != nil {
+		if nested.Host != "" {
+			o.Host = nested.Host
+		}
+		if nested.Path != "" {
+			o.Path = nested.Path
+		}
+		if len(nested.Headers) > 0 {
+			o.Headers = nested.Headers
+		}
+	}
+	return nil
+}
+

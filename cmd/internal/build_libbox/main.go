@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -80,6 +81,11 @@ func init() {
 	// rejects any wireguard-with-AWG or xhttp config at runtime ("support not built").
 	sharedTags = append(sharedTags, "with_xhttp", "with_awg")
 	// lx:end awg,xhttp
+	// lx:begin olcrtc
+	// The Android builder binds the olcRTC mobile package into the same AAR as
+	// libbox. Two gomobile AARs cannot coexist because both package one Go runtime.
+	sharedTags = append(sharedTags, "with_olcrtc")
+	// lx:end olcrtc
 	// lx:begin lx_command
 	// SPEC 014 — bake the libbox command-protocol extensions (URLTestOutbound, GetRules)
 	// into the AAR. Without the tag the generated RPCs are still registered but the
@@ -180,8 +186,8 @@ func checkJavaVersion() {
 	if err != nil {
 		log.Fatal(E.Cause(err, "check java version"))
 	}
-	if !strings.Contains(javaVersion, "openjdk 17") {
-		log.Fatal("java version should be openjdk 17")
+	if !strings.Contains(javaVersion, "openjdk 17") && !strings.Contains(javaVersion, "openjdk 21") {
+		log.Fatal("java version should be openjdk 17 or 21")
 	}
 }
 
@@ -192,6 +198,16 @@ func getAndroidBindTarget() string {
 		return "android/arm64"
 	}
 	return "android"
+}
+
+func newGomobileCommand(args []string) *exec.Cmd {
+	if exe := os.Getenv("TARN_GOMOBILE_EXE"); exe != "" {
+		return exec.Command(exe, args...)
+	}
+	if os.Getenv("TARN_GOMOBILE_GO_RUN") == "1" {
+		return exec.Command("go", append([]string{"run", "github.com/sagernet/gomobile/cmd/gomobile"}, args...)...)
+	}
+	return exec.Command(build_shared.GoBinPath+"/gomobile", args...)
 }
 
 func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
@@ -213,8 +229,13 @@ func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 
 	args = append(args, "-tags", strings.Join(config.Tags, ","))
 	args = append(args, "./experimental/libbox")
+	// lx:begin olcrtc
+	if slices.Contains(config.Tags, "with_olcrtc") {
+		args = append(args, "github.com/openlibrecommunity/olcrtc/mobile")
+	}
+	// lx:end olcrtc
 
-	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+	command := newGomobileCommand(args)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	err := command.Run()
@@ -239,14 +260,20 @@ func buildAndroid() {
 
 	bindTarget := getAndroidBindTarget()
 
-	// Build main variant (SDK 24)
+	// lx:begin tarnvpn-android-api
+	// TarnVPN's main flavor supports Android 6 (API 23). Upstream raised its
+	// primary AAR floor to API 24 as an app policy, while the legacy AAR still
+	// builds the same XHTTP/AWG/OpenConnect feature set for API 21. Keep the
+	// library floor aligned with the consuming app and verify it in lx-ci.
+	// Build main variant (SDK 23)
+	// lx:end tarnvpn-android-api
 	mainTags := append([]string{}, sharedTags...)
 	// mainTags = append(mainTags, memcTags...)
 	if debugEnabled {
 		mainTags = append(mainTags, debugTags...)
 	}
 	buildAndroidVariant(AndroidBuildConfig{
-		AndroidAPI: 24,
+		AndroidAPI: 23,
 		OutputName: "libbox.aar",
 		Tags:       mainTags,
 	}, bindTarget)
@@ -305,7 +332,7 @@ func buildApple() {
 	args = append(args, "-tags", strings.Join(tags, ","))
 	args = append(args, "./experimental/libbox")
 
-	command := exec.Command(build_shared.GoBinPath+"/gomobile", args...)
+	command := newGomobileCommand(args)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	err := command.Run()

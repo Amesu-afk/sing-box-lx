@@ -66,6 +66,9 @@ type Client struct {
 	query        string // configured path after the first "?", sent verbatim (lx: SPEC 119)
 	mode         string
 	headers      http.Header
+	// download shapes the download (GET) half of packet-up/stream-up sessions
+	// when download_settings is configured (lx: app-core parity).
+	download     *downloadConfig
 	paddingRange intRange
 	// meta holds the normalized placement/key/method selection (session, seq,
 	// uplink-data, X-Padding obfs). Computed once in NewClient.
@@ -92,6 +95,12 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	mode := options.Mode
 	if mode == "" {
 		mode = modeAuto
+	}
+	if mode == modeAuto && options.DownloadSettings != nil {
+		// Xray resolves auto to stream-up when a download block is present: its
+		// upload and download halves are independent requests, which is what an
+		// asymmetric download needs.
+		mode = modeStreamUp
 	}
 	switch mode {
 	case modeAuto, modePacketUp, modeStreamUp, modeStreamOne:
@@ -227,6 +236,20 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 	}
 	applyDefaultHeaders(headers) // lx: SPEC 142 — Xray's TryDefaultHeadersWith(header, "fetch")
 
+	// lx: download_settings — the request shape of the download GET. One dialer
+	// and one TLS stack per profile, so only Host/path/headers can differ.
+	download, err := buildDownloadConfig(
+		options.DownloadSettings,
+		serverAddr,
+		tlsConfig != nil,
+		host,
+		path,
+		headers,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	xmux := newXmuxManager(xmuxConfig, newConn)
 	// The pool's transitions (a connection opened, a connection retired and why)
 	// are what is worth observing about XMUX — the pool size itself follows from
@@ -249,6 +272,7 @@ func NewClient(ctx context.Context, dialer N.Dialer, serverAddr M.Socksaddr, opt
 		query:          query,
 		mode:           mode,
 		headers:        headers,
+		download:       download,
 		paddingRange:   paddingRange,
 		meta:           meta,
 		realityEnabled: realityEnabled,
@@ -294,8 +318,8 @@ func (c *Client) dialMode(ctx context.Context, sessionID string, xmuxClient *xmu
 	case modeAuto:
 		// Match Xray's auto resolution (transport/internet/splithttp/dialer.go):
 		// Reality → stream-one; otherwise → packet-up (the most broadly compatible
-		// mode, live-validated against Xray 3x-ui). Xray also picks stream-up when
-		// downloadSettings is present, but we don't support asymmetric transport.
+		// mode, live-validated against Xray 3x-ui). NewClient already resolved a
+		// configured download_settings to stream-up, as Xray does.
 		if c.realityEnabled {
 			return c.dialStreamOne(ctx, sessionID, xmuxClient, release, trace)
 		}
@@ -322,13 +346,17 @@ func (c *Client) Close() error {
 // (lx: SPEC 142); the configured query is set verbatim, and query placements
 // add to it.
 func (c *Client) baseURL() (*url.URL, error) {
+	return c.baseURLFor(c.path)
+}
+
+func (c *Client) baseURLFor(path string) (*url.URL, error) {
 	// lx: SPEC 142 — the path is literal, as Xray assigns GetNormalizedPath to
 	// requestURL.Path: "/a%2Fb/" is the prefix the server was configured with,
 	// not an escape of "/a/b/", and "/100%/" is a path, not a parse error.
 	u := &url.URL{
 		Scheme: c.scheme,
 		Host:   c.serverAddr.String(),
-		Path:   c.path,
+		Path:   path,
 	}
 	if !strings.HasPrefix(u.Path, "/") {
 		u.Path = "/" + u.Path
@@ -343,7 +371,36 @@ func (c *Client) baseURL() (*url.URL, error) {
 // bare path with no sessionId, which is how the server routes the bidirectional
 // branch). An empty seqStr emits no seq (stream modes).
 func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr string, body interface{ Read([]byte) (int, error) }) (*http.Request, error) {
-	u, err := c.baseURL()
+	return c.newRequestWith(ctx, method, sessionID, seqStr, body, c.host, c.path, c.headers)
+}
+
+// newDownloadRequest builds the GET half of a packet-up/stream-up session. With
+// a download block configured it uses the alternate Host/path/headers (the CDN
+// routing case); otherwise it is byte-for-byte what newRequest produces.
+func (c *Client) newDownloadRequest(ctx context.Context, sessionID string) (*http.Request, error) {
+	if c.download == nil {
+		return c.newRequest(ctx, http.MethodGet, sessionID, "", nil)
+	}
+	return c.newRequestWith(
+		ctx,
+		http.MethodGet,
+		sessionID,
+		"",
+		nil,
+		c.download.host,
+		c.download.path,
+		c.download.headers,
+	)
+}
+
+func (c *Client) newRequestWith(
+	ctx context.Context,
+	method, sessionID, seqStr string,
+	body interface{ Read([]byte) (int, error) },
+	host, path string,
+	headers http.Header,
+) (*http.Request, error) {
+	u, err := c.baseURLFor(path)
 	if err != nil {
 		return nil, err
 	}
@@ -351,8 +408,8 @@ func (c *Client) newRequest(ctx context.Context, method, sessionID, seqStr strin
 	request := &http.Request{
 		Method: method,
 		URL:    u,
-		Header: c.headers.Clone(),
-		Host:   c.host,
+		Header: headers.Clone(),
+		Host:   host,
 	}
 	if request.Header == nil {
 		request.Header = make(http.Header)

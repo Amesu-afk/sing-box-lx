@@ -325,6 +325,16 @@ XHTTP (Xray "splithttp"/"xhttp") is a v2ray transport that tunnels the proxy ove
 
 A minimal `transport` block is just `"type": "xhttp"` (mode `auto`); the [example below](#example--vless--xhttp--reality) adds a Reality node with `stream-one`.
 
+**`download_settings`** (Xray's `downloadSettings`) shapes the download GET of a
+`packet-up` / `stream-up` session — a different `host`, `path` or extra `headers`,
+typically to send downloads through a CDN while the upload keeps going to the origin
+(the Xray nesting under `xhttpSettings` / `xhttp_settings` is accepted too, nested
+values win). Only the request shape can differ: the client dials one endpoint per
+profile, so a block with another `address`, `port` or `security` is rejected at start
+instead of silently connecting elsewhere. `mode: auto` resolves to `stream-up` when
+the block is present, as Xray does; `stream-one` carries both directions on one
+stream and ignores it.
+
 > **📖 The full field reference — all 26 XHTTP keys, their defaults, the `xmux` pool
 > semantics, range value forms and a troubleshooting table — is in
 > [protocols-transports.md §1](protocols-transports.md#1-xhttp-transport)**

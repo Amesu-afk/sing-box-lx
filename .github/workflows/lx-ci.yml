@@ -11,8 +11,9 @@ name: lx-ci
 #   * Doc-only commits (md/docs/SPECS/LICENSE) skip CI entirely (paths-ignore).
 #   * push / pull_request → only the cheap jobs:
 #       - `lint`        : go vet (lx packages) + gofmt on lx-owned files
-#       - `build-check` : one native build (with_xhttp,with_awg) + sing-box check,
-#                         plus a tagless baseline build for the negative check.
+#       - `build-check` : LX unit tests, one native build (with_xhttp,with_awg) +
+#                         sing-box check, plus a tagless baseline build for the
+#                         negative check.
 #   * `cross` (6 platforms) and `android` (gomobile AAR) are HEAVY → they run only
 #     on a manual `workflow_dispatch` (Actions → lx-ci → Run workflow, or
 #     `gh workflow run lx-ci.yml --ref lx`). They are NEVER on push.
@@ -246,7 +247,7 @@ jobs:
             ./lxd/ ./cmd/sing-box/
 
   build-check:
-    name: build-check (native build + check + negative)
+    name: build-check (test + native build + check + negative)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -259,6 +260,27 @@ jobs:
       - uses: actions/setup-go@v6
         with: { go-version: '${{ steps.go_pin.outputs.version }}' }
 
+      - name: Test LX packages (full tags)
+        run: |
+          go test -count=1 \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            -ldflags "-checklinkname=0" \
+            ./option/ ./common/tls/ ./transport/v2rayxhttp/ \
+            ./protocol/wireguard/ ./transport/wireguard/
+
+      # The XHTTP client is the one lx package built around concurrent state: the pool
+      # swaps members under atomic.Pointer while dials hold their own reference, the
+      # handshake guard races a timer against RoundTrip, and the stream conn hands the
+      # reader over between goroutines. A data race there is a heisenbug on someone's
+      # phone, so it is worth the extra minute here — this is also the only place it
+      # can run, since -race needs cgo and the usual dev box is Windows without gcc.
+      - name: Race-test XHTTP client
+        run: |
+          CGO_ENABLED=1 go test -count=1 -race \
+            -tags "${BASE_TAGS},with_xhttp,with_awg,with_lx_command" \
+            -ldflags "-checklinkname=0" \
+            ./transport/v2rayxhttp/
+
       - name: Build (full lx — with_xhttp,with_awg,with_lx_command,with_lxd)
         run: make -f Makefile.lx lx-build LX_TAGS="${BASE_TAGS},with_xhttp,with_awg,with_lx_command,with_lxd"
 
@@ -268,6 +290,8 @@ jobs:
       - name: Check feature configs (must pass)
         run: |
           ./sing-box check -c lx-test/config/xhttp_reality.json
+          ./sing-box check -c lx-test/config/xhttp_auto_reality.json
+          ./sing-box check -c lx-test/config/xhttp_obfs_full.json
           ./sing-box check -c lx-test/config/awg2_basic.json
           ./sing-box check -c lx-test/config/awg2_ranged.json
           ./sing-box check -c lx-test/config/awg3_full.json
@@ -386,6 +410,11 @@ jobs:
         env:
           JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+      - name: Verify TarnVPN AAR API floors
+        run: |
+          unzip -p libbox.aar AndroidManifest.xml | grep -q 'android:minSdkVersion="23"'
+          unzip -p libbox-legacy.aar AndroidManifest.xml | grep -q 'android:minSdkVersion="21"'
+          echo "OK: main AAR supports Android 6 and legacy AAR supports Android 5"
       - uses: actions/upload-artifact@v6
         with:
           name: libbox-aar

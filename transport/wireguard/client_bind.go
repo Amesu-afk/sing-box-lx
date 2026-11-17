@@ -69,6 +69,8 @@ func (c *ClientBind) hasReserved() bool {
 	if c.reserved != [3]uint8{} {
 		return true
 	}
+	c.reservedAccess.RLock()
+	defer c.reservedAccess.RUnlock()
 	for _, reserved := range c.reservedForEndpoint {
 		if reserved != [3]uint8{} {
 			return true

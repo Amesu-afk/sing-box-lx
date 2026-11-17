@@ -140,3 +140,78 @@ session/seq в path; payload в body; метод POST. Тест `TestDefaultLega
 
 - Лаунчер: маппинг `type=xhttp` (его задача 023 сейчас маппит в `httpupgrade`) → реальный xhttp-транспорт.
 - Опционально: починить stream-one, добавить xmux.
+
+## Восстановление после сна — 2026-10-01
+
+Исправлены локально воспроизведённые ограничения владения XHTTP-сокетами и
+прерывания stream-one. `connections.go` удерживает общий реестр и поколение
+сети; `Client.Close()` очищает активные и заменённые участники, оставаясь
+пригодным для повторного dial. Retirement охватывает молчащих заменённых
+соседей, сохраняя свежие входящие данные и холодные handshakes.
+
+Дополнительно реальный HTTP/2-тест выявил, что прежний адаптер тела запроса
+игнорировал Close у `io.PipeReader`. Один только физический TCP close поэтому
+не освобождал чтение response body: upload goroutine оставалась в pipe.Read.
+Настоящий Close теперь сохраняется. Три новых HTTP/2-теста сначала падали на
+этой неполной версии очистки и проходят после исправления тела запроса.
+
+Android `NetworkRecovery.kt` объединяет причины восстановления. Экран после
+60 секунд простоя покрывает сон без deep-idle broadcast на прежнем Wi-Fi;
+light/deep idle учитываются отдельно. Maintenance window без интерактивного
+экрана не расходует wake-событие. Native `resetNetwork()` заменяет полный
+reload и сбрасывает DNS; вышедший olcRTC восстанавливается на прежнем локальном
+endpoint через действующий `restartIfDead`. Причина и длительность пишутся
+в Android logcat. Настройка восстановления продолжает управлять механизмом.
+
+В `dns/transport/https.go` добавлены только помеченные `lx:xhttp-recovery`
+вызовы. Реализация единичного retry находится в `https_recovery_lx.go` под
+`with_xhttp`, no-op — в `https_recovery_stub.go`. Замена определяется по
+идентичности HTTP-транспорта, а не по точности часов. Исходный контекст и
+выбранная пользователем DNS-маршрутизация сохраняются.
+
+Проверки: пакеты XHTTP/route/DNS и их vet прошли; новые HTTP/2-тесты проверяют
+полное закрытие, повторное использование клиента, первый поток после reset,
+молчащего/принимающего соседа, поздний dial, конкурирующую регистрацию сокета,
+DoH retry и предел caller deadline. Android policy/scheduler и существующие
+DNS/managed-config тесты прошли: обычный flavor — 128/128, legacy — 36/36.
+Оба AAR и release-flavor собраны для четырёх ABI; подпись проверена у всех
+10 APK. Копии AAR в приложении побайтно совпадают с результатами сборки;
+APK проверены на наличие изменений Android, XHTTP/DNS и итоговой версии ядра.
+Все восемь native libraries в APK побайтно совпали с AAR после штатного
+`llvm-strip`; различия исходных SHA объясняются удалением отладочных символов.
+Область spotless ограничена тремя изменёнными Kotlin-файлами.
+
+Сборки CLI с каноническими тегами Makefile.lx и без тегов прошли; Reality,
+obfs и plain-XHTTP конфиги принимаются tagged-бинарём, plain-XHTTP отвергается
+untagged-бинарём. Общий `go build ./...` потребовал read-only overlay,
+исключающий Go-хелперы из игнорируемого `build/`, и `-buildvcs=false` в sandbox.
+Исходные helper-файлы и глобальная конфигурация Git не изменялись. AAR
+пересобраны с временным process-local safe.directory, поэтому версия ядра
+`1.14.0-lx.24-64bceb45f`, а не fallback `unknown`.
+Race-прогон не дошёл до тестов: Windows C compiler `gcc` отсутствует в PATH.
+
+Основной артефакт проверки: `D:/TarnVpn/builds/xhttp-recovery-fix-20261001/`.
+Без подключённого ADB-устройства не подтверждены задержки телефона, реальные
+Xray/REALITY, Wi-Fi/NAT, поведение приложений и работа энергосбережения.
+Таймауты рукопожатия, общий HTTP/2 ping и протокольные параметры не менялись.
+Единственное новое касание upstream Go — маркеры в `dns/transport/https.go`;
+Go dependencies и build wiring не менялись.
+
+
+## Кандидат точечного retirement — 2026-10-19
+
+Один timeout заменяет только отказавший элемент. Идентичность под refreshMu объединяет конкурентные ошибки и защищает новый пул от старых timeout. Quiet healthy siblings сохраняются, независимые отказы обрабатываются отдельно. Полный reset и socket ownership сохранены; история решения — HISTORY.md.
+
+Проверены 55 Go-тестов, vet, tagged CLI/config и untagged build; 255 Android unit-тестов; обе release-сборки и lintVital; восемь native payload и подписи v1/v2/v3 с прежним сертификатом. Alpha.67/code719/minSdk23/21. Новых upstream-правок/deps/wiring нет.
+
+Отчёт и команды: D:/TarnVpn/output/youtube-buffering-candidate-20261019/REPORT.md. Физическая проверка остаётся открытой. Установка и публикация не выполнялись.
+
+## Общая надёжность XHTTP — 2026-10-21
+
+В новом handshake_budget.go ожидание вызывающего ограничено независимо от реакции HTTP/2 RoundTrip на отмену. Unbuffered handoff определяет владельца ответа; поздние, отклонённые и ненужные packet-up ack тела очищаются отдельно. Warm-state снимается после последнего physical socket, без отмены статуса другого активного сокета. Lifecycle установленных upload и освобождение protocol Write сопровождаются в существующей задаче 050.
+
+Новый handshake_observation.go добавляет request ID через WarnContext, stable member/generation и httptrace-этапы TCP/HTTP2/headers/ответа. URL/credentials/payload в WARN не добавляются. Ошибка больше не объявляет непроверенную причину stale pooled connection. Размер пула 8 и budgets 10/15/60s сохранены; blanket ping и повтор уже переданных stream-one данных не введены.
+
+Проверены 70 Go-тестов, vet, tagged CLI/config и полный untagged build; 255 Android unit-тестов, обе release-сборки и lintVital; оба AAR и восемь native payload в APK после стандартного strip; подписи v1/v2/v3 прежним сертификатом alpha.67, package/version/minSdk и SHA-256. Race-прогон не стартовал из-за отсутствия gcc; установленный APK на телефоне не проверен. Новых upstream-правок, deps или build wiring нет; APK alpha.68/code720 сохранены локально, без публикации.
+
+Подробный анализ, пределы доказательств, источники и команды: D:/TarnVpn/output/xhttp-general-reliability-20261021/REPORT.md. Причина пользовательской задержки 6.099s остаётся открытой; эти исправления подтверждены локальными воспроизведениями общих дефектов клиента, а не объявлены доказанным устранением любого сетевого зависания.

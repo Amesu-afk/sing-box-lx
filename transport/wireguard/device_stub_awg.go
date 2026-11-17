@@ -36,7 +36,6 @@ func awgKeepaliveSpec(keepalive option.AWGRange) (string, error) {
 	}
 	return spec, nil
 }
-
 // awgDecoyFunc (no-AWG build): there is no masquerade generator, so no dynamic
 // decoy; awgIpcLines already rejected any AWG field.
 func awgDecoyFunc(o option.AmneziaWGOptions, logger log.ContextLogger) device.DecoyPacketsFunc {
