@@ -1,14 +1,11 @@
 version: 2
 
+# The core is a downstream copy with custom patches and a pending upstream sync
+# (issue #4). Go version bumps are paused until that merge; Dependabot alerts
+# and security updates remain enabled and will still open targeted PRs.
 updates:
-  - package-ecosystem: "gomod"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 2
