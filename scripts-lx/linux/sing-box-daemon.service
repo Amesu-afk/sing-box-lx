@@ -1,0 +1,19 @@
+[Unit]
+Description=sing-box desktop daemon
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=sing-box-daemon
+WorkingDirectory=/var/lib/sing-box-daemon
+ExecStart=/usr/local/bin/sing-box-daemon run --working-directory=/var/lib/sing-box-daemon
+Restart=on-failure
+RestartSec=2s
+LimitNOFILE=infinity
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
