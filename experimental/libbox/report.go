@@ -70,6 +70,14 @@ func copyConfigSnapshot(destPath string) {
 	if len(bytes.TrimSpace(content)) == 0 {
 		return
 	}
+	// lx:begin report-redaction
+	content, err = redactConfigCredentials(content)
+	if err != nil {
+		// A report is diagnostic; an unparseable snapshot must not bypass
+		// redaction and carry raw credentials into the archive.
+		return
+	}
+	// lx:end
 	writeReportFile(destPath, "configuration.json", content)
 }
 
