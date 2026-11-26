@@ -34,4 +34,7 @@ func TestSchemaGeneratesWithLXTypes(t *testing.T) {
 	if bytes.Contains(content, []byte(`"const": "chain"`)) {
 		require.Contains(t, root.Defs, "ChainRewrite", "ChainRewrite must describe itself for the chain outbound")
 	}
+	if bytes.Contains(content, []byte(`"const": "xhttp"`)) {
+		require.Contains(t, root.Defs, "V2RayXHTTPDownloadOptions", "XHTTP download settings must describe their custom JSON type")
+	}
 }

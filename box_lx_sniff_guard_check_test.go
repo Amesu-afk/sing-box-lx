@@ -3,6 +3,7 @@ package box_test
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -86,7 +87,8 @@ func methodNames(t reflect.Type) []string {
 // lx: SPEC 060 — a full block loads; every covered node comes out wrapped
 // with exactly the method set of its protocol type, the rest unwrapped.
 func TestSniffGuardCheckFullBlock(t *testing.T) {
-	ctx, _, err := sniffGuardCheck(t, sniffGuardConfig(sniffGuardFullBlock, `, "experimental": {"cache_file": {"enabled": true, "path": "`+t.TempDir()+`/cache.db"}}`))
+	cachePath := filepath.ToSlash(filepath.Join(t.TempDir(), "cache.db"))
+	ctx, _, err := sniffGuardCheck(t, sniffGuardConfig(sniffGuardFullBlock, `, "experimental": {"cache_file": {"enabled": true, "path": "`+cachePath+`"}}`))
 	require.NoError(t, err)
 	manager := service.FromContext[adapter.OutboundManager](ctx)
 	require.NotNil(t, manager)

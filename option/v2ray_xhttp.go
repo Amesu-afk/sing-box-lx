@@ -2,7 +2,9 @@ package option
 
 import (
 	"encoding/json"
+	"reflect"
 
+	"github.com/sagernet/sing-box/schema"
 	"github.com/sagernet/sing/common/json/badoption"
 )
 
@@ -240,6 +242,24 @@ type V2RayXHTTPDownloadOptions struct {
 	Headers  badoption.HTTPHeader `json:"headers,omitempty"`
 }
 
+// DescribeSchema maps both accepted download-settings shapes. The type has a
+// custom UnmarshalJSON, so the generator cannot infer its fields on its own.
+func (o V2RayXHTTPDownloadOptions) DescribeSchema(builder schema.Builder) (*schema.Node, error) {
+	return builder.Define("V2RayXHTTPDownloadOptions", func() (*schema.Node, error) {
+		node := schema.LooseObject()
+		if err := builder.FlattenStruct(node, reflect.TypeFor[V2RayXHTTPDownloadOptions]()); err != nil {
+			return nil, err
+		}
+		nested, err := builder.Describe(reflect.TypeFor[V2RayXHTTPDownloadXHTTPSettings]())
+		if err != nil {
+			return nil, err
+		}
+		node.Properties.Put("xhttp_settings", nested)
+		node.Properties.Put("xhttpSettings", nested)
+		return node, nil
+	})
+}
+
 func (o *V2RayXHTTPDownloadOptions) UnmarshalJSON(content []byte) error {
 	var raw struct {
 		Address       string                           `json:"address"`
@@ -282,4 +302,3 @@ func (o *V2RayXHTTPDownloadOptions) UnmarshalJSON(content []byte) error {
 	}
 	return nil
 }
-
