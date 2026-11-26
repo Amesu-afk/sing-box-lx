@@ -1,10 +1,10 @@
 module github.com/sagernet/sing-box
 
 // lx: go 1.26.0 while upstream/stable has 1.25.5 — golang.org/x/net v0.62.0
-// requires it. x/net v0.62.0, x/crypto v0.58.0 and grpc v1.83.2 are ahead of
-// upstream for security fixes (2026-11-02: HTTP/2 server DoS, html quadratic
-// parse, ssh channel deadlocks). On a sync take upstream's pins once they are
-// not older. All builds use go.version (go1.26.10), Win7 included.
+// requires it. x/net v0.62.0, x/crypto v0.58.1 and grpc v1.83.2 are ahead of
+// upstream for security fixes (HTTP/2 server DoS, html quadratic parse, ssh
+// channel deadlocks). On a sync take upstream's pins once they are not older.
+// All builds use go.version (go1.26.11), Win7 included.
 go 1.26.0
 
 require (
@@ -18,11 +18,11 @@ require (
 	github.com/cretz/bine v0.2.0
 	github.com/database64128/tfo-go/v2 v2.3.2
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-chi/render v1.0.3
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/gofrs/uuid/v5 v5.5.1
-	github.com/insomniacslk/dhcp v0.0.0-20260220084031-5adc3eb26f91
+	github.com/insomniacslk/dhcp v0.0.0-20260719225207-c76316d4aa82
 	github.com/jsimonetti/rtnetlink v1.4.1
 	github.com/keybase/go-keychain v0.0.1
 	github.com/libdns/acmedns v0.5.0
@@ -74,7 +74,7 @@ require (
 	github.com/vishvananda/netns v0.0.5
 	go.uber.org/zap v1.27.1
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.58.1-0.20261009181718-2f1f834330b2
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f
 	golang.org/x/mod v0.41.0
 	golang.org/x/net v0.62.0
@@ -97,7 +97,7 @@ require (
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa // indirect
 	github.com/anchore/go-lzo v0.1.0 // indirect
-	github.com/andybalholm/brotli v1.1.0 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be // indirect
 	github.com/axiomhq/hyperloglog v0.0.0-20240319100328-84253e514e02 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
@@ -132,7 +132,7 @@ require (
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/reedsolomon v1.14.0 // indirect
 	github.com/koron/go-ssdp v0.0.4 // indirect
@@ -161,7 +161,6 @@ require (
 	github.com/pion/webrtc/v4 v4.2.15 // indirect
 	github.com/pires/go-proxyproto v0.8.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/sagernet/cronet-go/lib/android_386 v0.0.0-20261103043047-3aac4ed44c5c // indirect
@@ -296,3 +295,18 @@ replace github.com/metacubex/utls => ./submodules/utls
 replace github.com/openlibrecommunity/olcrtc => ./third_party/olcrtc_legacy
 
 // lx:end olcrtc-manager-compat
+
+// lx:begin cronet-go12611
+// Go 1.26.11 rejects the upstream -l:libcronet.a cgo directive. These local
+// modules differ only by using the equivalent -lcronet spelling. The build tool
+// copies the pinned static libraries in before Android binds and removes them
+// afterwards; the 71 MB archives are not committed.
+replace github.com/sagernet/cronet-go/lib/android_arm => ./third_party/cronet-go-android/arm
+
+replace github.com/sagernet/cronet-go/lib/android_arm64 => ./third_party/cronet-go-android/arm64
+
+replace github.com/sagernet/cronet-go/lib/android_386 => ./third_party/cronet-go-android/386
+
+replace github.com/sagernet/cronet-go/lib/android_amd64 => ./third_party/cronet-go-android/amd64
+
+// lx:end cronet-go12611
