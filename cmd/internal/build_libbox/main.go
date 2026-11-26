@@ -38,7 +38,9 @@ func main() {
 
 	switch target {
 	case "android":
-		buildAndroid()
+		if err := buildAndroid(); err != nil {
+			log.Fatal(err)
+		}
 	case "apple":
 		buildApple()
 	}
@@ -210,7 +212,7 @@ func newGomobileCommand(args []string) *exec.Cmd {
 	return exec.Command(build_shared.GoBinPath+"/gomobile", args...)
 }
 
-func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
+func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) error {
 	args := []string{
 		"bind",
 		"-v",
@@ -238,27 +240,31 @@ func buildAndroidVariant(config AndroidBuildConfig, bindTarget string) {
 	command := newGomobileCommand(args)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	err := command.Run()
-	if err != nil {
-		log.Fatal(err)
+	if err := command.Run(); err != nil {
+		return err
 	}
 
 	copyPath := filepath.Join("..", "sing-box-for-android", "app", "libs")
 	if rw.IsDir(copyPath) {
 		copyPath, _ = filepath.Abs(copyPath)
-		err = rw.CopyFile(config.OutputName, filepath.Join(copyPath, config.OutputName))
-		if err != nil {
-			log.Fatal(err)
+		if err := rw.CopyFile(config.OutputName, filepath.Join(copyPath, config.OutputName)); err != nil {
+			return err
 		}
 		log.Info("copied ", config.OutputName, " to ", copyPath)
 	}
+	return nil
 }
 
-func buildAndroid() {
+func buildAndroid() error {
 	build_shared.FindSDK()
 	checkJavaVersion()
 
 	bindTarget := getAndroidBindTarget()
+	cleanupCronetLibraries, err := withCronetLibraries(bindTarget)
+	if err != nil {
+		return err
+	}
+	defer cleanupCronetLibraries()
 
 	// lx:begin tarnvpn-android-api
 	// TarnVPN's main flavor supports Android 6 (API 23). Upstream raised its
@@ -272,11 +278,13 @@ func buildAndroid() {
 	if debugEnabled {
 		mainTags = append(mainTags, debugTags...)
 	}
-	buildAndroidVariant(AndroidBuildConfig{
+	if err := buildAndroidVariant(AndroidBuildConfig{
 		AndroidAPI: 23,
 		OutputName: "libbox.aar",
 		Tags:       mainTags,
-	}, bindTarget)
+	}, bindTarget); err != nil {
+		return err
+	}
 
 	// Build legacy variant (SDK 21, no naive outbound)
 	legacyTags := filterTags(sharedTags, "with_naive_outbound")
@@ -284,11 +292,14 @@ func buildAndroid() {
 	if debugEnabled {
 		legacyTags = append(legacyTags, debugTags...)
 	}
-	buildAndroidVariant(AndroidBuildConfig{
+	if err := buildAndroidVariant(AndroidBuildConfig{
 		AndroidAPI: 21,
 		OutputName: "libbox-legacy.aar",
 		Tags:       legacyTags,
-	}, bindTarget)
+	}, bindTarget); err != nil {
+		return err
+	}
+	return nil
 }
 
 func buildApple() {
