@@ -233,7 +233,11 @@ func daemonConfigPath(stateDir string) string {
 // unreadable/corrupt file IS an error: silently ignoring it would boot the
 // daemon with a different address/secret than the operator configured.
 func LoadDaemonConfig(stateDir string) (DaemonConfig, bool, error) {
-	content, found, err := readOptional(daemonConfigPath(stateDir))
+	configPath := daemonConfigPath(stateDir)
+	if err := securePrivateFile(configPath); err != nil {
+		return DaemonConfig{}, false, E.Cause(err, "protect ", configPath)
+	}
+	content, found, err := readOptional(configPath)
 	if err != nil || !found {
 		return DaemonConfig{}, false, err
 	}
@@ -250,8 +254,9 @@ func LoadDaemonConfig(stateDir string) (DaemonConfig, bool, error) {
 	return config, true, nil
 }
 
-// SaveDaemonConfig persists daemon.json atomically with 0600 (the file holds
-// the Bearer secret), creating the state directory (0700) when needed.
+// SaveDaemonConfig persists daemon.json atomically with 0600 on Unix and a
+// private DACL on Windows (the file holds the Bearer secret), creating the
+// state directory privately when needed.
 func SaveDaemonConfig(stateDir string, config DaemonConfig) error {
 	stateStore, err := newStore(stateDir)
 	if err != nil {

@@ -23,7 +23,7 @@ type store struct {
 }
 
 func newStore(dir string) (*store, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return nil, E.Cause(err, "create state directory")
 	}
 	return &store{dir: dir}, nil
@@ -35,26 +35,7 @@ func (s *store) pendingPath() string   { return filepath.Join(s.dir, "pending") 
 func (s *store) runStatePath() string  { return filepath.Join(s.dir, "was_running") }
 
 func (s *store) writeAtomic(path string, content []byte) error {
-	temp, err := os.CreateTemp(s.dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	if _, err = temp.Write(content); err == nil {
-		err = temp.Sync()
-	}
-	if closeErr := temp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		os.Remove(tempName)
-		return err
-	}
-	if err = os.Rename(tempName, path); err != nil {
-		os.Remove(tempName)
-		return err
-	}
-	return nil
+	return writePrivateAtomic(s.dir, path, content)
 }
 
 // readOptional returns (content, true, nil) when the file exists, ("", false,

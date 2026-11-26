@@ -90,6 +90,9 @@ func generateIdentity(commonName string, timeNow time.Time) (*identity, error) {
 func loadOrCreateServerIdentity(dir string, timeNow time.Time) (*identity, error) {
 	certPath := filepath.Join(dir, "server_cert.pem")
 	keyPath := filepath.Join(dir, "server_key.pem")
+	if err := securePrivateFile(keyPath); err != nil {
+		return nil, E.Cause(err, "protect server key")
+	}
 	certPEM, err := os.ReadFile(certPath)
 	if err == nil {
 		keyPEM, keyErr := os.ReadFile(keyPath)
@@ -110,7 +113,10 @@ func loadOrCreateServerIdentity(dir string, timeNow time.Time) (*identity, error
 	if err != nil {
 		return nil, E.Cause(err, "generate server identity")
 	}
-	if err = os.WriteFile(keyPath, created.keyPEM, 0o600); err != nil {
+	if err = ensurePrivateDir(dir); err != nil {
+		return nil, E.Cause(err, "prepare server identity directory")
+	}
+	if err = writePrivateAtomic(dir, keyPath, created.keyPEM); err != nil {
 		return nil, E.Cause(err, "persist server key")
 	}
 	if err = os.WriteFile(certPath, created.certPEM, 0o644); err != nil {

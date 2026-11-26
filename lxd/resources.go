@@ -45,7 +45,7 @@ func isBadResourceName(err error) bool {
 func badName(message string) error { return badResourceName{E.New(message)} }
 
 func newResourceStore(dir string) (*resourceStore, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := ensurePrivateDir(dir); err != nil {
 		return nil, E.Cause(err, "create resources directory")
 	}
 	return &resourceStore{dir: dir}, nil
@@ -85,26 +85,7 @@ func (rs *resourceStore) pathOf(name string) string {
 // fsync'd and renamed — a rename within one directory is atomic, so a reader
 // (or a crash) never sees a partial resource.
 func (rs *resourceStore) writeAtomic(path string, content []byte) error {
-	temp, err := os.CreateTemp(rs.dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tempName := temp.Name()
-	if _, err = temp.Write(content); err == nil {
-		err = temp.Sync()
-	}
-	if closeErr := temp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		os.Remove(tempName)
-		return err
-	}
-	if err = os.Rename(tempName, path); err != nil {
-		os.Remove(tempName)
-		return err
-	}
-	return nil
+	return writePrivateAtomic(rs.dir, path, content)
 }
 
 // Put stores content under name, overwriting any prior version atomically.
